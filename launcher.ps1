@@ -48,21 +48,27 @@ $frameGenBackendKeys = 'dlss', 'fsr'
 # emulator, where the game changes it too (the button + R3, then the new one).
 # The buttons by the names hotkeys.ini takes, and where each is on a DualSense.
 $hotkeyButtonInfo = [ordered]@{
-	Create = 'Create (small button left of the touchpad)'; PS = 'PS (logo button; Steam may take it)'
-	Touchpad = 'Touchpad (press the pad down)'; Mute = 'Mute (microphone button below PS)'
-	Options = 'Options (small button right of the touchpad)'; Cross = 'Cross'; Circle = 'Circle'; Square = 'Square'
-	Triangle = 'Triangle'; L1 = 'L1'; R1 = 'R1'; L3 = 'L3 (press the left stick)'; R3 = 'R3 (press the right stick)'
-	Up = 'D-pad up'; Down = 'D-pad down'; Left = 'D-pad left'; Right = 'D-pad right'
-	Paddle1 = 'Paddle1 (Edge back paddle)'; Paddle2 = 'Paddle2 (Edge back paddle)'; Paddle3 = 'Paddle3'; Paddle4 = 'Paddle4' }
+	Create = 'Create (Xbox: Back / View, small left button)'; PS = 'PS (Xbox: Guide; Steam or Game Bar may take it)'
+	Options = 'Options (Xbox: Start / Menu, small right button)'; Touchpad = 'Touchpad (PlayStation pads only)'
+	Mute = 'Mute (DualSense only)'; Cross = 'Cross (Xbox: A)'; Circle = 'Circle (Xbox: B)'; Square = 'Square (Xbox: X)'
+	Triangle = 'Triangle (Xbox: Y)'; L1 = 'L1 (Xbox: LB)'; R1 = 'R1 (Xbox: RB)'; L3 = 'L3 (press the left stick)'
+	R3 = 'R3 (press the right stick)'; Up = 'Up (D-pad)'; Down = 'Down (D-pad)'; Left = 'Left (D-pad)'; Right = 'Right (D-pad)'
+	Paddle1 = 'Paddle1 (back paddle)'; Paddle2 = 'Paddle2 (back paddle)'; Paddle3 = 'Paddle3 (back paddle)'
+	Paddle4 = 'Paddle4 (back paddle)' }
+# A button's name (hotkeys.ini's) from its label in a list; '' for none.
+function Get-HotkeyNameFromText([string]$text) {
+	foreach ($name in $hotkeyButtonInfo.Keys) { if ($hotkeyButtonInfo[$name] -eq $text) { return $name } }
+	''
+}
 # The buttons offered as the hold button (ones the game does not need are best).
-$hotkeyButtons = 'Create', 'PS', 'Touchpad', 'Mute', 'L3', 'R3', 'L1', 'R1', 'Paddle1', 'Paddle2'
+$hotkeyButtons = 'Create', 'PS', 'L3', 'R3', 'L1', 'R1', 'Touchpad', 'Mute', 'Paddle1', 'Paddle2'
 # What each hotkey does, by its hotkeys.ini key, and its default button.
 $hotkeyActions = [ordered]@{
 	Quit = 'Quit the game (hold 1 second)'; Fullscreen = 'Full screen on / off'; Pause = 'Pause / resume'
 	Overlay = 'Performance overlay (off, frame rate, detailed)'; FrameGen = 'Frame generation on / off'
 	SharpnessUp = 'FSR sharpness +'; SharpnessDown = 'FSR sharpness -'; Help = 'Show the hotkeys on screen'
 	RebindModifier = 'Choose a new hold button in the game' }
-$hotkeyDefaults = @{ Modifier = 'Create'; Quit = 'Options'; Fullscreen = 'Triangle'; Pause = 'Square'; Overlay = 'Circle'
+$hotkeyDefaults = @{ Modifier = 'Create'; QuitChord = ''; Quit = 'Options'; Fullscreen = 'Triangle'; Pause = 'Square'; Overlay = 'Circle'
 	FrameGen = 'Cross'; SharpnessUp = 'Up'; SharpnessDown = 'Down'; Help = 'L3'; RebindModifier = 'R3' }
 # The emulator's own panel at the top right of the game image (KYTY_FPS_HUD 0, 1, 2).
 $overlays = 'Off', 'Frame rate', 'Detailed'
@@ -194,7 +200,10 @@ function Read-Hotkeys {
 		foreach ($line in Get-Content -LiteralPath $hotkeysPath) {
 			if ($line -match '^\s*([A-Za-z]+)\s*=\s*([^#;]*)') {
 				$known = @($map.Keys) | Where-Object { $_ -ieq $Matches[1] } | Select-Object -First 1
-				if ($known) { $map[$known] = ConvertTo-HotkeyName $Matches[2].Trim() }
+				if ($known -eq 'QuitChord') {
+					$map.QuitChord = (@($Matches[2].Split('+') | ForEach-Object { ConvertTo-HotkeyName $_.Trim() } | Where-Object { $_ }) |
+						Select-Object -First 2) -join '+'
+				} elseif ($known) { $map[$known] = ConvertTo-HotkeyName $Matches[2].Trim() }
 			}
 		}
 	}
@@ -206,13 +215,24 @@ function Get-HotkeyButton { (Read-Hotkeys).Modifier }
 function Save-Hotkeys($map) {
 	try {
 		$lines = @('# KytyPS5 controller hotkeys: hold Modifier, then press a button. Empty: unbound.',
-			'# In the game, Modifier + R3 then a button changes Modifier (saved here).', "Modifier=$($map.Modifier)")
+			'# In the game, Modifier + R3 then a button changes Modifier (saved here).',
+			'# QuitChord: one button (held 2 s) or two (held together 1 s) that quit the game; empty: none.',
+			"Modifier=$($map.Modifier)", "QuitChord=$($map.QuitChord)")
 		foreach ($key in $hotkeyActions.Keys) {
 			$button = if ($map[$key] -eq $map.Modifier) { '' } else { $map[$key] }
 			$lines += "$key=$button"
 		}
 		Set-Content -LiteralPath $hotkeysPath -Value $lines -Encoding ASCII
 	} catch {}
+}
+# A button by its PlayStation name, with the Xbox one: 'Cross (A)'.
+$xboxNames = @{ Create = 'View'; Options = 'Menu'; Cross = 'A'; Circle = 'B'; Square = 'X'; Triangle = 'Y'; L1 = 'LB'; R1 = 'RB'; PS = 'Guide' }
+function Get-ButtonText([string]$name) { if ($xboxNames[$name]) { "$name ($($xboxNames[$name]))" } else { $name } }
+# The recorded quit shortcut in words.
+function Get-QuitChordText([string]$chord) {
+	$buttons = @($chord.Split('+') | Where-Object { $_ } | ForEach-Object { Get-ButtonText $_ })
+	if ($buttons.Count -ge 2) { "hold $($buttons[0]) + $($buttons[1]) together for 1 second" }
+	elseif ($buttons.Count -eq 1) { "hold $($buttons[0]) for 2 seconds" } else { '' }
 }
 # The hotkeys in words, with the buttons chosen.
 function Get-HotkeySummary($map) {
@@ -221,7 +241,8 @@ function Get-HotkeySummary($map) {
 	foreach ($key in $hotkeyActions.Keys) {
 		if ($map[$key] -and $map[$key] -ne $hold) { $parts += "  $hold + $($map[$key]):  $($hotkeyActions[$key])" }
 	}
-	"Hold $hold, then press:`n" + ($parts -join "`n")
+	$chord = if ($map.QuitChord) { "`nQuit shortcut: " + (Get-QuitChordText $map.QuitChord) } else { '' }
+	"Hold $hold, then press:`n" + ($parts -join "`n") + $chord
 }
 
 function Get-PlayCommand {
@@ -294,6 +315,63 @@ if ($DryRun) {
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type -Namespace KytyLauncher -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
 [KytyLauncher.Dpi]::SetProcessDPIAware() | Out-Null
+# Gamepads through XInput (Xbox-style controllers, and others through Steam Input or DS4Windows): the launcher's
+# navigation and the quit shortcut's recorder.
+Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+namespace KytyLauncher {
+public static class Pad {
+	[StructLayout(LayoutKind.Sequential)]
+	public struct State { public uint Packet; public ushort Buttons; public byte LeftTrigger, RightTrigger; public short LX, LY, RX, RY; }
+	[DllImport("xinput1_4.dll", EntryPoint = "XInputGetState")] static extern uint Get14(uint index, out State state);
+	[DllImport("xinput9_1_0.dll", EntryPoint = "XInputGetState")] static extern uint Get910(uint index, out State state);
+	[DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+	[DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+	[DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
+	static int dll; // 0: xinput1_4, 1: xinput9_1_0, 2: none
+	public static bool Available { get { if (dll < 2) { Read(false); } return dll < 2; } }
+	static bool Get(uint index, out State state) {
+		state = new State();
+		while (dll < 2) {
+			try { return (dll == 0 ? Get14(index, out state) : Get910(index, out state)) == 0; }
+			catch (Exception) { dll++; } // not there (or not loadable): the next, then none
+		}
+		return false;
+	}
+	// The buttons held on every connected pad (XINPUT_GAMEPAD_* bits), with the left stick as the D-pad's when `stick`.
+	public static int Read(bool stick) {
+		int all = 0;
+		for (uint index = 0; index < 4; index++) {
+			State state;
+			if (!Get(index, out state)) { continue; }
+			int buttons = state.Buttons;
+			if (stick) {
+				if (state.LY > 16000) { buttons |= 1; }
+				if (state.LY < -16000) { buttons |= 2; }
+				if (state.LX < -16000) { buttons |= 4; }
+				if (state.LX > 16000) { buttons |= 8; }
+			}
+			all |= buttons;
+		}
+		return all;
+	}
+	// A window of this process is in front (XInput reads the pads whatever window has the focus).
+	public static bool InFront() {
+		uint process;
+		GetWindowThreadProcessId(GetForegroundWindow(), out process);
+		return process == (uint)Process.GetCurrentProcess().Id;
+	}
+	// Shows the focus rectangle (Windows hides it until the keyboard is used).
+	public static void ShowFocus(IntPtr window) { SendMessage(window, 0x127, (IntPtr)0x10002, IntPtr.Zero); }
+}
+}
+'@
+# XInput's bits by hotkeys.ini's names (the Guide button is not reported).
+$padBits = [ordered]@{ Up = 0x1; Down = 0x2; Left = 0x4; Right = 0x8; Options = 0x10; Create = 0x20; L3 = 0x40; R3 = 0x80
+	L1 = 0x100; R1 = 0x200; Cross = 0x1000; Circle = 0x2000; Square = 0x4000; Triangle = 0x8000 }
+function ConvertFrom-PadBits([int]$bits) { @($padBits.Keys | Where-Object { $bits -band $padBits[$_] }) }
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $form = New-Object System.Windows.Forms.Form -Property @{
@@ -626,7 +704,7 @@ function Set-HotkeyCombo([string]$selected) {
 	if ($hotkey.SelectedIndex -lt 0) { $hotkey.SelectedIndex = 0 }
 }
 # The hold button chosen in the list (its name: the first word).
-function Get-HotkeyComboButton { ([string]$hotkey.SelectedItem -split ' ')[0] }
+function Get-HotkeyComboButton { Get-HotkeyNameFromText ([string]$hotkey.SelectedItem) }
 Set-HotkeyCombo $script:hotkeyMap.Modifier
 $hotkeyEdit = New-Object System.Windows.Forms.Button -Property @{ Text = 'Hotkeys...'; AutoSize = $true }
 $hotkeyNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '0,2,0,6' }
@@ -634,11 +712,14 @@ $hotkeyTips = New-Object System.Windows.Forms.ToolTip -Property @{ AutoPopDelay 
 function Update-HotkeyNote {
 	$map = $script:hotkeyMap
 	$hold = $map.Modifier
-	$quit = if ($map.Quit -and $map.Quit -ne $hold) { "Hold $hold, then also press $($map.Quit) for 1 second to quit the game." } else { 'Quit has no button (Hotkeys...).' }
+	$quit = if ($map.QuitChord) { "To quit the game: $(Get-QuitChordText $map.QuitChord)." }
+		elseif ($map.Quit -and $map.Quit -ne $hold) { "To quit the game: hold $hold, then also press $($map.Quit) for 1 second." }
+		else { 'Quit has no button (Hotkeys...).' }
 	$help = if ($map.Help -and $map.Help -ne $hold) { " $hold + $($map.Help) lists every hotkey on screen." } else { '' }
 	$hotkeyNote.Text = $quit + $help
 	$hotkeyTips.SetToolTip($hotkey, (Get-HotkeySummary $map))
 	$hotkeyTips.SetToolTip($hotkeyNote, (Get-HotkeySummary $map))
+	Set-QuitModeCombo
 }
 $hotkey.Add_SelectedIndexChanged({
 	$script:hotkeyMap.Modifier = Get-HotkeyComboButton
@@ -682,8 +763,9 @@ $hotkeyEdit.Add_Click({
 	$map = @{}
 	foreach ($key in $combos.Keys) {
 		$text = [string]$combos[$key].SelectedItem
-		$map[$key] = if ($text -eq '(none)') { '' } else { ($text -split ' ')[0] }
+		$map[$key] = if ($text -eq '(none)') { '' } else { Get-HotkeyNameFromText $text }
 	}
+	$map.QuitChord = $script:hotkeyMap.QuitChord
 	# (Two hotkeys on one button: the first keeps it.)
 	$used = @{}
 	foreach ($key in $hotkeyActions.Keys) {
@@ -700,8 +782,113 @@ $hotkeyEdit.Add_Click({
 	Set-HotkeyCombo $map.Modifier
 	Update-HotkeyNote
 })
+# Quitting the game: the hold button + the quit hotkey, or buttons recorded here (QuitChord in hotkeys.ini: one button
+# held 2 seconds, or two held together 1 second; for controllers without the button the hotkeys use).
+$quitMode = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 290 }
+$quitRecord = New-Object System.Windows.Forms.Button -Property @{ Text = 'Record...'; AutoSize = $true }
+$script:quitModeUpdating = $false
+function Set-QuitModeCombo {
+	$script:quitModeUpdating = $true
+	$map = $script:hotkeyMap
+	$quitMode.Items.Clear()
+	$first = if ($map.Quit -and $map.Quit -ne $map.Modifier) { "Hold $($map.Modifier) + $($map.Quit) (1 second)" } else { 'The hold button + the quit hotkey (none set)' }
+	$custom = if ($map.QuitChord) { 'Custom: ' + (@($map.QuitChord.Split('+') | ForEach-Object { Get-ButtonText $_ }) -join ' + ') } else { 'Custom: record the buttons...' }
+	[void]$quitMode.Items.AddRange(@($first, $custom))
+	$quitMode.SelectedIndex = if ($map.QuitChord) { 1 } else { 0 }
+	$quitRecord.Enabled = [bool]$map.QuitChord
+	$script:quitModeUpdating = $false
+}
+# Saves the quit shortcut ('' for none) with the hold button chosen here.
+function Save-QuitChord([string]$chord) {
+	$map = Read-Hotkeys
+	$map.Modifier = $script:hotkeyMap.Modifier
+	$map.QuitChord = $chord
+	Save-Hotkeys $map
+	$script:hotkeyMap = $map
+}
+# The recorder: the buttons held together on the controller (1 or 2), or $null when cancelled.
+function Show-QuitRecorder {
+	if (-not [KytyLauncher.Pad]::Available) {
+		[void][System.Windows.Forms.MessageBox]::Show($form, 'No XInput on this PC: the launcher cannot read the controller.', 'Quit shortcut')
+		return $null
+	}
+	$dialog = New-Object System.Windows.Forms.Form -Property @{ Text = 'Record the quit shortcut'; FormBorderStyle = 'FixedDialog'
+		MaximizeBox = $false; MinimizeBox = $false; StartPosition = 'CenterParent'; AutoSize = $true; AutoSizeMode = 'GrowAndShrink'
+		Font = $form.Font; Padding = '12,12,12,8' }
+	$panel = New-Object System.Windows.Forms.FlowLayoutPanel -Property @{ FlowDirection = 'TopDown'; AutoSize = $true; WrapContents = $false }
+	$info = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; MaximumSize = '460,0'
+		Text = ("On the controller, press one button or two buttons together, then let go.`n`n" +
+			"In the game, holding the two together for 1 second quits; one button alone, held for 2 seconds.`n" +
+			'The game still sees these buttons, so choose ones you do not hold while playing: View + Menu (Back + Start), or L3 + R3.') }
+	$script:recLive = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; MaximumSize = '460,0'; Margin = '0,12,0,12'
+		Font = New-Object System.Drawing.Font('Segoe UI', 12, [System.Drawing.FontStyle]::Bold); Text = 'Let go of every button...' }
+	$row = New-Object System.Windows.Forms.FlowLayoutPanel -Property @{ AutoSize = $true }
+	$script:recSave = New-Object System.Windows.Forms.Button -Property @{ Text = 'Save'; DialogResult = 'OK'; AutoSize = $true; Enabled = $false }
+	$again = New-Object System.Windows.Forms.Button -Property @{ Text = 'Record again'; AutoSize = $true }
+	$cancel = New-Object System.Windows.Forms.Button -Property @{ Text = 'Cancel'; DialogResult = 'Cancel'; AutoSize = $true }
+	$row.Controls.AddRange(@($script:recSave, $again, $cancel))
+	$panel.Controls.AddRange(@($info, $script:recLive, $row))
+	$dialog.Controls.Add($panel)
+	$dialog.CancelButton = $cancel
+	$script:recState = @{ phase = 'release'; order = @(); chord = '' }
+	# Each gamepad tick while recording (the navigation stands aside).
+	$script:recRecorder = {
+		param([int]$raw)
+		$state = $script:recState
+		$held = ConvertFrom-PadBits $raw
+		if ($state.phase -eq 'release') {
+			if (-not $held) { $state.phase = 'wait'; $script:recLive.Text = 'Press the button(s) now...' }
+			return
+		}
+		if ($held) {
+			$state.phase = 'hold'
+			foreach ($name in $held) { if ($state.order -notcontains $name) { $state.order += $name } }
+			$script:recLive.Text = (@($state.order | ForEach-Object { Get-ButtonText $_ }) -join ' + ')
+			return
+		}
+		if ($state.phase -eq 'wait' -or -not $state.order) { return }
+		# Every button let go: done.
+		$chord = @($state.order | Select-Object -First 2)
+		$state.chord = $chord -join '+'
+		$state.phase = 'done'
+		$script:padRecorder = $null
+		$text = 'Recorded: ' + (@($chord | ForEach-Object { Get-ButtonText $_ }) -join ' + ')
+		$text += if ($chord.Count -ge 2) { "`nHold them together for 1 second to quit." } else { "`nHold it for 2 seconds to quit." }
+		if ($state.order.Count -gt 2) { $text += ' (Only the first two buttons count.)' }
+		if ($chord.Count -eq 1 -and @('Create', 'Touchpad', 'Mute', 'Paddle1', 'Paddle2', 'Paddle3', 'Paddle4') -notcontains $chord[0]) {
+			$text += "`nCareful: if the game has you hold $(Get-ButtonText $chord[0]) (to run, block or aim), it would quit. Two buttons are safer."
+		}
+		$script:recLive.Text = $text
+		$script:recSave.Enabled = $true
+		[void]$script:recSave.Focus()
+	}
+	$script:recStart = { $script:recState = @{ phase = 'release'; order = @(); chord = '' }; $script:recSave.Enabled = $false
+		$script:recLive.Text = 'Let go of every button...'; $script:padRecorder = $script:recRecorder }
+	$again.Add_Click({ & $script:recStart })
+	$dialog.Add_FormClosed({ $script:padRecorder = $null })
+	& $script:recStart
+	$result = $dialog.ShowDialog($form)
+	$script:padRecorder = $null
+	if ($result -eq 'OK' -and $script:recState.chord) { $script:recState.chord } else { $null }
+}
+function Invoke-QuitRecord {
+	$chord = Show-QuitRecorder
+	if ($chord) { Save-QuitChord $chord }
+	Update-HotkeyNote
+}
+$quitMode.Add_SelectedIndexChanged({
+	if ($script:quitModeUpdating) { return }
+	if ($quitMode.SelectedIndex -eq 0) {
+		if ($script:hotkeyMap.QuitChord) { Save-QuitChord '' }
+		Update-HotkeyNote
+	} elseif (-not $script:hotkeyMap.QuitChord) {
+		Invoke-QuitRecord
+	}
+})
+$quitRecord.Add_Click({ Invoke-QuitRecord })
 Update-HotkeyNote
 Add-Row 'Controller hotkeys' @($hotkey, $hotkeyEdit)
+Add-Row 'Quit the game' @($quitMode, $quitRecord)
 Add-Row '' @($hotkeyNote)
 $hud = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160 }
 $hud.Items.AddRange($overlays)
@@ -728,6 +915,12 @@ $credit = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; F
 	Text = 'Settings follow the KytyPS5 launcher (src/launcher) by the KytyPS5 developers.' }
 $grid.Controls.Add($credit)
 $grid.SetColumnSpan($credit, 2)
+$padNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '0,4,0,0'
+	Text = ('Controller: D-pad or left stick up/down moves, left/right changes a setting, A presses or ticks, B goes back, ' +
+		'Menu (Start/Options) plays. Xbox-style (XInput) controllers; a DualSense through Steam Input or DS4Windows.') }
+$padNote.MaximumSize = '700,0'
+$grid.Controls.Add($padNote)
+$grid.SetColumnSpan($padNote, 2)
 $form.AcceptButton = $play
 
 function Read-Form {
@@ -784,5 +977,69 @@ $readme.Add_Click({
 	$file = @("$root\README.md", "$root\docs\PORTABLE-README.md") | Where-Object { Test-Path $_ } | Select-Object -First 1
 	if ($file) { Start-Process notepad.exe "`"$file`"" }
 })
-$form.Add_FormClosing({ Read-Form })
+# A button newly pressed on the controller: the focused control's keyboard equivalent.
+function Invoke-PadPress([int]$pressed) {
+	$active = [System.Windows.Forms.Form]::ActiveForm
+	if (-not $active) {
+		# A message box or a folder dialog: its keys.
+		$key = if ($pressed -band 0x1000) { '{ENTER}' } elseif ($pressed -band 0x2000) { '{ESC}' }
+			elseif ($pressed -band 0x5) { '+{TAB}' } elseif ($pressed -band 0xA) { '{TAB}' } else { '' }
+		if ($key) { [System.Windows.Forms.SendKeys]::SendWait($key) }
+		return
+	}
+	[KytyLauncher.Pad]::ShowFocus($active.Handle)
+	$control = $active.ActiveControl
+	for ($parent = $control; $parent; $parent = $parent.Parent) {
+		if ($parent -is [System.Windows.Forms.NumericUpDown]) { $control = $parent; break }
+	}
+	if (-not $control) { [void]$active.SelectNextControl($null, $true, $true, $true, $true); return }
+	if ($pressed -band 0x3) {
+		[void]$active.SelectNextControl($control, [bool]($pressed -band 0x2), $true, $true, $true)
+	} elseif ($pressed -band 0xC) {
+		$step = if ($pressed -band 0x8) { 1 } else { -1 }
+		if ($control -is [System.Windows.Forms.ComboBox]) {
+			$index = [Math]::Max(0, [Math]::Min($control.Items.Count - 1, $control.SelectedIndex + $step))
+			if ($index -ne $control.SelectedIndex) { $control.SelectedIndex = $index }
+		} elseif ($control -is [System.Windows.Forms.NumericUpDown]) {
+			if ($step -gt 0) { $control.UpButton() } else { $control.DownButton() }
+		} else {
+			[void]$active.SelectNextControl($control, $step -gt 0, $true, $true, $true)
+		}
+	} elseif ($pressed -band 0x1000) {
+		if ($control -is [System.Windows.Forms.Button]) { $control.PerformClick() }
+		elseif ($control -is [System.Windows.Forms.CheckBox]) { $control.Checked = -not $control.Checked }
+		elseif ($control -eq $game) { $browse.PerformClick() }
+		else { [void]$active.SelectNextControl($control, $true, $true, $true, $true) }
+	} elseif ($pressed -band 0x2000) {
+		if ($active -ne $form) { $active.DialogResult = 'Cancel' }
+	} elseif ($pressed -band 0x10) {
+		if ($active -eq $form) { $play.PerformClick() } elseif ($active.AcceptButton) { $active.AcceptButton.PerformClick() }
+	}
+}
+# Polls the controller (the timer runs during dialogs too); directions repeat while held.
+$script:padPrev = 0
+$script:padRepeatAt = 0
+$script:padRecorder = $null
+$padTimer = New-Object System.Windows.Forms.Timer -Property @{ Interval = 30 }
+$padTimer.Add_Tick({
+	try {
+		if (-not [KytyLauncher.Pad]::InFront()) { $script:padPrev = 0; return }
+		$bits = [KytyLauncher.Pad]::Read($true)
+		if ($script:padRecorder) {
+			& $script:padRecorder ([KytyLauncher.Pad]::Read($false))
+			# (The buttons still held when it is done do nothing until pressed again.)
+			$script:padPrev = $bits
+			return
+		}
+		$now = [Environment]::TickCount
+		$pressed = $bits -band -bnot $script:padPrev
+		$directions = $bits -band 0xF
+		if ($pressed -band 0xF) { $script:padRepeatAt = $now + 400 }
+		elseif ($directions -and $now - $script:padRepeatAt -ge 0) { $pressed = $pressed -bor $directions; $script:padRepeatAt = $now + 120 }
+		$script:padPrev = $bits
+		if ($pressed) { Invoke-PadPress $pressed }
+	} catch { $padTimer.Stop() }
+})
+if ([KytyLauncher.Pad]::Available) { $padTimer.Start() }
+$form.Add_FormClosing({ $padTimer.Stop(); Read-Form })
 [void]$form.ShowDialog()

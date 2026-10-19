@@ -267,6 +267,18 @@ unbinds). The launcher's "Controller hotkeys" row changes the hotkey button too.
 uses (L3, say) still reaches the game when tapped alone. Steam may take the PS button for itself: choose
 another one if it does nothing.
 
+**Quit shortcut for any controller.** In the launcher, "Quit the game" → **Custom: record the buttons...**, then
+press one button or two together on the controller and let go. In the game, holding the two together for 1 second
+quits (one button alone: 2 seconds). It is saved as `QuitChord=` in `hotkeys.ini` (for example `QuitChord=Create+Options`,
+View + Menu on an Xbox controller). The game still sees those buttons, so choose ones you do not hold while playing.
+Xbox names: Cross = A, Circle = B, Square = X, Triangle = Y, Create = View / Back, Options = Menu / Start, L1 = LB,
+R1 = RB. Mute and Touchpad exist only on PlayStation controllers.
+
+**The launcher with a controller.** D-pad or left stick up / down moves between settings, left / right changes the
+one selected, A presses a button or ticks a box, B closes a window, Menu (Start / Options) presses Play. The launcher
+reads Xbox-style (XInput) controllers; a DualSense works there through Steam Input or DS4Windows (the game itself
+reads it directly).
+
 ## Files and folders
 
 | File / folder | Contents |

@@ -1,6 +1,7 @@
-// Controller hotkeys (src/local/controller-hotkeys.h): chords taken from the game, the modifier changed and saved, a
-// modifier the game uses tapped through, hold to quit, hotkeys.ini read and written. The emulator calls the hotkeys
-// make are stubbed below; SDL's timers and events are real.
+// Controller hotkeys (src/local/controller-hotkeys.h): chords taken from the
+// game, the modifier changed and saved, a modifier the game uses tapped
+// through, hold to quit, hotkeys.ini read and written. The emulator calls the
+// hotkeys make are stubbed below; SDL's timers and events are real.
 #include "SDL.h"
 #include "controller-hotkeys.h"
 #include "frame-gen.h"
@@ -18,10 +19,10 @@
 // ---- Stubs of what the hotkeys call ----
 namespace {
 int         g_quits = 0, g_fullscreens = 0, g_pauses = 0, g_overlays = 0;
-bool        g_frame_gen_on = true;
-float       g_sharpness    = 0.25f;
+bool        g_frame_gen_on   = true;
+float       g_sharpness      = 0.25f;
 int         g_button_presses = 0, g_button_releases = 0;
-uint32_t    g_last_button  = 0;
+uint32_t    g_last_button = 0;
 std::string g_last_notice;
 } // namespace
 
@@ -61,7 +62,7 @@ void ShowNotice(std::string message, int /*seconds*/) {
 
 namespace {
 
-namespace Hotkeys = Local::ControllerHotkeys;
+namespace Hotkeys     = Local::ControllerHotkeys;
 constexpr int32_t Pad = 7;
 
 void Check(bool value, const char* message) {
@@ -96,9 +97,11 @@ bool Release(int button, uint32_t pad_button = 0) {
 
 void TestDefaultsWritten(const std::filesystem::path& file) {
 	const auto text = ReadFile(file);
-	Check(text.find("Modifier=Create") != std::string::npos, "the defaults' modifier is not Create");
+	Check(text.find("Modifier=Create") != std::string::npos,
+	      "the defaults' modifier is not Create");
 	Check(text.find("Quit=Options") != std::string::npos, "the defaults' quit is not Options");
-	Check(Hotkeys::Describe().find("Hold Create") == 0, "Describe does not start with the modifier");
+	Check(Hotkeys::Describe().find("Hold Create") == 0,
+	      "Describe does not start with the modifier");
 }
 
 void TestChordsAreTaken() {
@@ -110,8 +113,9 @@ void TestChordsAreTaken() {
 	Check(Release(SDL_CONTROLLER_BUTTON_BACK), "the modifier's release reached the game");
 	// (Its press was taken: so is its release, the modifier already up.)
 	Check(Release(SDL_CONTROLLER_BUTTON_Y), "a chord button's release reached the game");
-	Check(Press(SDL_CONTROLLER_BUTTON_BACK) && Press(SDL_CONTROLLER_BUTTON_X) && Release(SDL_CONTROLLER_BUTTON_X) &&
-	          Press(SDL_CONTROLLER_BUTTON_B) && Release(SDL_CONTROLLER_BUTTON_B) && Release(SDL_CONTROLLER_BUTTON_BACK),
+	Check(Press(SDL_CONTROLLER_BUTTON_BACK) && Press(SDL_CONTROLLER_BUTTON_X) &&
+	          Release(SDL_CONTROLLER_BUTTON_X) && Press(SDL_CONTROLLER_BUTTON_B) &&
+	          Release(SDL_CONTROLLER_BUTTON_B) && Release(SDL_CONTROLLER_BUTTON_BACK),
 	      "chords were not taken");
 	Check(g_pauses == 1 && g_overlays == 1, "pause or overlay did not run");
 	Check(g_button_presses == 0, "the unmapped modifier was tapped through to the game");
@@ -121,7 +125,8 @@ void TestFrameGenAndSharpness() {
 	Press(SDL_CONTROLLER_BUTTON_BACK);
 	Press(SDL_CONTROLLER_BUTTON_A);
 	Release(SDL_CONTROLLER_BUTTON_A);
-	Check(!g_frame_gen_on && g_last_notice.find("off") != std::string::npos, "Cross did not turn frame generation off");
+	Check(!g_frame_gen_on && g_last_notice.find("off") != std::string::npos,
+	      "Cross did not turn frame generation off");
 	Press(SDL_CONTROLLER_BUTTON_A);
 	Release(SDL_CONTROLLER_BUTTON_A);
 	Check(g_frame_gen_on, "Cross did not turn frame generation back on");
@@ -167,16 +172,22 @@ void TestRebindAndTap(const std::filesystem::path& file) {
 	Release(SDL_CONTROLLER_BUTTON_RIGHTSTICK);
 	Release(SDL_CONTROLLER_BUTTON_BACK);
 	constexpr uint32_t L1 = Libs::Controller::PAD_BUTTON_L1;
-	Check(Press(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, L1), "the new modifier's press reached the game");
-	Check(Release(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, L1), "the new modifier's release reached the game");
-	Check(ReadFile(file).find("Modifier=L1") != std::string::npos, "the new modifier was not saved");
+	Check(Press(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, L1),
+	      "the new modifier's press reached the game");
+	Check(Release(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, L1),
+	      "the new modifier's release reached the game");
+	Check(ReadFile(file).find("Modifier=L1") != std::string::npos,
+	      "the new modifier was not saved");
 	Check(!Press(SDL_CONTROLLER_BUTTON_BACK), "Create is still a modifier");
 	Check(!Release(SDL_CONTROLLER_BUTTON_BACK), "Create's release did not reach the game");
-	// L1 tapped alone reaches the game (it uses L1): pressed at its release, released a moment later.
+	// L1 tapped alone reaches the game (it uses L1): pressed at its release,
+	// released a moment later.
 	const int presses = g_button_presses, releases = g_button_releases;
 	Check(Press(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, L1), "the modifier's press reached the game");
-	Check(Release(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, L1), "the modifier's release reached the game");
-	Check(g_button_presses == presses + 1 && g_last_button == L1, "a tapped L1 did not reach the game");
+	Check(Release(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, L1),
+	      "the modifier's release reached the game");
+	Check(g_button_presses == presses + 1 && g_last_button == L1,
+	      "a tapped L1 did not reach the game");
 	Pump(200);
 	Check(g_button_releases == releases + 1, "a tapped L1 was not released");
 	// In a chord it does not.
@@ -189,10 +200,12 @@ void TestRebindAndTap(const std::filesystem::path& file) {
 }
 
 void TestFileParsing(const std::filesystem::path& file) {
-	// A byte order mark, comments, PlayStation and SDL names, an unbound action, a wrong name.
+	// A byte order mark, comments, PlayStation and SDL names, an unbound action,
+	// a wrong name.
 	{
 		std::ofstream out(file, std::ios::trunc);
-		out << "\xEF\xBB\xBF" "Modifier = PS   # the PS button\n"
+		out << "\xEF\xBB\xBF"
+		       "Modifier = PS   # the PS button\n"
 		    << "Quit=start\nFullscreen=\nPause=Touchpad\nOverlay=bogus\n";
 	}
 	Hotkeys::Actions none;
@@ -202,7 +215,45 @@ void TestFileParsing(const std::filesystem::path& file) {
 	Check(text.find("Options: quit") != std::string::npos, "an SDL name was not read");
 	Check(text.find("Touchpad: pause") != std::string::npos, "a PlayStation name was not read");
 	Check(text.find("full screen") == std::string::npos, "an unbound action is still bound");
-	Check(text.find("Circle: performance overlay") != std::string::npos, "a wrong name did not keep the default");
+	Check(text.find("Circle: performance overlay") != std::string::npos,
+	      "a wrong name did not keep the default");
+}
+
+void TestQuitChord(const std::filesystem::path& file, Hotkeys::Actions actions) {
+	// Two buttons together for a second: they still reach the game; let go early,
+	// no quit.
+	{
+		std::ofstream out(file, std::ios::trunc);
+		out << "Modifier=Create\nQuitChord=L1+R1\n";
+	}
+	Hotkeys::Initialize(actions);
+	Check(Hotkeys::Describe().find("Quit: hold L1 + R1 together") != std::string::npos,
+	      "the quit chord is not described");
+	const int quits = g_quits;
+	Check(!Press(SDL_CONTROLLER_BUTTON_LEFTSHOULDER), "a quit chord button did not reach the game");
+	Check(!Press(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER),
+	      "a quit chord button did not reach the game");
+	Pump(400);
+	Release(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+	Pump(900);
+	Check(g_quits == quits, "a quit chord let go of early still quit");
+	Press(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+	Pump(1300);
+	Check(g_quits == quits + 1, "L1 + R1 held a second did not quit");
+	Release(SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+	Release(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+	// One button: held two seconds (Xbox's Back, by its SDL name).
+	{
+		std::ofstream out(file, std::ios::trunc);
+		out << "Modifier=PS\nQuitChord=back\n";
+	}
+	Hotkeys::Initialize(actions);
+	Press(SDL_CONTROLLER_BUTTON_BACK);
+	Pump(1300);
+	Check(g_quits == quits + 1, "a one-button quit fired before two seconds");
+	Pump(1000);
+	Check(g_quits == quits + 2, "Back held two seconds did not quit");
+	Release(SDL_CONTROLLER_BUTTON_BACK);
 }
 
 } // namespace
@@ -233,6 +284,7 @@ int main() {
 	TestHoldToQuit();
 	TestRebindAndTap(file);
 	TestFileParsing(file);
+	TestQuitChord(file, actions);
 	std::filesystem::remove_all(dir);
 	SDL_Quit();
 	std::printf("ControllerHotkeysTests: passed\n");

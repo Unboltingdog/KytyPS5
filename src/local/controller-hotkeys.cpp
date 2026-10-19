@@ -19,6 +19,7 @@
 #include <fstream>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace Local::ControllerHotkeys {
 
@@ -149,13 +150,24 @@ const char* DisplayName(int button) {
 }
 
 // The hotkeys' timers come back as events of their own type, on the window's thread.
-enum TimerCode : int32_t { QuitHeld = 1, TapRelease = 2, RebindTimeout = 3 };
+enum TimerCode : int32_t { QuitHeld = 1, TapRelease = 2, RebindTimeout = 3, QuitChordHeld = 4 };
 
 struct Pad {
 	bool                                        modifier_down = false;
 	bool                                        chord_used    = false;
 	std::array<bool, SDL_CONTROLLER_BUTTON_MAX> swallowed {};
+	std::array<bool, SDL_CONTROLLER_BUTTON_MAX> held {};            // every button down now
+	bool                                        quit_armed = false; // the quit shortcut is held
 };
+
+// QuitChord (hotkeys.ini, the launcher records it): a quit shortcut of its own, one button held
+// (2 seconds) or two held together (1 second), whatever the modifier. Its buttons still reach the
+// game: a button the game does not use is the best choice for one alone.
+std::vector<int> g_quit_chord;
+uint32_t         g_quit_chord_token = 0;
+uint32_t         QuitChordMs() {
+	return g_quit_chord.size() == 1 ? 2000u : 1000u;
+}
 
 Actions                          g_actions;
 int                              g_modifier = DefaultModifier;
@@ -226,6 +238,10 @@ void Save() {
 	       "dpup ...). Empty: unbound.\n"
 	       "# In the game, Modifier + R3 then a button changes Modifier (saved here).\n";
 	out << "Modifier=" << DisplayName(g_modifier) << "\n";
+	out << "QuitChord=";
+	for (size_t i = 0; i < g_quit_chord.size(); ++i)
+		out << (i != 0 ? "+" : "") << DisplayName(g_quit_chord[i]);
+	out << "\n";
 	for (size_t i = 0; i < ActionCount; ++i) {
 		out << Infos[i].key << "="
 		    << (g_bind[i] == SDL_CONTROLLER_BUTTON_INVALID ? "" : DisplayName(g_bind[i])) << "\n";
@@ -236,6 +252,7 @@ void Load() {
 	for (size_t i = 0; i < ActionCount; ++i)
 		g_bind[i] = Infos[i].button;
 	g_modifier = DefaultModifier;
+	g_quit_chord.clear();
 	std::ifstream in(g_file);
 	if (!in) {
 		Save();
@@ -253,9 +270,27 @@ void Load() {
 			text = text.substr(0, comment);
 		const auto equals = text.find('=');
 		if (equals == std::string_view::npos) continue;
-		const auto key    = Lower(Trim(text.substr(0, equals)));
-		const auto value  = Trim(text.substr(equals + 1));
-		const int  button = value.empty() ? SDL_CONTROLLER_BUTTON_INVALID : ButtonFromName(value);
+		const auto key   = Lower(Trim(text.substr(0, equals)));
+		const auto value = Trim(text.substr(equals + 1));
+		if (key == "quitchord") {
+			// One or two buttons, "+" between them (e.g. Create+Options, Back).
+			std::string_view rest = value;
+			while (!rest.empty() && g_quit_chord.size() < 2) {
+				const auto plus  = rest.find('+');
+				const auto part  = Trim(rest.substr(0, plus));
+				const int  found = ButtonFromName(part);
+				if (found != SDL_CONTROLLER_BUTTON_INVALID &&
+				    std::find(g_quit_chord.begin(), g_quit_chord.end(), found) ==
+				        g_quit_chord.end())
+					g_quit_chord.push_back(found);
+				else if (!part.empty())
+					std::printf("Hotkeys: quitchord: '%s' is no button name\n",
+					            std::string(part).c_str());
+				rest = plus == std::string_view::npos ? std::string_view {} : rest.substr(plus + 1);
+			}
+			continue;
+		}
+		const int button = value.empty() ? SDL_CONTROLLER_BUTTON_INVALID : ButtonFromName(value);
 		if (!value.empty() && button == SDL_CONTROLLER_BUTTON_INVALID) {
 			std::printf("Hotkeys: %s: '%s' is no button name\n", key.c_str(),
 			            std::string(value).c_str());
@@ -373,7 +408,22 @@ void Initialize(const Actions& actions) {
 
 bool OnButton(int32_t controller, int sdl_button, bool down, uint32_t pad_button) {
 	if (sdl_button < 0 || sdl_button >= SDL_CONTROLLER_BUTTON_MAX) return false;
-	auto& pad = g_pads[controller];
+	auto& pad                                 = g_pads[controller];
+	pad.held[static_cast<size_t>(sdl_button)] = down;
+	// The quit shortcut (QuitChord): all its buttons down starts its hold, any of them up ends it.
+	if (!g_quit_chord.empty()) {
+		const bool all = std::all_of(g_quit_chord.begin(), g_quit_chord.end(), [&](int button) {
+			return pad.held[static_cast<size_t>(button)];
+		});
+		if (all && !pad.quit_armed) {
+			pad.quit_armed = true;
+			After(QuitChordMs(), QuitChordHeld, controller,
+			      static_cast<int32_t>(++g_quit_chord_token));
+		} else if (!all && pad.quit_armed) {
+			pad.quit_armed = false;
+			++g_quit_chord_token;
+		}
+	}
 	// Choosing the modifier: the next button pressed.
 	if (g_rebinding && down) {
 		g_rebinding = false;
@@ -429,6 +479,12 @@ bool OnEvent(const SDL_Event& event) {
 				if (g_actions.quit != nullptr) g_actions.quit();
 			}
 			break;
+		case QuitChordHeld:
+			if (static_cast<uint32_t>(b) == g_quit_chord_token && g_pads[a].quit_armed) {
+				Notice("Quitting...", 2);
+				if (g_actions.quit != nullptr) g_actions.quit();
+			}
+			break;
 		case TapRelease: Libs::Controller::SetButton(a, static_cast<uint32_t>(b), false); break;
 		case RebindTimeout:
 			if (g_rebinding && static_cast<uint32_t>(b) == g_rebind_token) {
@@ -446,6 +502,12 @@ std::string Describe() {
 	for (size_t i = 0; i < ActionCount; ++i) {
 		if (g_bind[i] == SDL_CONTROLLER_BUTTON_INVALID || g_bind[i] == g_modifier) continue;
 		text += std::string("\n  ") + DisplayName(g_bind[i]) + ": " + Infos[i].label;
+	}
+	if (!g_quit_chord.empty()) {
+		text += "\nQuit: hold ";
+		for (size_t i = 0; i < g_quit_chord.size(); ++i)
+			text += std::string(i != 0 ? " + " : "") + DisplayName(g_quit_chord[i]);
+		text += g_quit_chord.size() == 1 ? " for 2 s" : " together for 1 s";
 	}
 	return text;
 }
