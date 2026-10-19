@@ -86,7 +86,7 @@ $safeGpuTip = "Prevents the crashes and blue screens that come from the graphics
 $settings = [ordered]@{ game = ''; resolution = '2560x1440'; fullscreen = $false; aspect = $true; language = 1; redzone = $true;
 	ecores = $false; fps120 = $false; render = 1440; ratio = '16:9'; quality = 'standard'; vsync = $false; hdr = $false; framegen = 0
 	hud = 0; streamline = ''; safegpu = $false; upscaler = ''; render_dlss = 1080; upscale_quality = 'quality'
-	framegen_backend = ''; fsr_sharpness = 0.25; fg_hudless = $true }
+	framegen_backend = ''; fsr_sharpness = 0.25; fg_hudless = $true; rumble = 2 }
 if (Test-Path $settingsPath) {
 	$saved = Get-Content $settingsPath -Raw | ConvertFrom-Json
 	foreach ($property in $saved.PSObject.Properties) { if ($settings.Contains($property.Name)) { $settings[$property.Name] = $property.Value } }
@@ -289,11 +289,16 @@ function Get-PlayCommand {
 	if ($settings.fg_hudless -and [int]$settings.framegen -ge 2) { $sets += 'KYTY_FG_HUDLESS=1' }
 	# Safe GPU mode: no overlapping compute dispatches ($safeGpuTip).
 	if ($settings.safegpu) { $sets += 'KYTY_COMPUTE_CHAIN=0' }
+	# Vibration for controllers other than a DualSense on USB: the game's haptics as rumble, this strong
+	# (KYTY_HAPTICS_RUMBLE; Normal is the emulator's default).
+	$rumbleIndex = [Math]::Max(0, [Math]::Min($rumbleStrengths.Count - 1, [int]$settings.rumble))
+	if ($rumbleIndex -ne 2) { $sets += "KYTY_HAPTICS_RUMBLE=$($rumbleStrengths[$rumbleIndex])" }
 	if ($sets.Count) { $arguments += @('-Set', ($sets -join ',')) }
 	if ($settings.game) { $arguments += @('-Game', "`"$($settings.game)`"") }
 	# The console stays for the live log; after a crash it waits for a key.
 	return "$powershellCommand " + ($arguments -join ' ') + ' & if !errorlevel! neq 0 pause'
 }
+$rumbleStrengths = @('0', '0.5', '1', '2', '4')
 function Get-PrecompileCommand([string]$switch = '') {
 	$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$root\precompile-windows.ps1`"")
 	if ($switch) { $arguments += $switch }
@@ -896,6 +901,12 @@ $hud.Items.AddRange($overlays)
 $hud.SelectedIndex = [Math]::Max(0, [Math]::Min($overlays.Count - 1, [int]$settings.hud))
 $hudNote = New-Object System.Windows.Forms.Label -Property @{ Text = 'top right: frame rate and frame times; detailed: GPU, CPU, memory. F8 in the game switches it'; AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
 Add-Row 'Overlay' @($hud, $hudNote)
+$rumble = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160 }
+$rumble.Items.AddRange(@('Off', 'Light', 'Normal', 'Strong', 'Maximum'))
+$rumble.SelectedIndex = [Math]::Max(0, [Math]::Min(4, [int]$settings.rumble))
+$rumbleNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0'
+	Text = 'Xbox-style pads, Legion Go, DualSense on Bluetooth: the game''s haptics as rumble (a USB DualSense gets the real haptics)' }
+Add-Row 'Vibration' @($rumble, $rumbleNote)
 $ecores = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Precompile on the efficiency cores only (slower, the PC stays responsive)'; AutoSize = $true
 	Checked = ([bool]$settings.ecores -and $efficiencyMask -ne 0); Enabled = ($efficiencyMask -ne 0) }
 Add-Row '' @($ecores)
@@ -942,6 +953,7 @@ function Read-Form {
 	# (Kept as they were where the runtimes are missing.)
 	$settings.framegen_backend = Get-FrameGenBackendKey
 	$settings.fg_hudless       = $fgHudless.Checked
+	$settings.rumble           = $rumble.SelectedIndex
 	if ($frameGen.Enabled) { $settings.framegen = if ($frameGen.SelectedIndex -gt 0) { $frameGen.SelectedIndex + 1 } else { 0 } }
 	if ($upscaler.Enabled) { $settings.upscaler = $upscalerKeys[[Math]::Max(0, $upscaler.SelectedIndex)] }
 	$settings.upscale_quality = $presetKeys[[Math]::Max(0, $preset.SelectedIndex)]

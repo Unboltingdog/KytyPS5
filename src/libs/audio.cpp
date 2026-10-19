@@ -10,6 +10,7 @@
 #include "kernel/pthread.h"
 #include "kernel/semaphore.h"
 #include "libs/audio_internal.h"
+#include "libs/controller.h"
 #include "libs/dualSenseHaptics.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
@@ -511,6 +512,13 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, const float* gains, b
 			return Controller::DualSenseHaptics::Write(prepared_data, port->samples_num, port->freq,
 			                                           PreparedChannels(*port),
 			                                           FormatIsFloat(port->format), false, gains);
+		}
+		if (port->type == AUDIO_OUT_PORT_TYPE_VIBRATION) {
+			// No DualSense on USB: the haptics become rumble for whatever controller is in use.
+			std::vector<uint8_t> prepared_buffer;
+			const void*          prepared_data = PrepareOutputBuffer(*port, data, &prepared_buffer);
+			Controller::HapticsRumble(prepared_data, port->samples_num, port->freq,
+			                          PreparedChannels(*port), FormatIsFloat(port->format), gains);
 		}
 		return false;
 	}

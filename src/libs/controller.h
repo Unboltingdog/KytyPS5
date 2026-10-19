@@ -100,6 +100,11 @@ int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformati
 int KYTY_SYSV_ABI PadReadState(int handle, PadData* data);
 int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num);
 int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param);
+// The vibration port's samples as rumble, when no DualSense on USB takes them
+// (local/haptics-rumble.h): the guest's audio thread, per buffer. `channels` channels, signed
+// 16-bit or float; `gains` per channel or null.
+void              HapticsRumble(const void* data, uint32_t frames, uint32_t rate, uint32_t channels,
+                                bool is_float, const float* gains);
 int KYTY_SYSV_ABI PadSetTriggerEffect(int handle, const PadTriggerEffectParam* param);
 int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInformation* info);
 int KYTY_SYSV_ABI PadResetLightBar(int handle);

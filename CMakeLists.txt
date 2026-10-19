@@ -412,6 +412,7 @@ list(APPEND kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/local/fsr.cpp"
 	"${KYTY_SOURCE_DIR}/local/controller-hotkeys.h"
 	"${KYTY_SOURCE_DIR}/local/controller-hotkeys.cpp"
+	"${KYTY_SOURCE_DIR}/local/haptics-rumble.cpp"
 	"${KYTY_SOURCE_DIR}/local/debug-snapshot.h"
 	"${KYTY_SOURCE_DIR}/local/debug-snapshot.cpp"
 	"${KYTY_SOURCE_DIR}/local/perf-overlay.h"
@@ -592,6 +593,12 @@ add_executable(controller_hotkeys_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(controller_hotkeys_tests SDL2-static Vulkan::Headers)
 target_include_directories(controller_hotkeys_tests PRIVATE ${inc_headers})
+# DualSense haptics as rumble for other controllers (src/local/haptics-rumble.h).
+add_executable(haptics_rumble_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/HapticsRumbleTests.cpp"
+	"${KYTY_SOURCE_DIR}/local/haptics-rumble.cpp"
+)
+target_include_directories(haptics_rumble_tests PRIVATE ${inc_headers})
 
 add_executable(ime_dialog_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ImeDialogTests.cpp"
@@ -748,6 +755,7 @@ if(BUILD_TESTING)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
 	add_test(NAME upscale_quality COMMAND $<TARGET_FILE:upscale_quality_tests>)
 	add_test(NAME controller_hotkeys COMMAND $<TARGET_FILE:controller_hotkeys_tests>)
+	add_test(NAME haptics_rumble COMMAND $<TARGET_FILE:haptics_rumble_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
@@ -829,6 +837,7 @@ if(BUILD_TESTING)
 		bit_array_tests
 		upscale_quality_tests
 		controller_hotkeys_tests
+		haptics_rumble_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
 		resource_tracking_tests

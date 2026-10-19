@@ -274,6 +274,12 @@ View + Menu on an Xbox controller). The game still sees those buttons, so choose
 Xbox names: Cross = A, Circle = B, Square = X, Triangle = Y, Create = View / Back, Options = Menu / Start, L1 = LB,
 R1 = RB. Mute and Touchpad exist only on PlayStation controllers.
 
+**Vibration on other controllers.** Demon's Souls vibrates through the DualSense's haptics (an audio stream to its
+actuators), which only a DualSense on USB can play. On any other controller (Xbox-style pads, a Legion Go, a
+DualSense over Bluetooth) the emulator turns that stream into rumble: the heavy hits on the large motor, the buzz
+and ticks on the small one. The launcher's "Vibration" sets how strong (Off, Light, Normal, Strong, Maximum;
+`KYTY_HAPTICS_RUMBLE` 0 to 4, 1 is Normal). The log says "the game's DualSense haptics play as rumble" once it starts.
+
 **The launcher with a controller.** D-pad or left stick up / down moves between settings, left / right changes the
 one selected, A presses a button or ticks a box, B closes a window, Menu (Start / Options) presses Play. The launcher
 reads Xbox-style (XInput) controllers; a DualSense works there through Steam Input or DS4Windows (the game itself

@@ -12,6 +12,7 @@
 #include "libs/libs.h"
 #include "libs/padData.h"
 #include "loader/demonsSoulsWarp.h"
+#include "local/haptics-rumble.h"
 
 #include <algorithm>
 #include <array>
@@ -19,6 +20,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 namespace Libs::Controller {
@@ -29,6 +31,9 @@ constexpr int PAD_ERROR_INVALID_ARG    = -2137915391; /* 0x80920001 */
 constexpr int PAD_ERROR_INVALID_HANDLE = -2137915389; /* 0x80920003 */
 
 constexpr uint32_t RUMBLE_DURATION_MS = 0xffff;
+// Rumble from the haptics lasts this long unless renewed: a vibration port that stops leaves no
+// motor running.
+constexpr uint32_t HAPTIC_RUMBLE_MS   = 250;
 constexpr uint32_t RELEASE_FLUSH_MS   = 50;
 
 struct PadControllerInformation {
@@ -110,6 +115,7 @@ public:
 	void ReleaseHostPads();
 	void GetConnectionInfo(bool* flag, int* count);
 	void SetVibration(uint8_t large_motor, uint8_t small_motor);
+	void    SetHapticRumble(uint8_t large_motor, uint8_t small_motor);
 	void SetLightBar(uint8_t r, uint8_t g, uint8_t b);
 	bool SetTriggerEffect(const PadTriggerEffectParam& param);
 	int32_t GetTriggerEffectState(bool left);
@@ -121,6 +127,10 @@ private:
 
 	void CheckActive();
 	void AddState();
+	void SendRumble(); // m_mutex held
+
+	// scePadSetVibration's motors and the haptics' (HapticsRumble): the stronger of each plays.
+	uint8_t m_vibration_large = 0, m_vibration_small = 0, m_haptic_large = 0, m_haptic_small = 0;
 
 	Common::Mutex    m_mutex;
 	std::vector<int> m_connected_ids;
@@ -482,7 +492,19 @@ void GameController::ReleaseHostPads() {
 
 void GameController::SetVibration(uint8_t large_motor, uint8_t small_motor) {
 	Common::LockGuard lock(m_mutex);
+	m_vibration_large = large_motor;
+	m_vibration_small = small_motor;
+	SendRumble();
+}
 
+void GameController::SetHapticRumble(uint8_t large_motor, uint8_t small_motor) {
+	Common::LockGuard lock(m_mutex);
+	m_haptic_large = large_motor;
+	m_haptic_small = small_motor;
+	SendRumble();
+}
+
+void GameController::SendRumble() {
 	if (m_active_id == HOST_INPUT_CONTROLLER_ID) {
 		return;
 	}
@@ -492,11 +514,50 @@ void GameController::SetVibration(uint8_t large_motor, uint8_t small_motor) {
 		return;
 	}
 
-	const auto large = static_cast<uint16_t>(large_motor * 0x101U);
-	const auto small = static_cast<uint16_t>(small_motor * 0x101U);
-	if (SDL_GameControllerRumble(pad, large, small, RUMBLE_DURATION_MS) != 0) {
+	const auto large  = static_cast<uint16_t>(std::max(m_vibration_large, m_haptic_large) * 0x101U);
+	const auto small  = static_cast<uint16_t>(std::max(m_vibration_small, m_haptic_small) * 0x101U);
+	const bool haptic = m_haptic_large != 0 || m_haptic_small != 0;
+	if (SDL_GameControllerRumble(pad, large, small,
+	                             haptic ? HAPTIC_RUMBLE_MS : RUMBLE_DURATION_MS) != 0) {
 		LOGF("\t rumble failed: %s\n", SDL_GetError());
 	}
+}
+
+void HapticsRumble(const void* data, uint32_t frames, uint32_t rate, uint32_t channels,
+                   bool is_float, const float* gains) {
+	const float strength = HapticsRumbleStrength();
+	if (strength <= 0.0f || g_controller == nullptr) {
+		return;
+	}
+	static std::mutex      mutex;
+	static HapticsToRumble converter;
+	static RumbleLevel     last;
+	static uint32_t        last_sent = 0;
+	static bool            reported  = false;
+	std::lock_guard        lock(mutex);
+	if (!reported) {
+		reported = true;
+		std::printf("Controller: the game's DualSense haptics play as rumble (strength %.2f, "
+		            "KYTY_HAPTICS_RUMBLE)\n",
+		            static_cast<double>(strength));
+	}
+	converter.SetStrength(strength);
+	const auto level = converter.Feed(data, frames, rate, channels, is_float, gains);
+
+	// Sent when it changes, and renewed while on (HAPTIC_RUMBLE_MS); not per buffer (a few ms
+	// each).
+	const uint32_t now   = SDL_GetTicks();
+	const auto     moved = [](uint8_t a, uint8_t b) {
+		return (a == 0) != (b == 0) || (a > b ? a - b : b - a) >= 6;
+	};
+	const bool changed = moved(level.large, last.large) || moved(level.small, last.small);
+	const bool on      = level.large != 0 || level.small != 0;
+	if (!changed && !(on && now - last_sent >= 100)) {
+		return;
+	}
+	last      = level;
+	last_sent = now;
+	g_controller->SetHapticRumble(level.large, level.small);
 }
 
 void GameController::SetLightBar(uint8_t r, uint8_t g, uint8_t b) {
