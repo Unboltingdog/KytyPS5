@@ -102,6 +102,19 @@ With an "Aspect ratio" wider than 16:9, DLSS makes the picture at its full width
 instead of a 3840x2160 picture widened on the screen. On an RTX 5090 at Boletaria's start that ran at 64.5 fps,
 the game's TAA at 21:9 at 59.3. Screens without the 3D (movies, the title, loading) are stretched to the
 width, as without DLSS.
+"Upscaler" "FSR 3.1 (PS5 Pro path)" is the same PS5 Pro mode with AMD FSR 3.1 in place of Sony's upscaler:
+any graphics card (AMD, NVIDIA, Intel), no download (AMD's `amd_fidelityfx_vk.dll` comes with this package,
+MIT-licensed). "Sharpness" (0 to 1, default 0.25) is FSR's own sharpening. FSR 4 is not offered: AMD ships it
+for DirectX 12 only, and the emulator renders with Vulkan.
+"Upscale quality" picks the render height as a share of the game's 4K output, FSR's quality modes (DLSS takes
+the same heights): Native AA 1x (2160), Ultra Quality 1.3x (1664), Quality 1.5x (1440, the default), Balanced
+1.7x (1272), Performance 2x (1080), Ultra Performance 3x (720). With DLSS or FSR the game itself turns its
+PS5 Pro upscaler off below 1080, so there Ultra Performance runs as Performance (a notice says so). "Custom"
+uses the "Render height" row instead.
+"Frame generation" with "FSR 3 (any GPU)" is AMD's frame generation: 2x, any graphics card, nothing to
+download. It works best when the game itself runs at about 60 fps or more (below that, the generated frames
+show more artifacts and the latency rises); it pauses in menus, movies and loading screens. Controller hotkey
+(below) + Cross switches it off and on while playing.
 "Frame generation" (DLSS, 2x to 6x; NVIDIA RTX 40 or newer, 3x and up RTX 50) uses NVIDIA's Streamline
 runtime, which this package does not include: download the Streamline SDK (a release zip from
 https://github.com/NVIDIA-RTX/Streamline/releases), unpack it and choose its folder with the launcher's
@@ -158,6 +171,11 @@ shortcut):
 | `-RenderHeight 1080` | The height the game renders its 3D at (720–1440, default 1440 as on the PS5): lower is faster on a slow graphics card and less sharp |
 | `-Aspect 21:9` | The 3D rendered wider (`21:9` or `32:9`) for ultrawide displays; the HUD keeps its shape at the sides; in-game menus, movies and loading screens are stretched to the width |
 | `-Quality low` | How much the game draws: `low` or `lowest` (shorter shadows, simpler distant detail), faster where the processor limits the frame rate |
+| `-Upscaler fsr` | AMD FSR 3.1 in place of the game's TAA (the PS5 Pro path; any graphics card) |
+| `-UpscaleQuality balanced` | The render height as a quality preset: `native`, `ultraquality`, `quality`, `balanced`, `performance`, `ultraperformance` |
+| `-FrameGen 1 -FrameGenBackend fsr` | AMD FSR 3 frame generation (2x; any graphics card) |
+| `-Sharpness 0.4` | FSR's sharpening, 0 to 1 (default 0.25) |
+| `-HotkeyButton PS` | The controller hotkey button for this run (default: `hotkeys.ini`'s, Create) |
 
 ## Shader precompile (without it the game stutters)
 
@@ -224,6 +242,28 @@ Default keyboard layout:
 | F11, Alt+Enter | Toggle full screen |
 
 The keyboard has no L2 / R2 by default: use a gamepad when you need them.
+
+### Controller hotkeys
+
+Hold the **hotkey button** (Create / Share / Back by default), then press:
+
+| Button | Does |
+| --- | --- |
+| OPTIONS (hold 1 s) | **Quit the game** (closes the game window, back to the launcher) |
+| △ | Full screen on / off |
+| □ | Pause / resume |
+| ○ | The emulator's overlay: Off, Frame rate, Detailed (as F8) |
+| × | Frame generation on / off (FSR 3 or DLSS) |
+| D-pad up / down | FSR sharpness +0.1 / −0.1 |
+| L3 | Show the hotkeys on screen |
+| R3 | **Choose another hotkey button**: press it, then the button you want (saved) |
+
+Buttons pressed while the hotkey button is held do not reach the game. The bindings are in `hotkeys.ini`
+next to `kyty_emulator.exe` (written with the defaults on the first start; names such as `Cross`, `Circle`,
+`Square`, `Triangle`, `Create`, `PS`, `Options`, `L1`, `R1`, `L3`, `R3`, `Up`, `Touchpad`, `Mute`; an empty value
+unbinds). The launcher's "Controller hotkeys" row changes the hotkey button too. A hotkey button the game also
+uses (L3, say) still reaches the game when tapped alone. Steam may take the PS button for itself: choose
+another one if it does nothing.
 
 ## Files and folders
 

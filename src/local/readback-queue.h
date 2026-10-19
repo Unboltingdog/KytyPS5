@@ -63,6 +63,7 @@ public:
 		submit.pCommandBuffers      = &packet.command;
 		submit.signalSemaphoreCount = 1;
 		submit.pSignalSemaphores    = &packet.signal;
+		Common::LockGuard lock(Libs::Graphics::ReadbackQueueMutex());
 		Check(dispatch.vkQueueSubmit(packet.queue, 1, &submit, VK_NULL_HANDLE), "submit readback copy");
 	}
 	// The copy's commands: an earlier copy on this queue may target the same download slot (a detached request).
@@ -135,6 +136,7 @@ public:
 		Check(d.vkCreateSemaphore(m_device, &semaphore, nullptr, &m_semaphore), "create readback timeline");
 	}
 	~Queue() {
+		Common::LockGuard lock(Libs::Graphics::ReadbackQueueMutex());
 		(void)d.vkQueueWaitIdle(m_queue);
 		d.vkDestroySemaphore(m_device, m_semaphore, nullptr);
 		d.vkDestroyCommandPool(m_device, m_pool, nullptr);

@@ -148,6 +148,11 @@ struct UpscaleImage {
 	vk::Format          format = vk::Format::eUndefined;
 	vk::Extent2D        extent {};
 	vk::ImageUsageFlags usage {};
+	// The whole image (FSR takes images, not views: fsr.cpp): its own format, size, levels and
+	// layers, and the view's level and layer and format (a mutable image viewed as another format).
+	vk::Format   view_format = vk::Format::eUndefined;
+	vk::Extent2D image_extent {};
+	uint32_t     levels = 1, layers = 1, base_level = 0, base_layer = 0;
 };
 struct UpscaleInputs {
 	UpscaleImage color, depth, motion, output; // color, depth and motion at the render size
@@ -157,10 +162,23 @@ struct UpscaleInputs {
 	std::array<float, 16> view_to_clip {};                // row vectors (p' = p * M)
 	float        near_plane = 0.1f, far_plane = 3000.0f;
 };
-// Streamline offers DLSS super resolution on this device.
+// An upscaler is ready on this device: DLSS (Streamline) or FSR (KYTY_UPSCALER=fsr, fsr.h).
 [[nodiscard]] bool UpscalerReady();
-// Records DLSS into `command` (outside a render pass; the images in their `layout`s): false when it could not.
+// The upscaler in place of Sony's: "DLSS", "FSR 3.1", or null (none).
+[[nodiscard]] const char* UpscalerName();
+// FSR's: it reads the depth in a shader-read layout (renderSuperResolution.cpp).
+[[nodiscard]] bool UpscalerIsFsr();
+// Records the upscaler into `command` (outside a render pass; the images in their `layout`s): false
+// when it could not.
 [[nodiscard]] bool Upscale(vk::CommandBuffer command, const UpscaleInputs& inputs);
+
+// Frame generation's backend when ready: "DLSS-G", "FSR 3", or null.
+[[nodiscard]] const char* BackendName();
+// FSR frame generation: its swapchain stands in for Vulkan's (swapchain.cpp asks fsr.h).
+[[nodiscard]] bool FsrFrameGen();
+// Live (controller hotkeys): frame generation on or off, either backend (on by default).
+[[nodiscard]] bool UserEnabled();
+void               SetUserEnabled(bool on);
 
 } // namespace FrameGen
 } // namespace Libs::Graphics

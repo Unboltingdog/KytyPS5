@@ -408,6 +408,10 @@ list(APPEND kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/local/frame-gen.cpp"
 	"${KYTY_SOURCE_DIR}/local/frame-gen-hudless.h"
 	"${KYTY_SOURCE_DIR}/local/frame-gen-hudless.cpp"
+	"${KYTY_SOURCE_DIR}/local/fsr.h"
+	"${KYTY_SOURCE_DIR}/local/fsr.cpp"
+	"${KYTY_SOURCE_DIR}/local/controller-hotkeys.h"
+	"${KYTY_SOURCE_DIR}/local/controller-hotkeys.cpp"
 	"${KYTY_SOURCE_DIR}/local/debug-snapshot.h"
 	"${KYTY_SOURCE_DIR}/local/debug-snapshot.cpp"
 	"${KYTY_SOURCE_DIR}/local/perf-overlay.h"
@@ -578,6 +582,17 @@ add_executable(bit_array_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(bit_array_tests PRIVATE ${inc_headers})
 
+# FSR's quality presets (src/loader/demonsSoulsRenderSize.h) and the controller hotkeys (src/local/controller-hotkeys.cpp,
+# the emulator calls they make stubbed in the test).
+add_executable(upscale_quality_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/UpscaleQualityTests.cpp")
+target_include_directories(upscale_quality_tests PRIVATE ${inc_headers})
+add_executable(controller_hotkeys_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ControllerHotkeysTests.cpp"
+	"${KYTY_SOURCE_DIR}/local/controller-hotkeys.cpp"
+)
+target_link_libraries(controller_hotkeys_tests SDL2-static Vulkan::Headers)
+target_include_directories(controller_hotkeys_tests PRIVATE ${inc_headers})
+
 add_executable(ime_dialog_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ImeDialogTests.cpp"
 	"${KYTY_SOURCE_DIR}/libs/imeCommon.cpp"
@@ -731,6 +746,8 @@ if(BUILD_TESTING)
 	add_test(NAME demons_souls_idle COMMAND $<TARGET_FILE:demons_souls_idle_tests>)
 	add_test(NAME page_protection_table COMMAND $<TARGET_FILE:page_protection_table_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
+	add_test(NAME upscale_quality COMMAND $<TARGET_FILE:upscale_quality_tests>)
+	add_test(NAME controller_hotkeys COMMAND $<TARGET_FILE:controller_hotkeys_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
@@ -810,6 +827,8 @@ if(BUILD_TESTING)
 		page_protection_table_tests
 		atrac9_initialization_tests
 		bit_array_tests
+		upscale_quality_tests
+		controller_hotkeys_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
 		resource_tracking_tests
@@ -878,6 +897,16 @@ if (WIN32)
 		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
 		             COMPILE_DEFINITIONS KYTY_FRAMEGEN_STREAMLINE=1)
 	endif()
+endif()
+
+# AMD FSR 3.1 (src/local/fsr.cpp): the FidelityFX API headers, and AMD's signed Vulkan runtime next to the emulator
+# (loaded at run time; 3rdparty/fidelityfx/README.md).
+set(KYTY_FIDELITYFX_DIR "${KYTY_THIRD_PARTY_DIR}/fidelityfx")
+set_property(SOURCE "${KYTY_SOURCE_DIR}/local/fsr.cpp" APPEND PROPERTY INCLUDE_DIRECTORIES "${KYTY_FIDELITYFX_DIR}/include")
+if (WIN32 AND EXISTS "${KYTY_FIDELITYFX_DIR}/bin/amd_fidelityfx_vk.dll")
+	add_custom_command(TARGET kyty_emulator POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+	                   "${KYTY_FIDELITYFX_DIR}/bin/amd_fidelityfx_vk.dll" $<TARGET_FILE_DIR:kyty_emulator>/amd_fidelityfx_vk.dll)
+	install(FILES "${KYTY_FIDELITYFX_DIR}/bin/amd_fidelityfx_vk.dll" DESTINATION .)
 endif()
 
 clang_tidy_check(kyty_emulator "" "${check_headers}" "${inc_headers}")

@@ -1,5 +1,39 @@
 ## New in this build
 
+- **AMD FSR 3.1 upscaling and frame generation** (launcher: Upscaler "FSR 3.1 (PS5 Pro path)", Frame generation
+  "FSR 3 (any GPU)"): AMD's FSR in place of Sony's PS5 Pro upscaler on the game's PS5 Pro path, and 2x frame
+  generation from the same depth, motion vectors and camera DLSS-G uses. Any graphics card; AMD's runtime
+  (`amd_fidelityfx_vk.dll`, MIT) comes with the package. FSR 4 is DirectX 12 only, so it is not offered.
+  Untested on hardware in this build: please report what you see.
+- **Upscale quality presets**: Native AA 1x, Ultra Quality 1.3x, Quality 1.5x, Balanced 1.7x, Performance 2x,
+  Ultra Performance 3x (the render height as a share of the 4K output; on the PS5 Pro path 1080 is the least, so
+  Ultra Performance runs as Performance there).
+- **Controller hotkeys**: hold Create (or the button you choose: in the launcher, or in the game with the hotkey button
+  + R3), then OPTIONS for a second to quit the game, △ full screen, □ pause, ○ overlay, × frame generation on/off,
+  up/down FSR sharpness, L3 for the list. `hotkeys.ini` next to the emulator keeps them.
+- **Build**: reconfiguring a build folder no longer fails applying the ZArchive patch a second time.
+
+- **Faster shaders: run the precompile once more.** Two changes give many of the game's shaders new pipelines:
+  - About 1,200 compute shaders (most of them the lighting at the end of each frame) run faster on NVIDIA, Intel and
+    RDNA2 AMD cards: on an RTX 5090 in Cinematic mode, 52 → 58 fps.
+  - Shaders that read many entries of the game's resource tables no longer keep all of them in registers from their
+    first instruction, which made some of them spill and run very slowly on cards with a small cache.
+
+  Together on an RTX 3080 Laptop (8 GB): Boletaria 1-1's rampart while the dragon burns it, often 8-16 fps before, now
+  runs at 27-34 fps (one fire shader took 80 ms a frame, now about 3 ms), and the route there went from 22.7 to 25.4
+  fps on average.
+
+  The launcher offers the precompile at the first start; it compiles only what changed (27 minutes on an RTX 3080
+  Laptop, and the game can start after 22). Until then the game keeps the shaders it has, as before, without new
+  stutter. If your precompile ended with errors since v20261016, it works again now (an old warm-up recording made it
+  fail).
+- **Safe GPU mode** (new in the launcher, off by default): for PCs whose graphics card hangs ("device lost", the
+  screen going black while the graphics driver restarts, a VIDEO_TDR_FAILURE blue screen). It prevents those crashes
+  and blue screens, but **the frame rate is about 37% lower**. On a laptop RTX 3080 (driver 566.07), 3 of 4 runs
+  through Boletaria hung without it and none of 3 with it. After this version's precompile, the same laptop ran that
+  route 4 times without a hang: the shader fix above seems to have removed those hangs there, so try without it first.
+  It does not help the MEMORY_MANAGEMENT blue screens of a full RAM. Leave it off when the game runs without such
+  crashes.
 - **DLSS super resolution** (new launcher row "Upscaler", NVIDIA RTX only, off by default): Demon's Souls' own PS5 Pro
   mode, with NVIDIA DLSS in place of Sony's PS5 Pro upscaler. The 3D is rendered at the render height and DLSS makes a
   real 3840x2160 image of it, which the game finishes at 4K (bloom, depth of field, the HUD). It starts at render

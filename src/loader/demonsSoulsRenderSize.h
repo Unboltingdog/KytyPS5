@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string_view>
@@ -107,6 +108,48 @@ inline uint32_t MaxRenderHeight(double aspect) {
 		if (FitsRenderTargets(RenderSizeFor(height, aspect))) return height;
 	}
 	return 720;
+}
+
+// KYTY_UPSCALE_QUALITY=<preset> (run-windows.ps1 -Quality, the launcher's "Quality"): the render
+// height as the output's 2160 divided by the preset's ratio, FSR's names (DLSS takes the same
+// heights): native 1x (2160), ultraquality 1.3x (1664), quality 1.5x (1440), balanced 1.7x (1272),
+// performance 2x (1080), ultraperformance 3x (720: below the game's own super resolution's 1080,
+// which then keeps 1080). A number is taken as the ratio itself (e.g. 1.3). An explicit
+// KYTY_RENDER_HEIGHT wins over it. 0: not a preset.
+struct QualityPreset {
+	std::string_view name;
+	double           ratio;
+};
+inline constexpr QualityPreset QualityPresets[] {{"native", 1.0},      {"ultraquality", 1.3},
+                                                 {"quality", 1.5},     {"balanced", 1.7},
+                                                 {"performance", 2.0}, {"ultraperformance", 3.0}};
+inline uint32_t                QualityHeight(std::string_view text) {
+	double ratio = 0.0;
+	for (const auto& preset: QualityPresets) {
+		if (text == preset.name) ratio = preset.ratio;
+	}
+	if (ratio == 0.0) {
+		// (A ratio as a number: 1 to 3.)
+		double value = 0.0, scale = 0.0;
+		for (const char c: text) {
+			if (c == '.' && scale == 0.0) {
+				scale = 1.0;
+			} else if (c >= '0' && c <= '9') {
+				if (scale == 0.0) {
+					value = value * 10.0 + (c - '0');
+				} else {
+					scale /= 10.0;
+					value += (c - '0') * scale;
+				}
+			} else {
+				return 0;
+			}
+		}
+		ratio = value;
+	}
+	if (!(ratio >= 1.0 && ratio <= 3.0)) return 0;
+	const auto height = static_cast<uint32_t>(std::lround(OutputHeight / ratio / 8.0)) * 8u;
+	return std::clamp<uint32_t>(height, 720, OutputHeight);
 }
 
 // KYTY_RENDER_ASPECT's value: "<w>:<h>" or a number; 21:9 is the displays' 64:27. 0 when unset, at most 16:9 or wider

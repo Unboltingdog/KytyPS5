@@ -13,12 +13,14 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "loader/demonsSoulsRenderSize.h"
+#include "loader/demonsSoulsSuperResolution.h"
 #include "loader/demonsSoulsWarp.h"
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
 #include "vulkan-recording.h"
 #endif
-#include "frame-gen.h"
 #include "frame-gen-hudless.h"
+#include "frame-gen.h"
+#include "fsr.h"
 #include "local-platform.h"
 #include "perf-overlay.h"
 #if defined(_WIN32)
@@ -340,6 +342,8 @@ public:
 	[[nodiscard]] vk::Rect2D PresentRegion() const noexcept { return m_present_region; }
 	// The presents wait for the display's vertical blank (VSync: FIFO).
 	[[nodiscard]] bool IsFifo() const noexcept { return m_fifo.load(std::memory_order_relaxed); }
+	// The swapchain is HDR10 (PQ) now.
+	[[nodiscard]] bool IsHdrActive() const noexcept { return m_hdr_active; }
 
 private:
 	void                 Destroy();
@@ -361,6 +365,9 @@ private:
 	uint32_t                    m_image_index = static_cast<uint32_t>(-1);
 	uint32_t                    m_frame_index = 0;
 	vk::Rect2D                  m_present_region {};
+	// FSR frame generation's swapchain (fsr.h) in place of Vulkan's: its calls stand in for create,
+	// images, acquire, present and destroy.
+	bool m_fsr = false;
 };
 
 struct Presenter::Impl {
@@ -552,11 +559,19 @@ struct Presenter::Impl {
 			std::array<char, 32>  title {};
 			std::array<char, 128> detail {};
 			if (presents > 1) {
+				// (The backend's name: DLSS-G or FSR 3.)
+				const char* backend = FrameGen::BackendName();
+				const bool  dlss    = backend != nullptr && std::string_view(backend) == "DLSS-G";
 				std::snprintf(title.data(), title.size(), "%.0f FPS",
 				              (seconds >= 1.0 ? hud_frames / seconds : game) * presents);
-				std::snprintf(detail.data(), detail.size(), "DLSS Frame Generation %ux  |  game %.0f fps", presents, game);
+				std::snprintf(detail.data(), detail.size(), "%s Frame Generation %ux  |  game %.0f fps",
+				              dlss ? "DLSS" : backend != nullptr ? backend : "", presents, game);
 			} else {
 				std::snprintf(title.data(), title.size(), "%.0f FPS", game);
+				// The upscaler at work in place of the game's TAA (DLSS, FSR 3.1), when one is.
+				if (const char* upscaler = FrameGen::UpscalerName();
+				    upscaler != nullptr && Loader::DemonsSoulsSuperResolution::Active())
+					std::snprintf(detail.data(), detail.size(), "%s upscaling", upscaler);
 			}
 			hud.title  = title.data();
 			hud.detail = detail.data();
@@ -778,8 +793,15 @@ void Swapchain::Create() {
 	}
 	m_fifo.store(create_info.presentMode == vk::PresentModeKHR::eFifo, std::memory_order_relaxed);
 	create_info.clipped          = VK_TRUE;
-	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
-	                     "vkCreateSwapchainKHR");
+	// FSR frame generation: FidelityFX's swapchain (its present and pacing threads); refused, the
+	// plain one (and frame generation off from then on: FrameGenReady).
+	m_fsr =
+	    FrameGen::FsrFrameGen() &&
+	    FrameGen::Fsr::CreateSwapchain(graphics, create_info, &m_handle) == vk::Result::eSuccess;
+	if (!m_fsr) {
+		RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
+		                     "vkCreateSwapchainKHR");
+	}
 	EXIT_IF(m_handle == nullptr);
 	if (Config::HdrEnabled()) {
 		std::printf("Vulkan presentation: %s\n", m_hdr_active ? "HDR10 (PQ)" : "SDR");
@@ -788,7 +810,8 @@ void Swapchain::Create() {
 
 	m_images = EnumerateVulkan<vk::Image>(
 	    "vkGetSwapchainImagesKHR", [&](uint32_t* count, vk::Image* images) {
-		    return graphics.device.getSwapchainImagesKHR(m_handle, count, images);
+		    return m_fsr ? FrameGen::Fsr::GetSwapchainImages(graphics, m_handle, count, images)
+		                 : graphics.device.getSwapchainImagesKHR(m_handle, count, images);
 	    });
 	EXIT_NOT_IMPLEMENTED(m_images.empty());
 
@@ -865,8 +888,13 @@ void Swapchain::Destroy() {
 		}
 	}
 	if (m_handle != nullptr) {
-		graphics.device.destroySwapchainKHR(m_handle, nullptr);
+		if (m_fsr) {
+			FrameGen::Fsr::DestroySwapchain(graphics, m_handle);
+		} else {
+			graphics.device.destroySwapchainKHR(m_handle, nullptr);
+		}
 	}
+	m_fsr = false;
 
 	m_handle      = nullptr;
 	m_format      = vk::Format::eUndefined;
@@ -896,10 +924,31 @@ void Swapchain::Recreate(bool surface_lost) {
 
 Swapchain::Status Swapchain::AcquireNextImage() {
 	EXIT_IF(m_handle == nullptr || m_frame_index >= m_image_acquired.size());
+	if (m_fsr) {
+		// FidelityFX's swapchain reports no out-of-date while it is not generating (its present
+		// skips the frame): a window resized or switched to full screen is noticed here, by the
+		// surface's size.
+		vk::SurfaceCapabilitiesKHR capabilities {};
+		auto&                      graphics = m_window.graphic_ctx;
+		if (graphics.physical_device.getSurfaceCapabilitiesKHR(m_window.surface, &capabilities) ==
+		        vk::Result::eSuccess &&
+		    capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max() &&
+		    capabilities.currentExtent.width != 0 && capabilities.currentExtent.height != 0 &&
+		    capabilities.currentExtent != m_extent) {
+			LOGF("FSR swapchain: the surface is %ux%u now (was %ux%u)\n",
+			     capabilities.currentExtent.width, capabilities.currentExtent.height,
+			     m_extent.width, m_extent.height);
+			return Status::Recreate;
+		}
+	}
 	m_image_index     = static_cast<uint32_t>(-1);
-	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
-	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
-	    &m_image_index);
+	const auto result =
+	    m_fsr ? FrameGen::Fsr::AcquireNextImage(m_window.graphic_ctx, m_handle,
+	                                            std::numeric_limits<uint64_t>::max(),
+	                                            m_image_acquired[m_frame_index], &m_image_index)
+	          : m_window.graphic_ctx.device.acquireNextImageKHR(
+	                m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index],
+	                nullptr, &m_image_index);
 	switch (result) {
 		case vk::Result::eSuccess: break;
 		case vk::Result::eSuboptimalKHR:
@@ -1019,15 +1068,21 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 	                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1, &region,
 	                     vk::Filter::eLinear);
 
+	// (FSR frame generation's backbuffers are no presentable images: FidelityFX reads them as
+	// shader-read ones.)
+	const auto final_layout =
+	    m_fsr ? vk::ImageLayout::eShaderReadOnlyOptimal : vk::ImageLayout::ePresentSrcKHR;
+	const auto final_access =
+	    m_fsr ? vk::AccessFlagBits::eShaderRead : vk::AccessFlagBits::eMemoryRead;
 	vk::ImageMemoryBarrier to_present {};
 	to_present.sType         = vk::StructureType::eImageMemoryBarrier;
 	to_present.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
 	to_present.dstAccessMask = draw_system_overlay ? vk::AccessFlagBits::eColorAttachmentRead |
 	                                                     vk::AccessFlagBits::eColorAttachmentWrite
-	                                               : vk::AccessFlagBits::eMemoryRead;
+	                                               : final_access;
 	to_present.oldLayout     = vk::ImageLayout::eTransferDstOptimal;
-	to_present.newLayout     = draw_system_overlay ? vk::ImageLayout::eColorAttachmentOptimal
-	                                               : vk::ImageLayout::ePresentSrcKHR;
+	to_present.newLayout =
+	    draw_system_overlay ? vk::ImageLayout::eColorAttachmentOptimal : final_layout;
 	to_present.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 	to_present.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 	to_present.image                           = m_images[m_image_index];
@@ -1044,9 +1099,9 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 	if (draw_system_overlay) {
 		m_system_overlay->Record(vk_command, m_image_views[m_image_index]);
 		to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
-		to_present.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
+		to_present.dstAccessMask = final_access;
 		to_present.oldLayout     = vk::ImageLayout::eColorAttachmentOptimal;
-		to_present.newLayout     = vk::ImageLayout::ePresentSrcKHR;
+		to_present.newLayout     = final_layout;
 		vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
 		                           vk::PipelineStageFlagBits::eAllCommands,
 		                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
@@ -1074,7 +1129,11 @@ Swapchain::Status Swapchain::Present() {
 	present.waitSemaphoreCount = 1;
 
 	vk::Result result;
-	if (auto& graphics = m_window.graphic_ctx; graphics.present_queue != nullptr) {
+	if (m_fsr) {
+		// (FidelityFX presents on queues of its own, its submissions to the emulator's taking its
+		// lock.)
+		result = FrameGen::Fsr::QueuePresent(m_window.graphic_ctx, present);
+	} else if (auto& graphics = m_window.graphic_ctx; graphics.present_queue != nullptr) {
 		// Its own queue: a present blocked in the kernel does not hold up other submissions.
 		Common::LockGuard lock(graphics.present_queue_mutex);
 		result = graphics.present_queue.presentKHR(&present);
@@ -1318,6 +1377,14 @@ void Presenter::Present(Frame& frame, bool reuse) {
 			m_impl->RecoverSwapchain(status);
 			continue;
 		}
+		// FSR frame generation (fsr.h): this present's decision and context, before the renderer's
+		// lock (making or replacing the context takes the queues' locks).
+		const bool  fsr_frame_gen = FrameGen::FsrFrameGen();
+		const auto* fsr_inputs    = frame.fg.valid && !frame.reusing_last ? &frame.fg : nullptr;
+		if (fsr_frame_gen) {
+			FrameGen::Fsr::BeginPresent(fsr_inputs, swapchain.Extent(), swapchain.Format(),
+			                            swapchain.IsHdrActive(), overlay_visual.active);
+		}
 		{
 			// The present thread records and submits on its own scheduler (present_scheduler: its own pool, timeline
 			// and command buffers; the queue has its own lock), from the presenter's frame image into the swapchain's:
@@ -1348,8 +1415,12 @@ void Presenter::Present(Frame& frame, bool reuse) {
 				FrameGen::ScaleHudless(m_impl->window.graphic_ctx, command.Handle(), frame.fg, swapchain.Extent(),
 				                       swapchain.PresentRegion(), swapchain.Format());
 			}
+			// FSR frame generation: its preparation, recorded with the frame's commands.
+			if (fsr_frame_gen) FrameGen::Fsr::RecordPresent(command.Handle(), fsr_inputs);
 			frame.present_tick = swapchain.Submit(m_impl->present_scheduler);
 		}
+		// ... and its configuration, before the present, without the renderer's lock.
+		if (fsr_frame_gen) FrameGen::Fsr::ConfigurePresent(fsr_inputs, swapchain.PresentRegion());
 #if defined(_WIN32)
 		// The Windows driver waits in vkQueuePresentKHR, inside the kernel, for the semaphore's
 		// GPU work while it holds a device-wide lock: every queue submission waits behind it,

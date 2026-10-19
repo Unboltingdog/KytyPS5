@@ -24,6 +24,8 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/timer.h"
+#include "frame-gen.h"
+#include "fsr.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/pipeline/moduleStore.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -40,7 +42,6 @@
 #include "libs/controller.h"
 #include "loader/systemContent.h"
 #include "local-platform.h"
-#include "frame-gen.h"
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
 #include "vulkan-recording.h"
 #endif
@@ -654,7 +655,7 @@ static void VulkanInitSubgroupSizeControl(vk::PhysicalDevice physical_device,
 static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const VulkanExtensions& r,
                                      uint32_t                        queue_family,
                                      const std::vector<const char*>& device_extensions,
-                                     GraphicContext&                 graphics) {
+                                     GraphicContext& graphics, vk::SurfaceKHR surface = nullptr) {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(queue_family == static_cast<uint32_t>(-1));
 
@@ -699,6 +700,36 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 				LOGF("\treadback queue family %u\n", family);
 				break;
 			}
+		}
+	}
+
+	// FSR frame generation (fsr.h): its swapchain's present, image-acquire and async compute
+	// queues, beside the emulator's (AMD's driver offers one graphics queue: they come from the
+	// compute and transfer families).
+	static const std::array<float, 16> extra_priorities = [] {
+		std::array<float, 16> all {};
+		all.fill(1.0f);
+		return all;
+	}();
+	std::vector<vk::DeviceQueueCreateInfo> queue_infos(
+	    queue_create_infos.begin(), queue_create_infos.begin() + queue_create_count);
+	for (const auto& [family, count]:
+	     FrameGen::Fsr::PlanQueues(physical_device, surface, queue_family,
+	                               queue_create_infos[0].queueCount, graphics.readback_family)) {
+		const auto wanted =
+		    std::min<uint32_t>(count, static_cast<uint32_t>(extra_priorities.size()));
+		auto known = std::find_if(
+		    queue_infos.begin(), queue_infos.end(),
+		    [family = family](const auto& info) { return info.queueFamilyIndex == family; });
+		if (known != queue_infos.end()) {
+			known->queueCount       = std::max(known->queueCount, wanted);
+			known->pQueuePriorities = extra_priorities.data();
+		} else {
+			vk::DeviceQueueCreateInfo info {};
+			info.queueFamilyIndex = family;
+			info.queueCount       = wanted;
+			info.pQueuePriorities = extra_priorities.data();
+			queue_infos.push_back(info);
 		}
 	}
 
@@ -906,6 +937,9 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 		}
 	}
 
+	// (FSR's shaders take 16-bit floats and integers for granted where the GPU has them.)
+	FrameGen::Fsr::AddDeviceFeatures(physical_device, features12, device_features);
+
 	vk::PhysicalDeviceRobustness2FeaturesEXT robustness2 {};
 	robustness2.sType = vk::StructureType::ePhysicalDeviceRobustness2FeaturesEXT;
 #if defined(__APPLE__)
@@ -974,6 +1008,12 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 		provoking_vertex.transformFeedbackPreservesProvokingVertex = VK_FALSE;
 		create_info.pNext = &provoking_vertex;
 	}
+	// FSR's 16-bit shaders (fsr.h): 16-bit storage where the GPU has it.
+	vk::PhysicalDevice16BitStorageFeatures storage16 {};
+	if (FrameGen::Fsr::Add16BitStorage(physical_device, storage16)) {
+		storage16.pNext   = const_cast<void*>(create_info.pNext);
+		create_info.pNext = &storage16;
+	}
 	vk::PhysicalDevicePresentIdFeaturesKHR present_id {};
 	if (HasExtension(device_extensions, VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
 		present_id.presentId = VK_TRUE;
@@ -1028,8 +1068,8 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 		create_info.pNext          = &fault_features;
 	}
 	create_info.flags                   = {};
-	create_info.pQueueCreateInfos       = queue_create_infos.data();
-	create_info.queueCreateInfoCount    = queue_create_count;
+	create_info.pQueueCreateInfos       = queue_infos.data();
+	create_info.queueCreateInfoCount    = static_cast<uint32_t>(queue_infos.size());
 	create_info.enabledExtensionCount   = static_cast<uint32_t>(device_extensions.size());
 	create_info.ppEnabledExtensionNames = device_extensions.data();
 	create_info.pEnabledFeatures        = &device_features;
@@ -1534,7 +1574,7 @@ void WindowContext::CreateVulkan() {
 	// (Streamline's own answer whether DLSS-G can run here, asked before the device: the refusal below gives it.)
 	const std::string frame_gen_problem = FrameGen::SupportProblem(graphic_ctx.physical_device);
 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx.physical_device, r, queue_family,
-	                                        device_extensions, graphic_ctx);
+	                                        device_extensions, graphic_ctx, surface);
 	if (graphic_ctx.device == nullptr) {
 		// (Issue #32: an RTX 5080 whose driver refused the device Streamline asked for; the game runs without it.)
 		if (FrameGen::Requested()) {
@@ -1575,6 +1615,7 @@ void WindowContext::CreateVulkan() {
 		DeviceFault::NoteQueue(graphic_ctx.readback_queue, "readback");
 	}
 	Libs::Graphics::FrameGen::OnDevice(graphic_ctx.instance, graphic_ctx.physical_device, graphic_ctx.device);
+	Libs::Graphics::FrameGen::Fsr::OnDevice(graphic_ctx);
 
 	if (!graphic_ctx.CreateAllocator()) {
 		EXIT("Could not create Vulkan memory allocator");

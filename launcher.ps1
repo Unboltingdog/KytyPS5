@@ -22,17 +22,31 @@ $resolutionsByRatio = @{
 	'32:9' = '3840x1080', '5120x1440', '7680x2160' }
 # The height Demon's Souls renders its 3D at (run-windows.ps1 -RenderHeight); its output and UI stay 3840x2160.
 $renderHeights = '2160 (native 4K)', '1800', '1620', '1512 (PS5 Pro)', '1440 (PS5)', '1296', '1152', '1080', '900'
-# What makes the 3840x2160 image of the 3D (run-windows.ps1 -Upscaler): the game's TAA and stretch (the PS5's), or DLSS in
-# place of Sony's PS5 Pro upscaler on the game's PS5 Pro path (NVIDIA's Streamline runtime, as frame generation).
-$upscalers = 'Game (PS5)', 'DLSS (PS5 Pro path)'
+# What makes the 3840x2160 image of the 3D (run-windows.ps1 -Upscaler): the game's TAA and stretch (the PS5's), or DLSS
+# (NVIDIA's Streamline runtime, as frame generation) or AMD FSR 3.1 (any GPU) in place of Sony's PS5 Pro upscaler on the
+# game's PS5 Pro path.
+$upscalers = 'Game (PS5)', 'DLSS (PS5 Pro path)', 'FSR 3.1 (PS5 Pro path)'
+$upscalerKeys = '', 'dlss', 'fsr'
+# The render height as a ratio of the 2160 output (run-windows.ps1 -UpscaleQuality), FSR's quality modes; Custom keeps
+# the Render height row's own height.
+$presets = 'Custom (Render height below)', 'Native AA (1x)', 'Ultra Quality (1.3x)', 'Quality (1.5x)', 'Balanced (1.7x)',
+	'Performance (2x)', 'Ultra Performance (3x)'
+$presetKeys = '', 'native', 'ultraquality', 'quality', 'balanced', 'performance', 'ultraperformance'
+$presetRatios = 0.0, 1.0, 1.3, 1.5, 1.7, 2.0, 3.0
 # The aspect ratio of Demon's Souls' 3D (run-windows.ps1 -Aspect): wider sees more to the sides.
 $ratios = '16:9 (PS5)', '21:9', '32:9'
 # Demon's Souls' own settings for what a frame draws (run-windows.ps1 -Quality): shorter shadows, simpler distant detail;
 # and smaller textures (run-windows.ps1 -TextureReduce: Low 1, Lowest 2; Standard leaves it to the emulator: 1 below
 # 12 GB of video memory, else 0).
 $qualities = 'Standard (PS5)', 'Low', 'Lowest'
-# DLSS frame generation (run-windows.ps1 -FrameGen: the generated frames per rendered one, the multiplier less one).
+# Frame generation (run-windows.ps1 -FrameGen: the generated frames per rendered one, the multiplier less one): NVIDIA
+# DLSS-G (RTX 40 and newer, up to 6x) or AMD FSR 3 (any GPU, 2x; run-windows.ps1 -FrameGenBackend fsr).
 $frameGens = 'Off', '2x', '3x', '4x', '5x', '6x'
+$frameGenBackends = 'DLSS-G (NVIDIA RTX 40+)', 'FSR 3 (any GPU)'
+$frameGenBackendKeys = 'dlss', 'fsr'
+# The controller hotkey button (hold it + another button; src/local/controller-hotkeys.h), kept in hotkeys.ini next to the
+# emulator, where the game changes it too (the button + R3, then the new one).
+$hotkeyButtons = 'Create', 'PS', 'Touchpad', 'Mute', 'L3', 'R3', 'L1', 'R1', 'Paddle1', 'Paddle2'
 # The emulator's own panel at the top right of the game image (KYTY_FPS_HUD 0, 1, 2).
 $overlays = 'Off', 'Frame rate', 'Detailed'
 # Safe GPU mode (KYTY_COMPUTE_CHAIN=0): Demon's Souls' compute work runs one dispatch after another instead of letting
@@ -48,10 +62,13 @@ $safeGpuTip = "Prevents the crashes and blue screens that come from the graphics
 
 $settings = [ordered]@{ game = ''; resolution = '2560x1440'; fullscreen = $false; aspect = $true; language = 1; redzone = $true;
 	ecores = $false; fps120 = $false; render = 1440; ratio = '16:9'; quality = 'standard'; vsync = $false; hdr = $false; framegen = 0
-	hud = 0; streamline = ''; safegpu = $false; upscaler = ''; render_dlss = 1080 }
+	hud = 0; streamline = ''; safegpu = $false; upscaler = ''; render_dlss = 1080; upscale_quality = 'quality'
+	framegen_backend = ''; fsr_sharpness = 0.25 }
 if (Test-Path $settingsPath) {
 	$saved = Get-Content $settingsPath -Raw | ConvertFrom-Json
 	foreach ($property in $saved.PSObject.Properties) { if ($settings.Contains($property.Name)) { $settings[$property.Name] = $property.Value } }
+	# (Settings from before the quality presets keep their own render height: Custom.)
+	if (!$saved.PSObject.Properties['upscale_quality']) { $settings.upscale_quality = '' }
 }
 if (!$settings.game -and (Test-Path "$root\game-path.txt")) { $settings.game = (Get-Content "$root\game-path.txt" -TotalCount 1).Trim() }
 
@@ -125,6 +142,41 @@ $rtxGpu = try {
 	[bool](Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match 'NVIDIA' -and $_.Name -match '\bRTX\b' })
 } catch { $false }
 $frameGenAvailable = [bool]$streamline -and $rtxGpu
+# AMD FSR 3.1 (upscaling and frame generation) runs on any Vulkan 1.3 GPU with AMD's runtime next to the emulator (the
+# build copies 3rdparty\fidelityfx\bin\amd_fidelityfx_vk.dll there).
+$fsrAvailable = Test-Path -LiteralPath (Join-Path (Split-Path $exe) 'amd_fidelityfx_vk.dll')
+function Test-Upscaler([string]$key) {
+	switch ($key) { 'dlss' { return $frameGenAvailable } 'fsr' { return $fsrAvailable } default { return $true } }
+}
+# The frame generation backend chosen, else the one this PC has: DLSS-G with an RTX card and Streamline, else FSR 3.
+function Get-FrameGenBackend {
+	if ($settings.framegen_backend -in 'dlss', 'fsr') { return $settings.framegen_backend }
+	if ($frameGenAvailable) { 'dlss' } else { 'fsr' }
+}
+function Test-FrameGenBackend([string]$key) { if ($key -eq 'fsr') { $fsrAvailable } else { $frameGenAvailable } }
+# hotkeys.ini's Modifier line (the emulator writes the file; the launcher changes that line only).
+$hotkeysPath = Join-Path (Split-Path $exe) 'hotkeys.ini'
+function Get-HotkeyButton {
+	if (Test-Path -LiteralPath $hotkeysPath) {
+		foreach ($line in Get-Content -LiteralPath $hotkeysPath) {
+			if ($line -match '^\s*Modifier\s*=\s*([^#;]*)') { $value = $Matches[1].Trim(); if ($value) { return $value } }
+		}
+	}
+	'Create'
+}
+function Set-HotkeyButton([string]$button) {
+	try {
+		$lines = @()
+		$found = $false
+		if (Test-Path -LiteralPath $hotkeysPath) {
+			foreach ($line in Get-Content -LiteralPath $hotkeysPath) {
+				if ($line -match '^\s*Modifier\s*=') { $lines += "Modifier=$button"; $found = $true } else { $lines += $line }
+			}
+		}
+		if (!$found) { $lines = @("Modifier=$button") + $lines }
+		Set-Content -LiteralPath $hotkeysPath -Value $lines -Encoding ASCII
+	} catch {}
+}
 
 function Get-PlayCommand {
 	$size = $settings.resolution -split 'x'
@@ -138,16 +190,28 @@ function Get-PlayCommand {
 	# HDR10 output when Windows HDR is on for the display; SDR otherwise.
 	if ($settings.hdr) { $arguments += '-Hdr' }
 	$dlss = $frameGenAvailable -and $settings.upscaler -eq 'dlss'
-	# The upscaler's own render height (with DLSS always passed: the PS5 Pro path's own height is 1512).
-	$height = if ($dlss) { [int]$settings.render_dlss } else { [int]$settings.render }
-	if ($height -gt 0 -and ($height -ne 1440 -or $dlss)) { $arguments += @('-RenderHeight', $height) }
+	$fsr  = $fsrAvailable -and $settings.upscaler -eq 'fsr'
+	$pro  = $dlss -or $fsr
+	if ($settings.upscale_quality -in $presetKeys -and $settings.upscale_quality) {
+		# A quality preset: the render height as its ratio of the 2160 output.
+		$arguments += @('-UpscaleQuality', $settings.upscale_quality)
+	} else {
+		# The upscaler's own render height (on the PS5 Pro path always passed: its own height is 1512).
+		$height = if ($pro) { [int]$settings.render_dlss } else { [int]$settings.render }
+		if ($height -gt 0 -and ($height -ne 1440 -or $pro)) { $arguments += @('-RenderHeight', $height) }
+	}
 	if ($settings.ratio -in '21:9', '32:9') { $arguments += @('-Aspect', $settings.ratio) }
 	if ($settings.quality -in 'low', 'lowest') {
 		$arguments += @('-Quality', $settings.quality, '-TextureReduce', $(if ($settings.quality -eq 'lowest') { 2 } else { 1 }))
 	}
-	if ($frameGenAvailable -and [int]$settings.framegen -ge 2) { $arguments += @('-FrameGen', ([int]$settings.framegen - 1)) }
+	$backend   = Get-FrameGenBackend
+	$dlssFrames = $backend -eq 'dlss' -and $frameGenAvailable -and [int]$settings.framegen -ge 2
+	if ($dlssFrames) { $arguments += @('-FrameGen', ([int]$settings.framegen - 1)) }
+	# (FSR 3 makes one generated frame per rendered one.)
+	if ($backend -eq 'fsr' -and $fsrAvailable -and [int]$settings.framegen -ge 2) { $arguments += @('-FrameGen', 1, '-FrameGenBackend', 'fsr') }
 	if ($dlss) { $arguments += @('-Upscaler', 'dlss') }
-	if ($frameGenAvailable -and ([int]$settings.framegen -ge 2 -or $dlss)) { $arguments += @('-StreamlineDir', "`"$streamline`"") }
+	if ($fsr) { $arguments += @('-Upscaler', 'fsr', '-Sharpness', ([string][double]$settings.fsr_sharpness).Replace(',', '.')) }
+	if ($dlssFrames -or $dlss) { $arguments += @('-StreamlineDir', "`"$streamline`"") }
 	# Switches of the config, one -Set argument (run-windows.ps1 splits it at the commas).
 	$sets = @()
 	# The emulator's panel (KYTY_FPS_HUD) at the top right of the game image: the frame rate and frame times, or with
@@ -173,6 +237,7 @@ if ($DryRun) {
 	"precompile: cmd /s /c `"$(Get-PrecompileCommand)`""
 	"hints:      cmd /s /c `"$(Get-PrecompileCommand '-ExportHints')`""
 	"efficiency cores: 0x{0:X}" -f $efficiencyMask
+	"fsr: $(if ($fsrAvailable) { 'AMD FidelityFX runtime next to the emulator' } else { 'amd_fidelityfx_vk.dll missing (FSR off)' }); hotkey button: $(Get-HotkeyButton) ($hotkeysPath)"
 	"frame generation: $(if ($frameGenAvailable) { "NVIDIA's Streamline runtime in $streamline" } elseif (!$rtxGpu) { 'no NVIDIA RTX graphics card (DLSS off)' } else { "no NVIDIA-signed Streamline runtime (settings: '$($settings.streamline)')" })"
 	return
 }
@@ -304,6 +369,7 @@ function Select-RenderHeight {
 }
 $renderNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
 function Update-RenderNote {
+	if ($preset -and $preset.SelectedIndex -gt 0) { $renderNote.Text = 'set by Upscale quality above'; return }
 	$h = [int](([string]$render.SelectedItem -split ' ')[0])
 	$w = [Math]::Floor($h * (Get-RatioAspect) / 8.0 + 0.5) * 8
 	$renderNote.Text = "Demon's Souls' 3D at ${w}x${h}; higher = sharper, needs more GPU"
@@ -312,7 +378,8 @@ $render.Add_SelectedIndexChanged({
 	if (!$script:fillingRender) { $script:renderWanted = [int](([string]$render.SelectedItem -split ' ')[0]) }
 	Update-RenderNote
 })
-$renderForDlss = $frameGenAvailable -and $settings.upscaler -eq 'dlss'
+# (Both upscalers run on the game's PS5 Pro path and share its render height: render_dlss.)
+$renderForDlss = $settings.upscaler -in 'dlss', 'fsr' -and (Test-Upscaler $settings.upscaler)
 $renderWanted = [int]$(if ($renderForDlss) { $settings.render_dlss } else { $settings.render })
 Select-RenderHeight
 Update-RenderNote
@@ -320,15 +387,31 @@ $ratio.Add_SelectedIndexChanged({
 	Update-Resolutions ([string]$resolution.SelectedItem)
 	Select-RenderHeight
 	Update-RenderNote
+	Update-Preset
 })
-$upscaler = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205; Enabled = $frameGenAvailable }
+$upscaler = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205; Enabled = ($frameGenAvailable -or $fsrAvailable) }
 $upscaler.Items.AddRange($upscalers)
-$upscaler.SelectedIndex = if ($frameGenAvailable -and $settings.upscaler -eq 'dlss') { 1 } else { 0 }
+$upscalerIndex = [Array]::IndexOf($upscalerKeys, [string]$settings.upscaler)
+$upscaler.SelectedIndex = if ($upscalerIndex -gt 0 -and (Test-Upscaler $upscalerKeys[$upscalerIndex])) { $upscalerIndex } else { 0 }
+$upscalerIndex = $upscaler.SelectedIndex
 $upscalerNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
+# FSR's sharpening (run-windows.ps1 -Sharpness; the controller hotkeys change it in the game).
+$sharpnessLabel = New-Object System.Windows.Forms.Label -Property @{ Text = 'Sharpness'; AutoSize = $true; Margin = '6,6,0,0' }
+$sharpness = New-Object System.Windows.Forms.NumericUpDown -Property @{ Minimum = 0; Maximum = 1; DecimalPlaces = 2; Increment = 0.05; Width = 60 }
+$sharpness.Value = [decimal][Math]::Min(1.0, [Math]::Max(0.0, [double]$settings.fsr_sharpness))
 function Update-UpscalerNote {
-	$upscalerNote.Text = if ($frameGenAvailable) { 'DLSS: NVIDIA RTX; 1440 = Quality, 1080 = Performance, 2160 = DLAA' }
-		elseif (!$rtxGpu) { 'DLSS needs an NVIDIA RTX graphics card: here the game''s own TAA' }
-		else { 'needs NVIDIA''s Streamline SDK (choose its folder under Frame generation)' }
+	$key = $upscalerKeys[[Math]::Max(0, $upscaler.SelectedIndex)]
+	$sharpness.Enabled = $key -eq 'fsr'
+	$upscalerNote.Text = switch ($key) {
+		'dlss' { 'DLSS: NVIDIA RTX' }
+		'fsr' { 'FSR 3.1: any GPU (FSR 4 has no Vulkan version)' }
+		default {
+			if ($fsrAvailable) { 'DLSS or FSR 3.1 in place of the game''s TAA: a sharper 4K image' }
+			elseif ($frameGenAvailable) { 'FSR needs amd_fidelityfx_vk.dll next to the emulator' }
+			elseif (!$rtxGpu) { 'FSR needs amd_fidelityfx_vk.dll next to the emulator; DLSS an NVIDIA RTX card' }
+			else { 'DLSS needs NVIDIA''s Streamline SDK (choose its folder under Frame generation)' }
+		}
+	}
 }
 Update-UpscalerNote
 (New-Object System.Windows.Forms.ToolTip -Property @{ AutoPopDelay = 30000 }).SetToolTip($upscaler,
@@ -339,17 +422,61 @@ Update-UpscalerNote
 	"Each upscaler keeps its own render height. DLSS starts at 1080: on an RTX 5090 about the frame rate of the game's TAA`n" +
 	"at 1440, with a sharper 4K image.")
 $upscaler.Add_SelectedIndexChanged({
-	# The height chosen goes back to the upscaler it was for; the newly chosen one's is shown.
-	if ($script:renderForDlss) { $settings.render_dlss = $script:renderWanted } else { $settings.render = $script:renderWanted }
-	$script:renderForDlss = $upscaler.SelectedIndex -eq 1
-	$script:renderWanted = [int]$(if ($script:renderForDlss) { $settings.render_dlss } else { $settings.render })
-	Select-RenderHeight
+	$key = $upscalerKeys[[Math]::Max(0, $upscaler.SelectedIndex)]
+	if (!(Test-Upscaler $key)) {
+		$why = if ($key -eq 'fsr') { "AMD's amd_fidelityfx_vk.dll is not next to the emulator (the build copies it from 3rdparty\fidelityfx\bin)." }
+			else { 'DLSS needs an NVIDIA RTX graphics card and NVIDIA''s Streamline SDK (its folder under Frame generation).' }
+		[void][System.Windows.Forms.MessageBox]::Show($form, $why, 'Upscaler')
+		$upscaler.SelectedIndex = $script:upscalerIndex
+		return
+	}
+	$script:upscalerIndex = $upscaler.SelectedIndex
+	# The height chosen goes back to the path it was for (the game's, or the PS5 Pro path's); the newly chosen one's is shown.
+	$pro = $upscaler.SelectedIndex -ge 1
+	if ($pro -ne $script:renderForDlss) {
+		if ($script:renderForDlss) { $settings.render_dlss = $script:renderWanted } else { $settings.render = $script:renderWanted }
+		$script:renderForDlss = $pro
+		$script:renderWanted = [int]$(if ($script:renderForDlss) { $settings.render_dlss } else { $settings.render })
+		Select-RenderHeight
+	}
 	Update-RenderNote
+	Update-UpscalerNote
+	Update-Preset
 })
+# The render height from a quality preset: 2160 divided by its ratio (a multiple of 8), no more than the ratio's 3D holds,
+# and 1080 at least on the PS5 Pro path (the game's upscaler is off below).
+$preset = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205 }
+$preset.Items.AddRange($presets)
+$preset.SelectedIndex = [Math]::Max(0, [Array]::IndexOf($presetKeys, [string]$settings.upscale_quality))
+$presetNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
+function Update-Preset {
+	$custom = $preset.SelectedIndex -le 0
+	$render.Enabled = $custom
+	if ($custom) {
+		$presetNote.Text = 'the Render height row decides'
+	} else {
+		$h = [int]([Math]::Round(2160.0 / $presetRatios[$preset.SelectedIndex] / 8.0)) * 8
+		$note = ''
+		if ($upscaler.SelectedIndex -ge 1 -and $h -lt 1080) { $h = 1080; $note = ' (the PS5 Pro path stops below 1080: Performance)' }
+		$most = Get-MaxRenderHeight
+		if ($h -gt $most) { $h = $most; $note = ' (the most this aspect ratio holds)' }
+		$w = [Math]::Floor($h * (Get-RatioAspect) / 8.0 + 0.5) * 8
+		$presetNote.Text = "3D at ${w}x${h} of the 4K output$note"
+	}
+	Update-RenderNote
+}
+$preset.Add_SelectedIndexChanged({ Update-Preset })
+(New-Object System.Windows.Forms.ToolTip -Property @{ AutoPopDelay = 30000 }).SetToolTip($preset,
+	"The 3D's render height as a share of the game's 2160-line 4K output (FSR's quality modes; DLSS takes the same):`n" +
+	"Native AA 2160, Ultra Quality 1664, Quality 1440, Balanced 1272, Performance 1080, Ultra Performance 720.`n" +
+	"With DLSS or FSR (the game's PS5 Pro path) the game turns its upscaler off below 1080, so Ultra Performance runs as Performance.`n" +
+	"Custom: the Render height row's own height.")
 Add-Row 'Resolution' @($resolution)
 Add-Row 'Aspect ratio' @($ratio, $ratioNote)
+Add-Row 'Upscaler' @($upscaler, $sharpnessLabel, $sharpness, $upscalerNote)
+Add-Row 'Upscale quality' @($preset, $presetNote)
 Add-Row 'Render height' @($render, $renderNote)
-Add-Row 'Upscaler' @($upscaler, $upscalerNote)
+Update-Preset
 $fullscreen = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Fullscreen'; AutoSize = $true; Checked = [bool]$settings.fullscreen }
 $aspect = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Keep the aspect ratio (black bars)'; AutoSize = $true; Checked = [bool]$settings.aspect }
 $aspect.Enabled = $fullscreen.Checked
@@ -378,18 +505,37 @@ $qualityNote = New-Object System.Windows.Forms.Label -Property @{ Text = 'shorte
 $qualityTips = New-Object System.Windows.Forms.ToolTip
 $qualityTips.SetToolTip($quality, "Standard: the PS5's picture. With less than 12 GB of video memory, large textures leave out their largest level`n(half the size per side) so that they fit.`nLow: shorter sun shadows, simpler distant detail, textures half the size per side.`nLowest: shorter still, no ambient shadowing or torch shadows, textures a quarter the size per side.")
 Add-Row 'Graphics' @($quality, $qualityNote)
-$frameGen = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160; Enabled = $frameGenAvailable }
+$frameGenBackend = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 170 }
+$frameGenBackend.Items.AddRange($frameGenBackends)
+$frameGenBackend.SelectedIndex = [Math]::Max(0, [Array]::IndexOf($frameGenBackendKeys, (Get-FrameGenBackend)))
+$frameGen = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 70 }
 $frameGen.Items.AddRange($frameGens)
-$frameGen.SelectedItem = if ($frameGenAvailable -and [int]$settings.framegen -ge 2) { "$([int]$settings.framegen)x" } else { 'Off' }
+$frameGen.SelectedItem = if ((Test-FrameGenBackend (Get-FrameGenBackend)) -and [int]$settings.framegen -ge 2) { "$([int]$settings.framegen)x" } else { 'Off' }
 if ($frameGen.SelectedIndex -lt 0) { $frameGen.SelectedIndex = 0 }
 $frameGenFolder = New-Object System.Windows.Forms.Button -Property @{ Text = 'Streamline...'; AutoSize = $true }
 $frameGenNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
+function Get-FrameGenBackendKey { $frameGenBackendKeys[[Math]::Max(0, $frameGenBackend.SelectedIndex)] }
 function Update-FrameGenNote {
-	$frameGenNote.Text = if ($frameGenAvailable) { 'DLSS; NVIDIA RTX 40 or newer (3x and up: RTX 50)' }
+	$frameGenNote.Text = if ((Get-FrameGenBackendKey) -eq 'fsr') {
+		if ($fsrAvailable) { 'FSR 3: any GPU, 2x; smoothest from about 60 rendered fps' } else { 'FSR 3 needs amd_fidelityfx_vk.dll next to the emulator' }
+	} elseif ($frameGenAvailable) { 'DLSS; NVIDIA RTX 40 or newer (3x and up: RTX 50)' }
 		elseif (!$rtxGpu) { 'DLSS: needs an NVIDIA RTX 40 or newer graphics card' }
 		else { 'needs NVIDIA''s Streamline SDK: download it, then choose its folder' }
 }
-Update-FrameGenNote
+# The backend's multipliers (FSR 3: 2x only) and whether it can run here.
+function Update-FrameGenState {
+	$key = Get-FrameGenBackendKey
+	$wanted = [string]$frameGen.SelectedItem
+	$frameGen.Items.Clear()
+	$frameGen.Items.AddRange($(if ($key -eq 'fsr') { @('Off', '2x') } else { $frameGens }))
+	$frameGen.SelectedItem = if ($frameGen.Items.Contains($wanted)) { $wanted } elseif ($wanted -and $wanted -ne 'Off') { '2x' } else { 'Off' }
+	if ($frameGen.SelectedIndex -lt 0) { $frameGen.SelectedIndex = 0 }
+	$frameGen.Enabled = Test-FrameGenBackend $key
+	$frameGenFolder.Visible = $key -eq 'dlss'
+	Update-FrameGenNote
+}
+$frameGenBackend.Add_SelectedIndexChanged({ Update-FrameGenState })
+Update-FrameGenState
 $frameGenTips = New-Object System.Windows.Forms.ToolTip
 $frameGenTips.SetToolTip($frameGen, "Shown frames = the game's frames x the multiplier. With VSync on, they are capped at the display's refresh`n(a 60 Hz display at 2x runs the game at 30 fps). The game's frames stay at 60 with 'Up to 120 fps' too:`nframe generation needs them evenly spaced.")
 $frameGenTips.SetToolTip($frameGenFolder, "The NVIDIA Streamline SDK (a release zip from $streamlineSdkUrl), unpacked: its folder or its bin\x64.`nOnly NVIDIA-signed files are used; nothing of NVIDIA's comes with the emulator.")
@@ -407,12 +553,26 @@ $frameGenFolder.Add_Click({
 	$script:streamline = $found
 	# (Without an NVIDIA RTX graphics card the folder is kept, the rows stay off.)
 	$script:frameGenAvailable = $rtxGpu
-	$frameGen.Enabled = $rtxGpu
-	$upscaler.Enabled = $rtxGpu
-	Update-FrameGenNote
+	$upscaler.Enabled = $rtxGpu -or $fsrAvailable
+	Update-FrameGenState
 	Update-UpscalerNote
 })
-Add-Row 'Frame generation' @($frameGen, $frameGenFolder, $frameGenNote)
+Add-Row 'Frame generation' @($frameGenBackend, $frameGen, $frameGenFolder, $frameGenNote)
+# The controller hotkey button: hold it, then another button (hotkeys.ini next to the emulator has the rest).
+$hotkey = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 100 }
+$hotkey.Items.AddRange($hotkeyButtons)
+$currentHotkey = Get-HotkeyButton
+if (!$hotkey.Items.Contains($currentHotkey)) { [void]$hotkey.Items.Add($currentHotkey) }
+$hotkey.SelectedItem = $currentHotkey
+$hotkeyNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0'
+	Text = 'hold it + Options (1 s): quit; + Triangle: full screen; + Cross: frame generation; + L3: all of them' }
+(New-Object System.Windows.Forms.ToolTip -Property @{ AutoPopDelay = 30000 }).SetToolTip($hotkey,
+	"Hold this controller button, then press another:`n" +
+	"  Options (hold 1 s): quit the game`n  Triangle: full screen on/off`n  Square: pause/resume`n  Circle: performance overlay`n" +
+	"  Cross: frame generation on/off`n  Up / Down: FSR sharpness`n  L3: show the hotkeys`n" +
+	"  R3: choose another hotkey button in the game (then press the new one)`n" +
+	"The bindings are in hotkeys.ini next to the emulator.")
+Add-Row 'Controller hotkeys' @($hotkey, $hotkeyNote)
 $hud = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160 }
 $hud.Items.AddRange($overlays)
 # (An older launcher saved true for the frame rate.)
@@ -456,9 +616,13 @@ function Read-Form {
 	if ($renderForDlss) { $settings.render_dlss = $height } else { $settings.render = $height }
 	$settings.ratio      = ([string]$ratio.SelectedItem -split ' ')[0]
 	$settings.quality    = ([string]$quality.SelectedItem -split ' ')[0].ToLowerInvariant()
-	# (Kept as it was where the DLLs are missing.)
-	if ($frameGenAvailable) { $settings.framegen = if ($frameGen.SelectedIndex -gt 0) { $frameGen.SelectedIndex + 1 } else { 0 } }
-	if ($frameGenAvailable) { $settings.upscaler = if ($upscaler.SelectedIndex -eq 1) { 'dlss' } else { '' } }
+	# (Kept as they were where the runtimes are missing.)
+	$settings.framegen_backend = Get-FrameGenBackendKey
+	if ($frameGen.Enabled) { $settings.framegen = if ($frameGen.SelectedIndex -gt 0) { $frameGen.SelectedIndex + 1 } else { 0 } }
+	if ($upscaler.Enabled) { $settings.upscaler = $upscalerKeys[[Math]::Max(0, $upscaler.SelectedIndex)] }
+	$settings.upscale_quality = $presetKeys[[Math]::Max(0, $preset.SelectedIndex)]
+	$settings.fsr_sharpness   = [double]$sharpness.Value
+	if ($hotkey.SelectedItem -and [string]$hotkey.SelectedItem -ne (Get-HotkeyButton)) { Set-HotkeyButton ([string]$hotkey.SelectedItem) }
 	$settings.ecores     = $ecores.Checked
 	Save-Settings
 }

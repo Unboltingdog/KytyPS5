@@ -226,7 +226,13 @@ struct VulkanImage {
 	VmaAllocation                allocation = nullptr;
 };
 
-
+// The readback queue's lock (GraphicContext::readback_queue: src/local/readback-queue.h submits
+// there), held too by what waits for the whole device (FSR frame generation's swapchain,
+// src/local/fsr.cpp).
+inline Common::Mutex& ReadbackQueueMutex() {
+	static Common::Mutex mutex;
+	return mutex;
+}
 
 // Offline tools: the emulator's device without a window (vulkanWindow.cpp).
 bool CreateHeadlessGraphicContext(GraphicContext& graphic_ctx);

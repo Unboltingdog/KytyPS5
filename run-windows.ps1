@@ -19,6 +19,17 @@
 #   .\run-windows.ps1 -Upscaler dlss         DLSS super resolution: Demon's Souls' own PS5 Pro path (its 3D at
 #                                            2688x1512 or -RenderHeight, 1080 at least), DLSS in place of Sony's
 #                                            upscaler making the 3840x2160 image; NVIDIA's Streamline runtime
+#   .\run-windows.ps1 -Upscaler fsr          AMD FSR 3.1 instead of DLSS on the same PS5 Pro path: any GPU; AMD's
+#                                            amd_fidelityfx_vk.dll next to the emulator (src/local/fsr.h)
+#   .\run-windows.ps1 -FrameGen 1 -FrameGenBackend fsr
+#                                            AMD FSR 3 frame generation (2x) instead of DLSS-G: any GPU, no Streamline
+#   .\run-windows.ps1 -UpscaleQuality quality
+#                                            the render height as a preset's ratio of the 2160 output: native (1x),
+#                                            ultraquality (1.3x), quality (1.5x), balanced (1.7x), performance (2x),
+#                                            ultraperformance (3x; 1080 at least on the PS5 Pro path); -RenderHeight wins
+#   .\run-windows.ps1 -Sharpness 0.25        FSR's sharpening, 0 (none) to 1 (default 0.25; hotkeys change it live)
+#   .\run-windows.ps1 -HotkeyButton Create   the controller hotkey button for this run (hotkeys.ini next to the
+#                                            emulator keeps the bindings; src/local/controller-hotkeys.h)
 #   .\run-windows.ps1 -StreamlineDir <dir>   where NVIDIA's Streamline runtime is (the Streamline SDK
 #                                            or its bin\x64; default: a "streamline" folder next to
 #                                            the emulator)
@@ -74,7 +85,11 @@ param(
 	[switch]$AspectFit,
 	[int]$Language = -1,
 	[int]$FrameGen = 0,
-	[ValidateSet('', 'dlss')][string]$Upscaler = '',
+	[ValidateSet('', 'dlss', 'fsr')][string]$Upscaler = '',
+	[ValidateSet('', 'dlss', 'fsr')][string]$FrameGenBackend = '',
+	[ValidateSet('', 'native', 'ultraquality', 'quality', 'balanced', 'performance', 'ultraperformance')][string]$UpscaleQuality = '',
+	[double]$Sharpness = -1,
+	[string]$HotkeyButton = '',
 	[string]$StreamlineDir = '',
 	[string]$Affinity = '',
 	[switch]$Prompt,
@@ -313,6 +328,8 @@ if (!$environment.Contains('KYTY_GAME_CONVARS') -and !$Baseline -and $titleId -m
 # 20.7 -> 24.5 fps at 1080, walking 18.7 -> 22.2).
 # With -Upscaler the height is that of the PS5 Pro's display mode (2688x1512 unless given), so 1440 is passed too.
 if ($RenderHeight -gt 0 -and ($RenderHeight -ne 1440 -or $Upscaler)) { $environment['KYTY_RENDER_HEIGHT'] = "$RenderHeight" }
+# -UpscaleQuality: the render height from a preset (src/loader/demonsSoulsRenderSize.h QualityHeight), unless -RenderHeight.
+if ($UpscaleQuality) { $environment['KYTY_UPSCALE_QUALITY'] = $UpscaleQuality }
 # -Aspect 21:9 (or 32:9, w:h): the 3D rendered at that aspect, its width at the render height (3416x1440), the game's
 # projection widened to match; the presenter shows every frame at the aspect (movies and menus stretched).
 if ($Aspect -and $Aspect -ne '16:9') { $environment['KYTY_RENDER_ASPECT'] = $Aspect }
@@ -369,11 +386,17 @@ if ($Threads -gt 0) { $environment['KYTY_SHADER_WARMUP_THREADS'] = "$Threads" }
 if (!$environment.Contains('KYTY_HITCH_LOG_MS')) { $environment['KYTY_HITCH_LOG_MS'] = '100' }
 if ($AspectFit) { $environment['KYTY_PRESENT_ASPECT'] = 'fit' }
 if ($FrameGen -gt 0) { $environment['KYTY_FRAMEGEN'] = "$FrameGen" }
-# -Upscaler dlss: src/loader/demonsSoulsSuperResolution.h.
+# -FrameGenBackend fsr: AMD FSR 3 frame generation (src/local/fsr.h) instead of DLSS-G.
+if ($FrameGenBackend) { $environment['KYTY_FRAMEGEN_BACKEND'] = $FrameGenBackend }
+# -Upscaler dlss|fsr: src/loader/demonsSoulsSuperResolution.h.
 if ($Upscaler) { $environment['KYTY_UPSCALER'] = $Upscaler }
+if ($Sharpness -ge 0) { $environment['KYTY_FSR_SHARPNESS'] = ([string][Math]::Min(1.0, $Sharpness)).Replace(',', '.') }
+if ($HotkeyButton) { $environment['KYTY_HOTKEY_MODIFIER'] = $HotkeyButton }
+# Streamline only for NVIDIA's (DLSS-G, the DLSS upscaler).
+$wantsStreamline = ($FrameGen -gt 0 -and $FrameGenBackend -ne 'fsr') -or $Upscaler -eq 'dlss'
 # Without -StreamlineDir, the Streamline folder chosen in the launcher (launcher-settings.json), as the launcher passes
 # it: run.cmd -FrameGen 1 had started with frame generation off, its runtime not found (issue #38).
-if (!$StreamlineDir -and ($FrameGen -gt 0 -or $Upscaler) -and (Test-Path "$PSScriptRoot\launcher-settings.json")) {
+if (!$StreamlineDir -and $wantsStreamline -and (Test-Path "$PSScriptRoot\launcher-settings.json")) {
 	$chosen = try { [string](Get-Content "$PSScriptRoot\launcher-settings.json" -Raw | ConvertFrom-Json).streamline } catch { '' }
 	if ($chosen -and (Test-Path $chosen)) { $StreamlineDir = $chosen }
 }

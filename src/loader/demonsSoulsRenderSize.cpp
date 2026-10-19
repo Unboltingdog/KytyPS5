@@ -1,8 +1,9 @@
 #include "loader/demonsSoulsRenderSize.h"
-#include "loader/demonsSoulsSuperResolution.h"
 
 #include "graphics/host_gpu/hostMemory.h"
 #include "graphics/host_gpu/renderer/demonsSouls.h"
+#include "loader/demonsSoulsSuperResolution.h"
+#include "loader/demonsSoulsWarp.h"
 #include "loader/elf.h"
 #include "loader/guestCode.h"
 #include "loader/runtimeLinker.h"
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace Loader::DemonsSoulsRenderSize {
@@ -138,6 +140,27 @@ uint32_t WideOutputWidth() {
 void Install(Program* program) {
 	const char* setting = std::getenv("KYTY_RENDER_HEIGHT");
 	const char* wide    = std::getenv("KYTY_RENDER_ASPECT");
+	// KYTY_UPSCALE_QUALITY (a preset's ratio of the 2160 output) where no height is given.
+	static std::string preset_height;
+	if (const char* quality = std::getenv("KYTY_UPSCALE_QUALITY");
+	    quality != nullptr && *quality != 0) {
+		if (setting != nullptr && *setting != 0) {
+			std::printf("Demon's Souls render size: KYTY_RENDER_HEIGHT=%s given, "
+			            "KYTY_UPSCALE_QUALITY=%s left aside\n",
+			            setting, quality);
+		} else if (const auto height = QualityHeight(quality); height != 0) {
+			preset_height = std::to_string(height);
+			setting       = preset_height.c_str();
+			std::printf("Demon's Souls render size: quality %s, %.2fx: render height %u of the "
+			            "2160 output\n",
+			            quality, static_cast<double>(OutputHeight) / height, height);
+		} else {
+			std::printf("Demon's Souls render size: KYTY_UPSCALE_QUALITY=%s is no preset (native, "
+			            "ultraquality, quality, "
+			            "balanced, performance, ultraperformance, or a ratio 1-3)\n",
+			            quality);
+		}
+	}
 	if (((setting == nullptr || *setting == 0) && (wide == nullptr || *wide == 0)) || program == nullptr ||
 	    !Libs::Graphics::DemonsSouls::IsSupportedGame() || program->file_name.filename() != "eboot.bin")
 		return;
@@ -153,10 +176,16 @@ void Install(Program* program) {
 		std::printf("Demon's Souls render size: KYTY_RENDER_ASPECT=%s is not wider than 16:9 and at most 32:9; 16:9 kept\n",
 		            wide);
 	if (trinity && requested >= 720 && requested < SuperResolutionLeastHeight) {
-		std::printf("Demon's Souls render size: KYTY_RENDER_HEIGHT=%u is below the game's super resolution (1080 at "
-		            "least); 1080 instead\n",
-		            requested);
+		std::printf(
+		    "Demon's Souls render size: a render height of %u is below the game's super resolution "
+		    "(1080 at "
+		    "least: the game turns its upscaler off below); 1080 (performance, 2x) instead\n",
+		    requested);
 		requested = SuperResolutionLeastHeight;
+		Loader::DemonsSoulsWarp::ShowNotice(
+		    "Ultra Performance needs a 720p render: the game's upscaler stops below 1080p. "
+		    "Using Performance (1080p).",
+		    20);
 	}
 	if (requested == game_height && aspect == 0.0) return;
 	auto size = RenderSizeFor(requested, aspect != 0.0 ? aspect : GameAspect);

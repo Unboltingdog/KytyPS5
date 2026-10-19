@@ -1,5 +1,7 @@
-// Sony's PS5 Pro super resolution as Demon's Souls dispatches it (graphics/guest_gpu/superResolution.h), done here:
-// DLSS (KYTY_UPSCALER=dlss, frame-gen.h) where Streamline offers it, else a linear stretch of the input.
+// Sony's PS5 Pro super resolution as Demon's Souls dispatches it
+// (graphics/guest_gpu/superResolution.h), done here: DLSS (KYTY_UPSCALER=dlss, frame-gen.h) where
+// Streamline offers it, FSR 3.1 (KYTY_UPSCALER=fsr, fsr.h) where AMD's FidelityFX runtime is there,
+// else a linear stretch of the input.
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/superResolution.h"
@@ -379,8 +381,10 @@ void RenderExecutor::RunSuperResolution(CommandBuffer& buffer, const SuperResolu
 		return value == nullptr || *value != '0';
 	}();
 	const bool dlss         = FrameGen::UpscalerReady() && !stretch;
-	const auto depth_layout = depth.info.IsDepth() ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
-	                                               : vk::ImageLayout::eShaderReadOnlyOptimal;
+	// (FSR reads every input in the shader-read layout: FidelityFX's state for them.)
+	const auto depth_layout = depth.info.IsDepth() && !FrameGen::UpscalerIsFsr()
+	                              ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
+	                              : vk::ImageLayout::eShaderReadOnlyOptimal;
 	const auto upscale_image = [&](const TextureBinding& binding, const Image& image, vk::ImageLayout layout) {
 		FrameGen::UpscaleImage out;
 		out.image  = image.backing.image;
@@ -389,6 +393,15 @@ void RenderExecutor::RunSuperResolution(CommandBuffer& buffer, const SuperResolu
 		out.format = binding.desc.view_info.format;
 		out.extent = extent(binding, image);
 		out.usage  = image.backing.usage;
+		// (FSR: the whole image, viewed as the view's format only where the image allows another.)
+		out.view_format  = (image.backing.flags & vk::ImageCreateFlagBits::eMutableFormat)
+		                       ? binding.desc.view_info.format
+		                       : image.backing.format;
+		out.image_extent = {image.backing.extent.width, image.backing.extent.height};
+		out.levels       = image.backing.mip_levels;
+		out.layers       = image.backing.layers;
+		out.base_level   = binding.desc.view_info.base_level;
+		out.base_layer   = binding.desc.view_info.base_layer;
 		return out;
 	};
 	UpscaleRecord record;
@@ -433,7 +446,8 @@ void RenderExecutor::RunSuperResolution(CommandBuffer& buffer, const SuperResolu
 		}
 	}
 	if (static std::atomic<uint32_t> reports {0}; reports.fetch_add(1, std::memory_order_relaxed) < 2) {
-		std::printf("Super resolution: %s, the game's exposure %s\n", dlss ? "DLSS" : "stretch",
+		std::printf("Super resolution: %s, the game's exposure %s\n",
+		            dlss ? FrameGen::UpscalerName() : "stretch",
 		            record.exposure_pass.pipeline != nullptr ? "applied" : "not applied");
 		std::fflush(stdout);
 	}

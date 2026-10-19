@@ -1,10 +1,11 @@
 #include "frame-gen.h"
-#include "frame-gen-hudless.h"
 
 #include "common/logging/log.h"
-#include "local-platform.h"
+#include "frame-gen-hudless.h"
+#include "fsr.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "local-platform.h"
 
 #include <algorithm>
 #include <atomic>
@@ -61,6 +62,7 @@ uint64_t g_guest_frame = 0;     // Kyty.Gpu
 std::atomic<bool> g_scene {false}; // the current guest frame ran the TAA pass
 std::atomic<bool> g_last_scene {false}; // ... the last one the guest flipped
 std::atomic<uint64_t> g_flips_taken {0}; // TakeScene calls (guest flips)
+std::atomic<bool>     g_user_enabled {true}; // SetUserEnabled (controller hotkeys)
 
 float AsFloat(uint32_t word) {
 	float value = 0.0f;
@@ -403,7 +405,23 @@ void TagHudless(sl::FrameToken& token, const FrameInputs& inputs, const sl::Exte
 } // namespace
 
 bool Enabled() {
-	return g_ready;
+	return g_ready || Fsr::FrameGenReady();
+}
+
+const char* BackendName() {
+	return g_ready ? "DLSS-G" : Fsr::FrameGenReady() ? "FSR 3" : nullptr;
+}
+
+bool FsrFrameGen() {
+	return Fsr::FrameGenReady();
+}
+
+bool UserEnabled() {
+	return g_user_enabled.load(std::memory_order_relaxed);
+}
+
+void SetUserEnabled(bool on) {
+	g_user_enabled.store(on, std::memory_order_relaxed);
 }
 
 bool Requested() {
@@ -484,7 +502,7 @@ std::string RefusedDeviceAdvice() {
 }
 
 bool WantsCamera() {
-	return g_ready && !g_camera.valid;
+	return Enabled() && !g_camera.valid;
 }
 
 bool InputsGathered() {
@@ -525,8 +543,13 @@ void BypassCommandHooks(vk::Device device) {
 }
 
 void Initialize() {
-	const char* value = std::getenv("KYTY_FRAMEGEN");
-	g_generate        = value != nullptr ? std::clamp(std::atoi(value), 0, 5) : 0;
+	// AMD FSR (fsr.h): KYTY_UPSCALER=fsr, KYTY_FRAMEGEN_BACKEND=fsr. Frame generation by FSR leaves
+	// Streamline out of it.
+	Fsr::Initialize();
+	const char* backend  = std::getenv("KYTY_FRAMEGEN_BACKEND");
+	const bool  fsr_fg   = backend != nullptr && std::string_view(backend) == "fsr";
+	const char* value    = std::getenv("KYTY_FRAMEGEN");
+	g_generate           = value != nullptr && !fsr_fg ? std::clamp(std::atoi(value), 0, 5) : 0;
 	const char* upscaler = std::getenv("KYTY_UPSCALER");
 	g_upscale            = upscaler != nullptr && std::string_view(upscaler) == "dlss";
 	if (g_generate == 0 && !g_upscale) {
@@ -717,7 +740,8 @@ void BeforePresent(const FrameInputs* inputs, vk::Extent2D backbuffer, vk::Rect2
 	const bool               usable = inputs != nullptr && inputs->valid;
 	g_run_with    = usable ? g_run_with + 1 : 0;
 	g_run_without = usable ? 0 : g_run_without + 1;
-	const bool mode_on = g_mode_on ? g_run_without < TurnOffAfter : g_run_with >= TurnOnAfter;
+	const bool mode_on =
+	    UserEnabled() && (g_mode_on ? g_run_without < TurnOffAfter : g_run_with >= TurnOnAfter);
 	// DLSS-G options: on while frames carry inputs; sizes are hints for its allocations.
 	if (!g_options_set || g_options_format != format || mode_on != g_mode_on ||
 	    (usable && (g_options_backbuffer != backbuffer || g_options_render != inputs->render_extent))) {
@@ -960,12 +984,14 @@ void NoteDroppedFrame() {
 #ifdef KYTY_FRAMEGEN_STREAMLINE
 	g_discontinuity.store(true, std::memory_order_relaxed);
 #endif
+	Fsr::NoteDroppedFrame();
 	static std::atomic<uint32_t> dropped {0};
 	if (const auto count = dropped.fetch_add(1, std::memory_order_relaxed) + 1; count <= 8 || count % 600 == 0)
 		LOGF("frame generation: %u frame(s) with inputs left unshown (the next resets DLSS-G's history)\n", count);
 }
 
 uint32_t PresentedFrames() {
+	if (!g_ready && Fsr::FrameGenReady()) return Fsr::PresentedFrames();
 	return g_presented_frames.load(std::memory_order_relaxed);
 }
 
@@ -1061,10 +1087,19 @@ void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer&
 }
 
 bool UpscalerReady() {
-	return g_upscale_ready;
+	return g_upscale_ready || Fsr::UpscalerReady();
+}
+
+bool UpscalerIsFsr() {
+	return !g_upscale_ready && Fsr::UpscalerReady();
+}
+
+const char* UpscalerName() {
+	return g_upscale_ready ? "DLSS" : Fsr::UpscalerReady() ? "FSR 3.1" : nullptr;
 }
 
 bool Upscale(vk::CommandBuffer command, const UpscaleInputs& inputs) {
+	if (UpscalerIsFsr()) return Fsr::Upscale(command, inputs);
 #ifdef KYTY_FRAMEGEN_STREAMLINE
 	if (!g_upscale_ready) return false;
 	// Its own viewport: DLSS-G's (0) takes its constants and tags at the present.

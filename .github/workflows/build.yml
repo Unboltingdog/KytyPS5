@@ -91,8 +91,9 @@ jobs:
           $build = '_Build\windows'
           $out = "_Build\package\$env:PACKAGE"
           New-Item -ItemType Directory -Force $out | Out-Null
+          # (AMD's FidelityFX runtime for FSR 3.1: the build copies it from 3rdparty\fidelityfx\bin, MIT.)
           Copy-Item "$build\kyty_emulator.exe", "$build\kyty_shader_precompile.exe", "$build\libwinpthread-1.dll",
-            run-windows.ps1, precompile-windows.ps1, launcher.ps1, launcher.cmd, LICENSE $out
+            "$build\amd_fidelityfx_vk.dll", run-windows.ps1, precompile-windows.ps1, launcher.ps1, launcher.cmd, LICENSE $out
           Copy-Item LICENSES $out -Recurse
           Copy-Item run-windows.json "$out\launch.json"
           Copy-Item docs\PORTABLE-README.md "$out\README.md"

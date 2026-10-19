@@ -28,14 +28,24 @@ bool Active() {
 }
 
 void Install(Program* program) {
+	// KYTY_UPSCALER=dlss (NVIDIA's, frame-gen.h) or fsr (AMD's FSR 3.1, fsr.h).
 	const char* upscaler = std::getenv("KYTY_UPSCALER");
-	if (upscaler == nullptr || std::string_view(upscaler) != "dlss" || program == nullptr ||
-	    !Libs::Graphics::DemonsSouls::IsSupportedGame() || program->file_name.filename() != "eboot.bin")
+	if (upscaler == nullptr ||
+	    (std::string_view(upscaler) != "dlss" && std::string_view(upscaler) != "fsr") ||
+	    program == nullptr || !Libs::Graphics::DemonsSouls::IsSupportedGame() ||
+	    program->file_name.filename() != "eboot.bin")
 		return;
-	// (The device exists by now: without DLSS on it, the game's own TAA rather than a stretch without anti-aliasing.)
+	// (The device exists by now: without the upscaler on it, the game's own TAA rather than a
+	// stretch without anti-aliasing.)
 	if (!Libs::Graphics::FrameGen::UpscalerReady()) {
-		std::printf("Demon's Souls super resolution: DLSS is not available here (an NVIDIA RTX GPU and NVIDIA's Streamline "
-		            "runtime); the game's own TAA kept\n");
+		if (std::string_view(upscaler) == "fsr")
+			std::printf("Demon's Souls super resolution: FSR is not available here (AMD's "
+			            "amd_fidelityfx_vk.dll next to the "
+			            "emulator); the game's own TAA kept\n");
+		else
+			std::printf("Demon's Souls super resolution: DLSS is not available here (an NVIDIA RTX "
+			            "GPU and NVIDIA's "
+			            "Streamline runtime); the game's own TAA kept\n");
 		return;
 	}
 	const auto site = GuestCode::FindUnique(*program, GuestCode::Pattern(CreateCheck));
@@ -46,7 +56,9 @@ void Install(Program* program) {
 	// Installation occurs before module initializers or guest threads run; program memory is writable to the host.
 	std::memcpy(reinterpret_cast<void*>(*site), Taken, sizeof(Taken));
 	g_active = true;
-	std::printf("Demon's Souls super resolution: the PS5 Pro path (display mode 5, its upscaler in place of the TAA) is on\n");
+	std::printf("Demon's Souls super resolution: the PS5 Pro path (display mode 5, %s in place of "
+	            "its upscaler and TAA) is on\n",
+	            Libs::Graphics::FrameGen::UpscalerName());
 }
 
 } // namespace Loader::DemonsSoulsSuperResolution

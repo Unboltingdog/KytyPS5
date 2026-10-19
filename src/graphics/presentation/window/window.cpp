@@ -28,22 +28,23 @@
 #include "common/systemInfo.h"
 #include "common/threads.h"
 #include "common/timer.h"
+#include "controller-hotkeys.h"
+#include "debug-snapshot.h"
+#include "frame-gen.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
-#include "loader/demonsSoulsWarp.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/renderDoc.h"
-#include "debug-snapshot.h"
-#include "perf-overlay.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/window/hostInput.h"
 #include "graphics/presentation/window/startupProgress.h"
 #include "graphics/presentation/window/windowInternal.h"
-#include "frame-gen.h"
 #include "kytyGitVersion.h"
 #include "libs/controller.h"
+#include "loader/demonsSoulsWarp.h"
 #include "loader/systemContent.h"
+#include "perf-overlay.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -388,6 +389,10 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 
 	if (f.down || f.up) {
 		const auto button = ControllerButtonToPadButton(f.button);
+		// Hotkeys first (src/local/controller-hotkeys.h): a chord's buttons do not reach the game.
+		if (Local::ControllerHotkeys::OnButton(f.id, f.button, f.down, button)) {
+			return;
+		}
 		if (button != 0) {
 			Controller::SetButton(f.id, button, f.down);
 		}
@@ -538,6 +543,10 @@ void WindowContext::ProcessEvent(double time_s) {
 		if (event->type == SDL_KEYDOWN && event->key.repeat == 0) {
 			HostInputToggleMouseToJoystick();
 		}
+		return;
+	}
+	// (The controller hotkeys' own timer events: hold to quit, a tapped modifier's release.)
+	if (Local::ControllerHotkeys::OnEvent(*event)) {
 		return;
 	}
 	if (ProcessSystemOverlayInput(*event)) {
@@ -816,6 +825,23 @@ void WindowContext::Run() {
 	loop.need_exit = false;
 	loop.paused.store(false, std::memory_order_release);
 
+	// Controller hotkeys (src/local/controller-hotkeys.h): the window's own actions.
+	Local::ControllerHotkeys::Actions actions;
+	actions.quit = [] {
+		SDL_Event quit {};
+		quit.type = SDL_QUIT;
+		SDL_PushEvent(&quit);
+	};
+	actions.toggle_fullscreen = [] { ToggleDesktopFullscreen(); };
+	actions.toggle_pause      = [] {
+		if (g_window == nullptr) return;
+		const bool paused = !g_window->loop.paused.load(std::memory_order_acquire);
+		SetPause(g_window->loop, paused);
+		Loader::DemonsSoulsWarp::ShowNotice(paused ? "Paused" : "Resumed", 2);
+	};
+	actions.cycle_overlay = [] { (void)PerfOverlay::CycleLevel(); };
+	Local::ControllerHotkeys::Initialize(actions);
+
 	while (!loop.need_exit) {
 		DrainMainThreadTasks();
 		if (loop.paused.load(std::memory_order_acquire)) {
@@ -898,11 +924,10 @@ static void WindowCreate(WindowContext& context) {
 		window_flags |= static_cast<uint32_t>(SDL_WINDOW_BORDERLESS);
 	}
 #endif
-#if defined(_WIN32)
 	// KYTY_FRAMEGEN: Streamline must be initialized before SDL loads Vulkan with the window, and
-	// then becomes that loader (the instance and device are created through it).
+	// then becomes that loader (the instance and device are created through it). FSR (fsr.h) is
+	// read here too.
 	Libs::Graphics::FrameGen::Initialize();
-#endif
 	context.window = SDL_CreateWindow(KYTY_SDL_WINDOW_CAPTION, KYTY_SDL_WINDOWPOS_CENTERED,
 	                                  KYTY_SDL_WINDOWPOS_CENTERED, width, height, window_flags);
 
