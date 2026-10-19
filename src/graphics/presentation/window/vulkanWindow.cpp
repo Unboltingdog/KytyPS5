@@ -1555,6 +1555,18 @@ void WindowContext::CreateVulkan() {
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME);
 		}
+		// AMD FSR (fsr.h): FidelityFX's Vulkan backend takes the KHR and AMD entry points of the
+		// extensions the GPU lists, enabled or not: vkGetBufferMemoryRequirements2KHR (with
+		// VK_KHR_dedicated_allocation listed) was null and crashed its first context.
+		if (FrameGen::Fsr::UpscaleRequested() || FrameGen::Fsr::FrameGenRequested()) {
+			for (const auto* extension: {VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
+			                             VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
+			                             VK_AMD_BUFFER_MARKER_EXTENSION_NAME}) {
+				if (HasExtension(available_extensions, extension) && !HasExtension(device_extensions, extension)) {
+					device_extensions.push_back(extension);
+				}
+			}
+		}
 		// KYTY_FRAMEGEN: Streamline enables VK_NV_low_latency2 (Reflex) without the present-id
 		// extension it requires; current drivers then refuse the device.
 		if (FrameGen::Requested() && HasExtension(available_extensions, VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
