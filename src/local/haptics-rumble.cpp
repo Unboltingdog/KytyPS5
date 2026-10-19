@@ -37,6 +37,7 @@ RumbleLevel HapticsToRumble::Feed(const void* data, uint32_t frames, uint32_t ra
 	// Each channel's mean square in both bands; the strongest channel counts (the actuators are
 	// left and right).
 	float low_sum[MAX_CHANNELS] {}, high_sum[MAX_CHANNELS] {};
+	m_peak = 0.0f;
 	for (uint32_t frame = 0; frame < frames; frame++) {
 		for (uint32_t ch = 0; ch < used; ch++) {
 			const size_t index = static_cast<size_t>(frame) * channels + ch;
@@ -46,6 +47,7 @@ RumbleLevel HapticsToRumble::Feed(const void* data, uint32_t frames, uint32_t ra
 			if (gains != nullptr) {
 				value *= gains[ch];
 			}
+			m_peak = std::max(m_peak, std::fabs(value));
 			m_low_pass[ch] += alpha * (value - m_low_pass[ch]);
 			const float high = value - m_low_pass[ch];
 			low_sum[ch] += m_low_pass[ch] * m_low_pass[ch];

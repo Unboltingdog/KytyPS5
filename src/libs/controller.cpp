@@ -116,6 +116,8 @@ public:
 	void GetConnectionInfo(bool* flag, int* count);
 	void SetVibration(uint8_t large_motor, uint8_t small_motor);
 	void    SetHapticRumble(uint8_t large_motor, uint8_t small_motor);
+	// The log's list of the connected pads and whether each takes rumble.
+	void    DescribePads();
 	void SetLightBar(uint8_t r, uint8_t g, uint8_t b);
 	bool SetTriggerEffect(const PadTriggerEffectParam& param);
 	int32_t GetTriggerEffectState(bool left);
@@ -504,22 +506,52 @@ void GameController::SetHapticRumble(uint8_t large_motor, uint8_t small_motor) {
 	SendRumble();
 }
 
+// Rumble sent and refused (HapticsRumble's log summary).
+static std::atomic<uint32_t> g_rumble_sent {0}, g_rumble_failed {0};
+
 void GameController::SendRumble() {
-	if (m_active_id == HOST_INPUT_CONTROLLER_ID) {
-		return;
-	}
-
-	auto* pad = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(m_active_id));
-	if (pad == nullptr) {
-		return;
-	}
-
 	const auto large  = static_cast<uint16_t>(std::max(m_vibration_large, m_haptic_large) * 0x101U);
 	const auto small  = static_cast<uint16_t>(std::max(m_vibration_small, m_haptic_small) * 0x101U);
 	const bool haptic = m_haptic_large != 0 || m_haptic_small != 0;
-	if (SDL_GameControllerRumble(pad, large, small,
-	                             haptic ? HAPTIC_RUMBLE_MS : RUMBLE_DURATION_MS) != 0) {
-		LOGF("\t rumble failed: %s\n", SDL_GetError());
+	// Every connected pad, not only the active one: a handheld such as the Legion Go can show up as
+	// more than one controller (its XInput pad and a HID one), and the one taken as active may be the
+	// one without motors.
+	for (const auto id: m_connected_ids) {
+		if (id == HOST_INPUT_CONTROLLER_ID) {
+			continue;
+		}
+		auto* pad = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(id));
+		if (pad == nullptr) {
+			continue;
+		}
+		if (SDL_GameControllerRumble(pad, large, small,
+		                             haptic ? HAPTIC_RUMBLE_MS : RUMBLE_DURATION_MS) == 0) {
+			g_rumble_sent++;
+		} else if (g_rumble_failed++ < 3) {
+			std::printf("Controller: rumble refused by '%s': %s\n", SDL_GameControllerName(pad),
+			            SDL_GetError());
+		}
+	}
+}
+
+void GameController::DescribePads() {
+	Common::LockGuard lock(m_mutex);
+	int               pads = 0;
+	for (const auto id: m_connected_ids) {
+		if (id == HOST_INPUT_CONTROLLER_ID) {
+			continue;
+		}
+		pads++;
+		auto* pad = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(id));
+		std::printf("Controller: pad %d '%s'%s: %s\n", id,
+		            pad != nullptr ? SDL_GameControllerName(pad) : "?",
+		            id == m_active_id ? " (active)" : "",
+		            pad != nullptr && SDL_GameControllerHasRumble(pad) == SDL_TRUE
+		                ? "has rumble"
+		                : "reports no rumble motors");
+	}
+	if (pads == 0) {
+		std::printf("Controller: no controller connected (keyboard only): no rumble\n");
 	}
 }
 
@@ -534,15 +566,41 @@ void HapticsRumble(const void* data, uint32_t frames, uint32_t rate, uint32_t ch
 	static RumbleLevel     last;
 	static uint32_t        last_sent = 0;
 	static bool            reported  = false;
-	std::lock_guard        lock(mutex);
+	// The log's summary every SUMMARY_MS: what the game sent and what the motors got.
+	constexpr uint32_t SUMMARY_MS = 15000;
+	static uint32_t    summary_at = 0, buffers = 0, summaries = 0;
+	static float       peak       = 0.0f;
+	static RumbleLevel strongest;
+	std::lock_guard    lock(mutex);
 	if (!reported) {
 		reported = true;
 		std::printf("Controller: the game's DualSense haptics play as rumble (strength %.2f, "
-		            "KYTY_HAPTICS_RUMBLE)\n",
-		            static_cast<double>(strength));
+		            "KYTY_HAPTICS_RUMBLE; %u Hz, %u channel(s), %s)\n",
+		            static_cast<double>(strength), rate, channels, is_float ? "float" : "16-bit");
+		g_controller->DescribePads();
+		summary_at = SDL_GetTicks() + SUMMARY_MS;
 	}
 	converter.SetStrength(strength);
 	const auto level = converter.Feed(data, frames, rate, channels, is_float, gains);
+
+	buffers++;
+	peak            = std::max(peak, converter.Peak());
+	strongest.large = std::max(strongest.large, level.large);
+	strongest.small = std::max(strongest.small, level.small);
+	if (SDL_GetTicks() - summary_at < 0x80000000U) {
+		summary_at = SDL_GetTicks() + SUMMARY_MS;
+		// The first minute in full, then only while something plays.
+		if (summaries < 4 || peak > 0.0f) {
+			summaries++;
+			std::printf("Controller: rumble, last %u s: %u buffers, peak sample %.4f, strongest "
+			            "motors %u/%u, sent %u, refused %u\n",
+			            SUMMARY_MS / 1000, buffers, static_cast<double>(peak), strongest.large,
+			            strongest.small, g_rumble_sent.load(), g_rumble_failed.load());
+		}
+		buffers   = 0;
+		peak      = 0.0f;
+		strongest = {};
+	}
 
 	// Sent when it changes, and renewed while on (HAPTIC_RUMBLE_MS); not per buffer (a few ms
 	// each).

@@ -515,6 +515,15 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, const float* gains, b
 		}
 		if (port->type == AUDIO_OUT_PORT_TYPE_VIBRATION) {
 			// No DualSense on USB: the haptics become rumble for whatever controller is in use.
+			static bool reported = false;
+			if (!reported) {
+				reported = true;
+				std::printf("AudioOut: vibration port to rumble: port volume %d/%d (32768 is full), "
+				            "gains %s%.2f/%.2f\n",
+				            port->volume[0], port->volume[1], gains != nullptr ? "" : "(none) ",
+				            static_cast<double>(gains != nullptr ? gains[0] : 1.0f),
+				            static_cast<double>(gains != nullptr ? gains[1] : 1.0f));
+			}
 			std::vector<uint8_t> prepared_buffer;
 			const void*          prepared_data = PrepareOutputBuffer(*port, data, &prepared_buffer);
 			Controller::HapticsRumble(prepared_data, port->samples_num, port->freq,

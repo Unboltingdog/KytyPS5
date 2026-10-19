@@ -26,8 +26,12 @@ public:
 	RumbleLevel Feed(const void* data, uint32_t frames, uint32_t rate, uint32_t channels,
 	                 bool is_float, const float* gains);
 	void        Reset();
+	// The last buffer's largest sample (after `gains`), 0..1: the log's check that the game sends
+	// anything.
+	[[nodiscard]] float Peak() const { return m_peak; }
 
 private:
+	float m_peak = 0.0f;
 	float m_low_pass[MAX_CHANNELS] {};
 	float m_env_low = 0.0f, m_env_high = 0.0f;
 	float m_strength = 1.0f;
