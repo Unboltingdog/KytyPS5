@@ -96,7 +96,9 @@ at 1080, DLSS's Performance (on an RTX 5090 about the frame rate of the game's o
 sharper picture); 1440 is its Quality, 1512 the PS5 Pro's own 2688x1512, 2160 DLAA. NVIDIA RTX only, with
 NVIDIA's Streamline runtime as for frame generation below: on a PC without an NVIDIA RTX graphics card (AMD,
 Intel, GeForce GTX) the launcher keeps this row and frame generation off, and the game's own TAA makes the
-picture at its own render height. The in-game "Cinematic" mode stays native 4K without DLSS.
+picture at its own render height. With DLSS or FSR on, the game's own graphics mode menu (Cinematic or
+Performance) keeps the upscaler and the render height chosen in the launcher too (`KYTY_SR_EVERY_MODE=0`: Cinematic
+stays native 4K without them, as before).
 With an "Aspect ratio" wider than 16:9, DLSS makes the picture at its full width: 5120x2160 at 21:9 (from
 2560x1080 at render height 1080), and the game finishes it at that size, with the HUD at the screen's edges,
 instead of a 3840x2160 picture widened on the screen. On an RTX 5090 at Boletaria's start that ran at 64.5 fps,

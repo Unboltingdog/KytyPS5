@@ -35,13 +35,27 @@ const std::string& ExtraLines() {
 
 enum class Kind { None, Args, PerfConfig };
 
+// KYTY_SR_EVERY_MODE=0: only the performance mode's render config gets the PS5 Pro path, as before; by default every
+// PS5 render config does (the game's Cinematic mode too), so the upscaler (DLSS, FSR) and the render height chosen in
+// the launcher hold whichever graphics mode the game's menu is set to.
+bool EveryMode() {
+	static const bool every = [] {
+		const char* value = std::getenv("KYTY_SR_EVERY_MODE");
+		return value == nullptr || *value != '0';
+	}();
+	return every;
+}
+
 // The engine opens them as "$/packagecmdlineargs.txt" and "$/misc/renderconfig_ps5_perf.txt" (lower case): the
-// names are compared without case.
+// names are compared without case. With the super resolution path on, the PS5 render configs
+// ("renderconfig_ps5_*.txt": the performance mode's, and with EveryMode the others) ask for display mode 5.
 Kind KindOf(const std::filesystem::path& real) {
 	auto name = real.filename().string();
 	for (auto& c: name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 	if (name == "packagecmdlineargs.txt" && !ExtraLines().empty()) return Kind::Args;
-	if (name == "renderconfig_ps5_perf.txt" && DemonsSoulsSuperResolution::Active()) return Kind::PerfConfig;
+	if (!DemonsSoulsSuperResolution::Active()) return Kind::None;
+	if (name == "renderconfig_ps5_perf.txt") return Kind::PerfConfig;
+	if (EveryMode() && name.starts_with("renderconfig_ps5") && name.ends_with(".txt")) return Kind::PerfConfig;
 	return Kind::None;
 }
 
@@ -82,8 +96,9 @@ std::filesystem::path RedirectRead(const std::filesystem::path& real) {
 	std::lock_guard   lock(mutex);
 	// The copy goes next to the temporary files; one that cannot be written leaves the file as it is.
 	std::error_code error;
+	// (A copy per file: each render config has its own.)
 	const auto      copy = std::filesystem::temp_directory_path(error) /
-	                  (kind == Kind::Args ? "kyty-PackageCmdLineArgs.txt" : "kyty-RenderConfig_PS5_Perf.txt");
+	                  (kind == Kind::Args ? std::string("kyty-PackageCmdLineArgs.txt") : "kyty-" + real.filename().string());
 	if (error) return {};
 	const auto    text = Contents(real, kind);
 	std::ofstream out(copy, std::ios::binary | std::ios::trunc);
