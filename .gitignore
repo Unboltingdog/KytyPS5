@@ -15,3 +15,6 @@ _DevLog/
 _SaveData/
 _DebugSnapshots/
 __pycache__/
+
+# Built by tools/launcher-exe/make-launcher-exe.cmd
+/KytyPS5 Launcher.exe

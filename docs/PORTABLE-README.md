@@ -280,6 +280,10 @@ DualSense over Bluetooth) the emulator turns that stream into rumble: the heavy 
 and ticks on the small one. The launcher's "Vibration" sets how strong (Off, Light, Normal, Strong, Maximum;
 `KYTY_HAPTICS_RUMBLE` 0 to 4, 1 is Normal). The log says "the game's DualSense haptics play as rumble" once it starts.
 
+**A launcher program.** `tools\launcher-exe\make-launcher-exe.cmd` builds `KytyPS5 Launcher.exe` in this folder:
+it opens the same settings window as `launcher.cmd`, with an icon and without a console window flashing up, so it
+can be pinned or added to Steam or EmuDeck. It only starts `launcher.ps1`, so launcher updates need no rebuild.
+
 **The launcher with a controller.** D-pad or left stick up / down moves between settings, left / right changes the
 one selected, A presses a button or ticks a box, B closes a window, Menu (Start / Options) presses Play. The launcher
 reads Xbox-style (XInput) controllers; a DualSense works there through Steam Input or DS4Windows (the game itself
