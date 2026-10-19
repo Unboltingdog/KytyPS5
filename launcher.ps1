@@ -46,7 +46,24 @@ $frameGenBackends = 'DLSS-G (NVIDIA RTX 40+)', 'FSR 3 (any GPU)'
 $frameGenBackendKeys = 'dlss', 'fsr'
 # The controller hotkey button (hold it + another button; src/local/controller-hotkeys.h), kept in hotkeys.ini next to the
 # emulator, where the game changes it too (the button + R3, then the new one).
+# The buttons by the names hotkeys.ini takes, and where each is on a DualSense.
+$hotkeyButtonInfo = [ordered]@{
+	Create = 'Create (small button left of the touchpad)'; PS = 'PS (logo button; Steam may take it)'
+	Touchpad = 'Touchpad (press the pad down)'; Mute = 'Mute (microphone button below PS)'
+	Options = 'Options (small button right of the touchpad)'; Cross = 'Cross'; Circle = 'Circle'; Square = 'Square'
+	Triangle = 'Triangle'; L1 = 'L1'; R1 = 'R1'; L3 = 'L3 (press the left stick)'; R3 = 'R3 (press the right stick)'
+	Up = 'D-pad up'; Down = 'D-pad down'; Left = 'D-pad left'; Right = 'D-pad right'
+	Paddle1 = 'Paddle1 (Edge back paddle)'; Paddle2 = 'Paddle2 (Edge back paddle)'; Paddle3 = 'Paddle3'; Paddle4 = 'Paddle4' }
+# The buttons offered as the hold button (ones the game does not need are best).
 $hotkeyButtons = 'Create', 'PS', 'Touchpad', 'Mute', 'L3', 'R3', 'L1', 'R1', 'Paddle1', 'Paddle2'
+# What each hotkey does, by its hotkeys.ini key, and its default button.
+$hotkeyActions = [ordered]@{
+	Quit = 'Quit the game (hold 1 second)'; Fullscreen = 'Full screen on / off'; Pause = 'Pause / resume'
+	Overlay = 'Performance overlay (off, frame rate, detailed)'; FrameGen = 'Frame generation on / off'
+	SharpnessUp = 'FSR sharpness +'; SharpnessDown = 'FSR sharpness -'; Help = 'Show the hotkeys on screen'
+	RebindModifier = 'Choose a new hold button in the game' }
+$hotkeyDefaults = @{ Modifier = 'Create'; Quit = 'Options'; Fullscreen = 'Triangle'; Pause = 'Square'; Overlay = 'Circle'
+	FrameGen = 'Cross'; SharpnessUp = 'Up'; SharpnessDown = 'Down'; Help = 'L3'; RebindModifier = 'R3' }
 # The emulator's own panel at the top right of the game image (KYTY_FPS_HUD 0, 1, 2).
 $overlays = 'Off', 'Frame rate', 'Detailed'
 # Safe GPU mode (KYTY_COMPUTE_CHAIN=0): Demon's Souls' compute work runs one dispatch after another instead of letting
@@ -154,28 +171,57 @@ function Get-FrameGenBackend {
 	if ($frameGenAvailable) { 'dlss' } else { 'fsr' }
 }
 function Test-FrameGenBackend([string]$key) { if ($key -eq 'fsr') { $fsrAvailable } else { $frameGenAvailable } }
-# hotkeys.ini's Modifier line (the emulator writes the file; the launcher changes that line only).
+# hotkeys.ini next to the emulator (src/local/controller-hotkeys.h): the emulator writes it, the game changes its hold
+# button (Modifier) too, the launcher shows and edits it.
 $hotkeysPath = Join-Path (Split-Path $exe) 'hotkeys.ini'
-function Get-HotkeyButton {
+# A button name as hotkeys.ini may hold it (also SDL's and other spellings) as the launcher's; '' for none.
+function ConvertTo-HotkeyName([string]$value) {
+	$key = ($value -replace '[\s_/-]', '').ToLowerInvariant()
+	if (!$key) { return '' }
+	$aliases = @{ a = 'Cross'; b = 'Circle'; x = 'Square'; y = 'Triangle'; back = 'Create'; share = 'Create'; select = 'Create'
+		view = 'Create'; guide = 'PS'; home = 'PS'; start = 'Options'; menu = 'Options'; leftstick = 'L3'; rightstick = 'R3'
+		leftshoulder = 'L1'; lb = 'L1'; rightshoulder = 'R1'; rb = 'R1'; dpup = 'Up'; dpdown = 'Down'; dpleft = 'Left'
+		dpright = 'Right'; misc1 = 'Mute' }
+	if ($aliases.ContainsKey($key)) { return $aliases[$key] }
+	foreach ($name in $hotkeyButtonInfo.Keys) { if ($name.ToLowerInvariant() -eq $key) { return $name } }
+	''
+}
+# The bindings: the file's, the defaults where it has none.
+function Read-Hotkeys {
+	$map = @{}
+	foreach ($key in $hotkeyDefaults.Keys) { $map[$key] = $hotkeyDefaults[$key] }
 	if (Test-Path -LiteralPath $hotkeysPath) {
 		foreach ($line in Get-Content -LiteralPath $hotkeysPath) {
-			if ($line -match '^\s*Modifier\s*=\s*([^#;]*)') { $value = $Matches[1].Trim(); if ($value) { return $value } }
-		}
-	}
-	'Create'
-}
-function Set-HotkeyButton([string]$button) {
-	try {
-		$lines = @()
-		$found = $false
-		if (Test-Path -LiteralPath $hotkeysPath) {
-			foreach ($line in Get-Content -LiteralPath $hotkeysPath) {
-				if ($line -match '^\s*Modifier\s*=') { $lines += "Modifier=$button"; $found = $true } else { $lines += $line }
+			if ($line -match '^\s*([A-Za-z]+)\s*=\s*([^#;]*)') {
+				$known = @($map.Keys) | Where-Object { $_ -ieq $Matches[1] } | Select-Object -First 1
+				if ($known) { $map[$known] = ConvertTo-HotkeyName $Matches[2].Trim() }
 			}
 		}
-		if (!$found) { $lines = @("Modifier=$button") + $lines }
+	}
+	if (!$map.Modifier) { $map.Modifier = 'Create' }
+	$map
+}
+function Get-HotkeyButton { (Read-Hotkeys).Modifier }
+# Writes all of them (as the emulator does); a hotkey on the hold button itself is left unbound.
+function Save-Hotkeys($map) {
+	try {
+		$lines = @('# KytyPS5 controller hotkeys: hold Modifier, then press a button. Empty: unbound.',
+			'# In the game, Modifier + R3 then a button changes Modifier (saved here).', "Modifier=$($map.Modifier)")
+		foreach ($key in $hotkeyActions.Keys) {
+			$button = if ($map[$key] -eq $map.Modifier) { '' } else { $map[$key] }
+			$lines += "$key=$button"
+		}
 		Set-Content -LiteralPath $hotkeysPath -Value $lines -Encoding ASCII
 	} catch {}
+}
+# The hotkeys in words, with the buttons chosen.
+function Get-HotkeySummary($map) {
+	$hold = $map.Modifier
+	$parts = @()
+	foreach ($key in $hotkeyActions.Keys) {
+		if ($map[$key] -and $map[$key] -ne $hold) { $parts += "  $hold + $($map[$key]):  $($hotkeyActions[$key])" }
+	}
+	"Hold $hold, then press:`n" + ($parts -join "`n")
 }
 
 function Get-PlayCommand {
@@ -568,21 +614,95 @@ $frameGenFolder.Add_Click({
 })
 Add-Row 'Frame generation' @($frameGenBackend, $frameGen, $frameGenFolder, $frameGenNote)
 Add-Row '' @($fgHudless)
-# The controller hotkey button: hold it, then another button (hotkeys.ini next to the emulator has the rest).
-$hotkey = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 100 }
-$hotkey.Items.AddRange($hotkeyButtons)
-$currentHotkey = Get-HotkeyButton
-if (!$hotkey.Items.Contains($currentHotkey)) { [void]$hotkey.Items.Add($currentHotkey) }
-$hotkey.SelectedItem = $currentHotkey
-$hotkeyNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0'
-	Text = 'hold it + Options (1 s): quit; + Triangle: full screen; + Cross: frame generation; + L3: all of them' }
-(New-Object System.Windows.Forms.ToolTip -Property @{ AutoPopDelay = 30000 }).SetToolTip($hotkey,
-	"Hold this controller button, then press another:`n" +
-	"  Options (hold 1 s): quit the game`n  Triangle: full screen on/off`n  Square: pause/resume`n  Circle: performance overlay`n" +
-	"  Cross: frame generation on/off`n  Up / Down: FSR sharpness`n  L3: show the hotkeys`n" +
-	"  R3: choose another hotkey button in the game (then press the new one)`n" +
-	"The bindings are in hotkeys.ini next to the emulator.")
-Add-Row 'Controller hotkeys' @($hotkey, $hotkeyNote)
+# Controller hotkeys: the hold button here, every hotkey in "Hotkeys..." (both kept in hotkeys.ini next to the emulator).
+$script:hotkeyMap = Read-Hotkeys
+$hotkey = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 290 }
+function Set-HotkeyCombo([string]$selected) {
+	$hotkey.Items.Clear()
+	$names = @($hotkeyButtons)
+	if ($selected -and $names -notcontains $selected) { $names += $selected }
+	foreach ($name in $names) { [void]$hotkey.Items.Add($hotkeyButtonInfo[$name]) }
+	$hotkey.SelectedItem = $hotkeyButtonInfo[$selected]
+	if ($hotkey.SelectedIndex -lt 0) { $hotkey.SelectedIndex = 0 }
+}
+# The hold button chosen in the list (its name: the first word).
+function Get-HotkeyComboButton { ([string]$hotkey.SelectedItem -split ' ')[0] }
+Set-HotkeyCombo $script:hotkeyMap.Modifier
+$hotkeyEdit = New-Object System.Windows.Forms.Button -Property @{ Text = 'Hotkeys...'; AutoSize = $true }
+$hotkeyNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '0,2,0,6' }
+$hotkeyTips = New-Object System.Windows.Forms.ToolTip -Property @{ AutoPopDelay = 30000 }
+function Update-HotkeyNote {
+	$map = $script:hotkeyMap
+	$hold = $map.Modifier
+	$quit = if ($map.Quit -and $map.Quit -ne $hold) { "Hold $hold, then also press $($map.Quit) for 1 second to quit the game." } else { 'Quit has no button (Hotkeys...).' }
+	$help = if ($map.Help -and $map.Help -ne $hold) { " $hold + $($map.Help) lists every hotkey on screen." } else { '' }
+	$hotkeyNote.Text = $quit + $help
+	$hotkeyTips.SetToolTip($hotkey, (Get-HotkeySummary $map))
+	$hotkeyTips.SetToolTip($hotkeyNote, (Get-HotkeySummary $map))
+}
+$hotkey.Add_SelectedIndexChanged({
+	$script:hotkeyMap.Modifier = Get-HotkeyComboButton
+	Update-HotkeyNote
+})
+# Every hotkey's button, in a window of its own.
+$hotkeyEdit.Add_Click({
+	$dialog = New-Object System.Windows.Forms.Form -Property @{ Text = 'Controller hotkeys'; FormBorderStyle = 'FixedDialog'
+		MaximizeBox = $false; MinimizeBox = $false; StartPosition = 'CenterParent'; AutoSize = $true; AutoSizeMode = 'GrowAndShrink'
+		Font = $form.Font; Padding = '12,12,12,8' }
+	$table = New-Object System.Windows.Forms.TableLayoutPanel -Property @{ ColumnCount = 2; AutoSize = $true; Dock = 'Fill' }
+	$dialog.Controls.Add($table)
+	$intro = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; Margin = '0,0,0,8'; MaximumSize = '520,0'
+		Text = 'Hold the hold button, then press the button of a hotkey. While the hold button is down, the buttons you press do not reach the game.' }
+	$table.Controls.Add($intro); $table.SetColumnSpan($intro, 2)
+	$choices = @('(none)') + @($hotkeyButtonInfo.Values)
+	$combos = @{}
+	foreach ($key in @('Modifier') + @($hotkeyActions.Keys)) {
+		$label = if ($key -eq 'Modifier') { 'Hold button' } else { $hotkeyActions[$key] }
+		$table.Controls.Add((New-Object System.Windows.Forms.Label -Property @{ Text = $label; AutoSize = $true; Anchor = 'Left'; Margin = '0,6,12,6' }))
+		$combo = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 290 }
+		$combo.Items.AddRange($(if ($key -eq 'Modifier') { @($hotkeyButtonInfo.Values) } else { $choices }))
+		$current = $script:hotkeyMap[$key]
+		$combo.SelectedItem = if ($current) { $hotkeyButtonInfo[$current] } else { '(none)' }
+		if ($combo.SelectedIndex -lt 0) { $combo.SelectedIndex = 0 }
+		$table.Controls.Add($combo)
+		$combos[$key] = $combo
+	}
+	$buttons = New-Object System.Windows.Forms.FlowLayoutPanel -Property @{ AutoSize = $true; Margin = '0,10,0,0' }
+	$ok = New-Object System.Windows.Forms.Button -Property @{ Text = 'Save'; AutoSize = $true; DialogResult = 'OK' }
+	$cancel = New-Object System.Windows.Forms.Button -Property @{ Text = 'Cancel'; AutoSize = $true; DialogResult = 'Cancel' }
+	$defaults = New-Object System.Windows.Forms.Button -Property @{ Text = 'Defaults'; AutoSize = $true }
+	$defaults.Add_Click({
+		foreach ($key in $combos.Keys) { $combos[$key].SelectedItem = $hotkeyButtonInfo[$hotkeyDefaults[$key]] }
+	})
+	$buttons.Controls.AddRange(@($ok, $cancel, $defaults))
+	$table.Controls.Add($buttons); $table.SetColumnSpan($buttons, 2)
+	$dialog.AcceptButton = $ok
+	$dialog.CancelButton = $cancel
+	if ($dialog.ShowDialog($form) -ne 'OK') { return }
+	$map = @{}
+	foreach ($key in $combos.Keys) {
+		$text = [string]$combos[$key].SelectedItem
+		$map[$key] = if ($text -eq '(none)') { '' } else { ($text -split ' ')[0] }
+	}
+	# (Two hotkeys on one button: the first keeps it.)
+	$used = @{}
+	foreach ($key in $hotkeyActions.Keys) {
+		if (!$map[$key]) { continue }
+		if ($map[$key] -eq $map.Modifier -or $used.ContainsKey($map[$key])) {
+			[void][System.Windows.Forms.MessageBox]::Show($dialog, "$($map[$key]) is already the hold button or another hotkey's: '$($hotkeyActions[$key])' is left without a button.", 'Controller hotkeys')
+			$map[$key] = ''
+			continue
+		}
+		$used[$map[$key]] = $true
+	}
+	$script:hotkeyMap = $map
+	Save-Hotkeys $map
+	Set-HotkeyCombo $map.Modifier
+	Update-HotkeyNote
+})
+Update-HotkeyNote
+Add-Row 'Controller hotkeys' @($hotkey, $hotkeyEdit)
+Add-Row '' @($hotkeyNote)
 $hud = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160 }
 $hud.Items.AddRange($overlays)
 # (An older launcher saved true for the frame rate.)
@@ -633,7 +753,12 @@ function Read-Form {
 	if ($upscaler.Enabled) { $settings.upscaler = $upscalerKeys[[Math]::Max(0, $upscaler.SelectedIndex)] }
 	$settings.upscale_quality = $presetKeys[[Math]::Max(0, $preset.SelectedIndex)]
 	$settings.fsr_sharpness   = [double]$sharpness.Value
-	if ($hotkey.SelectedItem -and [string]$hotkey.SelectedItem -ne (Get-HotkeyButton)) { Set-HotkeyButton ([string]$hotkey.SelectedItem) }
+	# (The hold button chosen here; the game may have changed hotkeys.ini meanwhile: its other lines are read again.)
+	$current = Read-Hotkeys
+	if ($script:hotkeyMap.Modifier -and $script:hotkeyMap.Modifier -ne $current.Modifier) {
+		$current.Modifier = $script:hotkeyMap.Modifier
+		Save-Hotkeys $current
+	}
 	$settings.ecores     = $ecores.Checked
 	Save-Settings
 }
