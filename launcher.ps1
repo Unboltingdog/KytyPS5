@@ -63,7 +63,7 @@ $safeGpuTip = "Prevents the crashes and blue screens that come from the graphics
 $settings = [ordered]@{ game = ''; resolution = '2560x1440'; fullscreen = $false; aspect = $true; language = 1; redzone = $true;
 	ecores = $false; fps120 = $false; render = 1440; ratio = '16:9'; quality = 'standard'; vsync = $false; hdr = $false; framegen = 0
 	hud = 0; streamline = ''; safegpu = $false; upscaler = ''; render_dlss = 1080; upscale_quality = 'quality'
-	framegen_backend = ''; fsr_sharpness = 0.25 }
+	framegen_backend = ''; fsr_sharpness = 0.25; fg_hudless = $true }
 if (Test-Path $settingsPath) {
 	$saved = Get-Content $settingsPath -Raw | ConvertFrom-Json
 	foreach ($property in $saved.PSObject.Properties) { if ($settings.Contains($property.Name)) { $settings[$property.Name] = $property.Value } }
@@ -217,6 +217,9 @@ function Get-PlayCommand {
 	# The emulator's panel (KYTY_FPS_HUD) at the top right of the game image: the frame rate and frame times, or with
 	# the GPU, processor and memory too.
 	if ([int]$settings.hud -ge 1) { $sets += "KYTY_FPS_HUD=$([Math]::Min([int]$settings.hud, 2))" }
+	# Sharp HUD with frame generation: the frames' image without the game's HUD goes to DLSS-G or FSR 3 as well
+	# (KYTY_FG_HUDLESS), so the HUD is not interpolated with the scene behind it (smeared, ghosting).
+	if ($settings.fg_hudless -and [int]$settings.framegen -ge 2) { $sets += 'KYTY_FG_HUDLESS=1' }
 	# Safe GPU mode: no overlapping compute dispatches ($safeGpuTip).
 	if ($settings.safegpu) { $sets += 'KYTY_COMPUTE_CHAIN=0' }
 	if ($sets.Count) { $arguments += @('-Set', ($sets -join ',')) }
@@ -523,6 +526,11 @@ function Update-FrameGenNote {
 		else { 'needs NVIDIA''s Streamline SDK: download it, then choose its folder' }
 }
 # The backend's multipliers (FSR 3: 2x only) and whether it can run here.
+$fgHudless = New-Object System.Windows.Forms.CheckBox -Property @{ AutoSize = $true; Checked = [bool]$settings.fg_hudless
+	Text = 'Sharp HUD with frame generation (no smearing or ghosting of health bars and menus)' }
+(New-Object System.Windows.Forms.ToolTip -Property @{ AutoPopDelay = 30000 }).SetToolTip($fgHudless,
+	"Each frame's image without the game's HUD goes to frame generation too, so the HUD stays sharp`n" +
+	"instead of being blended between frames with the scene behind it (KYTY_FG_HUDLESS).")
 function Update-FrameGenState {
 	$key = Get-FrameGenBackendKey
 	$wanted = [string]$frameGen.SelectedItem
@@ -531,6 +539,7 @@ function Update-FrameGenState {
 	$frameGen.SelectedItem = if ($frameGen.Items.Contains($wanted)) { $wanted } elseif ($wanted -and $wanted -ne 'Off') { '2x' } else { 'Off' }
 	if ($frameGen.SelectedIndex -lt 0) { $frameGen.SelectedIndex = 0 }
 	$frameGen.Enabled = Test-FrameGenBackend $key
+	$fgHudless.Enabled = $frameGen.Enabled
 	$frameGenFolder.Visible = $key -eq 'dlss'
 	Update-FrameGenNote
 }
@@ -558,6 +567,7 @@ $frameGenFolder.Add_Click({
 	Update-UpscalerNote
 })
 Add-Row 'Frame generation' @($frameGenBackend, $frameGen, $frameGenFolder, $frameGenNote)
+Add-Row '' @($fgHudless)
 # The controller hotkey button: hold it, then another button (hotkeys.ini next to the emulator has the rest).
 $hotkey = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 100 }
 $hotkey.Items.AddRange($hotkeyButtons)
@@ -618,6 +628,7 @@ function Read-Form {
 	$settings.quality    = ([string]$quality.SelectedItem -split ' ')[0].ToLowerInvariant()
 	# (Kept as they were where the runtimes are missing.)
 	$settings.framegen_backend = Get-FrameGenBackendKey
+	$settings.fg_hudless       = $fgHudless.Checked
 	if ($frameGen.Enabled) { $settings.framegen = if ($frameGen.SelectedIndex -gt 0) { $frameGen.SelectedIndex + 1 } else { 0 } }
 	if ($upscaler.Enabled) { $settings.upscaler = $upscalerKeys[[Math]::Max(0, $upscaler.SelectedIndex)] }
 	$settings.upscale_quality = $presetKeys[[Math]::Max(0, $preset.SelectedIndex)]
