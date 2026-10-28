@@ -54,8 +54,8 @@
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_FUNC(n, f)                                                                             \
 	LIB_ADD_ADDRESS(n,                                                                             \
-	                Libs::TraceAllCalls() ? Libs::TraceWrap<f>::Address()                         \
-	                                      : reinterpret_cast<uint64_t>(f),                         \
+	                (Libs::TraceAllCalls() ? Libs::TraceWrap<f, #f>::Address()                    \
+	                                       : reinterpret_cast<uint64_t>(f)),                      \
 	                f, Loader::SymbolType::Func)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
@@ -81,24 +81,33 @@ namespace Libs {
 	return trace;
 }
 
-[[gnu::noinline]] inline void PrintResult(int64_t result) {
+[[gnu::noinline]] inline void PrintResult(const char* function, int64_t result) {
 	if (Log::GetDirection() != Log::Direction::Silent) {
-		LOGF("[%d] -> 0x%" PRIx64 " (%" PRId64 ")\n", Common::Thread::GetThreadIdUnique(),
-		     static_cast<uint64_t>(result), result);
+		LOGF("[%d] %s -> 0x%" PRIx64 " (%" PRId64 ")\n", Common::Thread::GetThreadIdUnique(),
+		     function, static_cast<uint64_t>(result), result);
 	}
 }
+
+// A function's name as a template argument.
+template <size_t N>
+struct TraceName {
+	char text[N] {};
+	constexpr TraceName(const char (&name)[N]) { // NOLINT(google-explicit-constructor)
+		for (size_t i = 0; i < N; i++) text[i] = name[i];
+	}
+};
 
 // KYTY_TRACE_CALLS: a library function registered through a thunk that logs what it returned (an
 // integer other than 0). Functions it does not forward (variadic ones, other calling conventions,
 // structures by value) are registered as they are.
-template <auto F>
+template <auto F, TraceName Name>
 struct TraceWrap {
 	static uint64_t Address() { return reinterpret_cast<uint64_t>(F); }
 };
-template <typename R, typename... A, R(KYTY_SYSV_ABI* F)(A...)>
+template <typename R, typename... A, R(KYTY_SYSV_ABI* F)(A...), TraceName Name>
     requires((std::is_void_v<R> || std::is_scalar_v<R>) &&
              ((std::is_scalar_v<A> || std::is_reference_v<A>) && ...))
-struct TraceWrap<F> {
+struct TraceWrap<F, Name> {
 	static R KYTY_SYSV_ABI Call(A... args) {
 		if constexpr (std::is_void_v<R>) {
 			F(args...);
@@ -106,7 +115,7 @@ struct TraceWrap<F> {
 			R result = F(args...);
 			if constexpr (std::is_integral_v<R>) {
 				if (result != 0) {
-					PrintResult(static_cast<int64_t>(result));
+					PrintResult(Name.text, static_cast<int64_t>(result));
 				}
 			}
 			return result;
