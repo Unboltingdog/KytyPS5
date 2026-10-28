@@ -10,6 +10,7 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/timer.h"
+#include "kernel/hangProbe.h"
 #include "kernel/memory.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
@@ -1031,6 +1032,7 @@ void PthreadInitSelfForMainThread() {
 #endif
 	g_pthread_self->host_thread_id = os_thread_id;
 	g_pthread_main                 = g_pthread_self;
+	Kernel::HangProbe::ThreadStarted(g_pthread_self->unique_id, g_pthread_self->name, os_thread_id, 0, 0);
 
 	LOGF("\tPthread main self: id = %d, os_thread_id = %" PRIu64 ", stack_addr = 0x%016" PRIx64
 	     ", stack_size = %" PRIu64 "\n",
@@ -3190,6 +3192,7 @@ int PthreadGetCurrentPriorityForKernel() {
 
 static void CleanupThread(void* arg) {
 	auto* thread = static_cast<Pthread>(arg);
+	Kernel::HangProbe::ThreadEnded(thread->unique_id);
 
 	LibcInternalExt::RunThreadAtexitDestructors();
 
@@ -3239,6 +3242,10 @@ static void* RunThread(void* arg) {
 	}
 #endif
 
+	Kernel::HangProbe::ThreadStarted(
+	    thread->unique_id, thread->name, os_thread_id,
+	    reinterpret_cast<uint64_t>(thread->attr->stack_addr),
+	    reinterpret_cast<uint64_t>(thread->attr->stack_addr) + thread->attr->stack_size);
 	LOGF("\tPthread run begin: %s, id = %d, os_thread_id = %" PRIu64 ", entry = 0x%016" PRIx64
 	     ", arg = 0x%016" PRIx64 ", stack_addr = 0x%016" PRIx64 ", stack_size = %" PRIu64 "\n",
 	     thread->name.c_str(), thread->unique_id, os_thread_id,

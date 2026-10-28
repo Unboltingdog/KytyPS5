@@ -17,6 +17,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
+#include "kernel/hangProbe.h"
 #include "kernel/memory.h"
 #include "libs/agc.h"
 #include "libs/errno.h"
@@ -264,7 +265,10 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	}
 
 	(void)poll;
-	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
+	const T    value  = *addr;
+	const bool passed = TestWaitRegMemValue(value, ref, mask, func);
+	Kernel::HangProbe::GpuWait(m_interrupt_event_id, "WAIT_REG_MEM", addr, value, ref, mask, func, passed);
+	if (!passed) {
 		SuspendPm4();
 	}
 }
@@ -278,8 +282,10 @@ void CommandProcessor::MemSemaphore(uint64_t* counter, bool signal, bool write) 
 	if (signal) {
 		*counter = write ? 1u : *counter + 1u;
 	} else if (*counter == 0) {
+		Kernel::HangProbe::GpuWait(m_interrupt_event_id, "memory semaphore", counter, 0, 1, ~0ull, 0, false);
 		SuspendPm4();
 	} else {
+		Kernel::HangProbe::GpuWait(m_interrupt_event_id, "memory semaphore", counter, *counter, 1, ~0ull, 0, true);
 		(*counter)--;
 	}
 }
