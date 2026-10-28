@@ -1,0 +1,183 @@
+# The custom build: our commits on the `custom` branch, replayed on top of upstream KytyPS5 and
+# released on this fork whenever either side changes.
+#
+# Every 6 hours (and on demand from the Actions tab) the sync job rebases `custom` onto
+# KytyPS5/KytyPS5 main. When that moves the branch, it pushes it and stops: the push starts a new
+# run of this workflow at the rebased commit, which builds it. A run whose commit has no release
+# yet builds with upstream's own build.yml and publishes a release named custom-<date>-<sha>.
+#
+# A rebase that conflicts changes nothing: the last release stays, and an issue explains what
+# collided. Resolve it on `custom` (rebase onto upstream/main) and push.
+#
+# Needs the SYNC_TOKEN secret: a fine-grained token for this repository with Contents and
+# Workflows read/write. GitHub's built-in token cannot push upstream's workflow changes, and its
+# pushes would not start the build run.
+name: Custom build
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build and release even if this commit already has a release
+        type: boolean
+        default: false
+  push:
+    branches: [ custom ]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: custom-build
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/KytyPS5/KytyPS5.git
+
+jobs:
+  sync:
+    name: Rebase onto upstream
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.sync.outputs.build }}
+      tag: ${{ steps.sync.outputs.tag }}
+      base: ${{ steps.sync.outputs.base }}
+    steps:
+      - name: Check the sync token
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "::error::Add the SYNC_TOKEN secret (see the top of custom-build.yml)."
+            exit 1
+          fi
+
+      - name: Checkout custom
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Rebase, or decide whether to build
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM"
+          git fetch --no-tags upstream main
+          git fetch --no-tags origin custom
+          upstream=$(git rev-parse upstream/main)
+          title="Upstream sync conflict"
+
+          # A run for an older commit of custom has nothing to do; the newer one's run builds.
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/custom)" ]; then
+            echo "custom moved on since this run started; leaving it to that run."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Keep this fork's main a mirror of upstream, for comparing against.
+          git push --force origin "$upstream:refs/heads/main"
+
+          if ! git merge-base --is-ancestor "$upstream" HEAD; then
+            if git rebase "$upstream"; then
+              git push --force-with-lease=custom:"$(git rev-parse origin/custom)" origin HEAD:custom
+              echo "Rebased custom onto upstream ${upstream::7}; the push starts the build."
+              number=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+              if [ -n "$number" ]; then
+                gh issue close "$number" --comment "Resolved: custom rebased cleanly onto upstream ${upstream::7}."
+              fi
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            conflicts=$(git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/')
+            commit=$(git log -1 --format='%h %s' REBASE_HEAD 2>/dev/null || echo unknown)
+            git rebase --abort
+            body=$(printf 'Rebasing `custom` onto upstream `%s` stopped at our commit %s.\n\nConflicting files:\n%s\n\nThe last custom release is unchanged. Resolve the conflict on `custom` and push; the next run builds it.\n\nRun: %s/%s/actions/runs/%s' \
+              "${upstream::7}" "$commit" "$conflicts" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
+            number=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+            if [ -n "$number" ]; then
+              gh issue comment "$number" --body "$body"
+            else
+              gh issue create --title "$title" --body "$body"
+            fi
+            echo "::error::custom does not rebase cleanly onto upstream ${upstream::7}"
+            exit 1
+          fi
+
+          sha=$(git rev-parse --short=7 HEAD)
+          echo "base=$(git rev-parse --short=7 "$upstream")" >> "$GITHUB_OUTPUT"
+          echo "tag=custom-$(date -u +%Y-%m-%d)-$sha" >> "$GITHUB_OUTPUT"
+          if [ "$FORCE" != "true" ] &&
+             gh release list --limit 100 --json tagName --jq '.[].tagName' | grep -q -- "-$sha\$"; then
+            echo "custom ($sha) already has a release."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build
+    needs: sync
+    if: needs.sync.outputs.build == 'true'
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: write
+
+  release:
+    name: Release
+    needs: [sync, build]
+    if: always() && needs.sync.outputs.build == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.sync.outputs.tag }}
+      BASE: ${{ needs.sync.outputs.base }}
+    steps:
+      - name: Download the Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: KytyPS5-Windows-x64
+          path: windows
+
+      - name: Download the Linux build
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: KytyPS5-Linux-x86_64
+          path: linux
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          (cd windows && zip -qr "$GITHUB_WORKSPACE/$TAG-Windows-x64.zip" .)
+          if [ -d linux ]; then
+            chmod a+x linux/kyty_launcher linux/kyty_emulator linux/kyty_updater 2>/dev/null || true
+            tar -C linux -czf "$TAG-Linux-x86_64.tar.gz" .
+          fi
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          notes=$(printf 'Custom KytyPS5: our changes on top of upstream KytyPS5/KytyPS5 `%s`.\n\nCommit: %s/%s/commit/%s' \
+            "$BASE" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_SHA")
+          assets=(./*.zip)
+          if compgen -G "./*.tar.gz" > /dev/null; then assets+=(./*.tar.gz); fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --notes "$notes" --latest "${assets[@]}"
+
+      - name: Keep the 10 newest custom releases
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("custom-"))] | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' |
+          while read -r tag; do
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          done
