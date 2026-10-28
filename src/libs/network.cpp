@@ -4087,6 +4087,20 @@ struct NpStateCallback {
 
 static std::vector<NpStateCallback> g_np_state_callbacks;
 
+// sceNpRegisterNpReachabilityStateCallback's callback: (user id, reachability state, userdata).
+using NpReachabilityStateCallback = KYTY_SYSV_ABI void (*)(int, uint32_t, void*);
+constexpr uint32_t np_reachability_state_unavailable = 0;
+
+struct NpReachabilityCallback {
+	NpReachabilityStateCallback callback = nullptr;
+	void*                       userdata = nullptr;
+	bool                        pending  = false;
+};
+
+// One registration (the library keeps one); its first sceNpCheckCallback reports the state, as
+// the state callback's does, for a game that waits on that report before going on.
+static NpReachabilityCallback g_np_reachability_callback;
+
 enum class NpRequestState {
 	Free,
 	Ready,
@@ -4168,6 +4182,11 @@ int KYTY_SYSV_ABI NpCheckCallback() {
 		               IsSignedIn(Config::GetUserId()) ? np_state_signed_in : np_state_signed_out,
 		               entry.userdata);
 	}
+	if (g_np_reachability_callback.pending) {
+		g_np_reachability_callback.pending = false;
+		g_np_reachability_callback.callback(Config::GetUserId(), np_reachability_state_unavailable,
+		                                    g_np_reachability_callback.userdata);
+	}
 
 	return OK;
 }
@@ -4248,8 +4267,13 @@ int KYTY_SYSV_ABI NpRegisterPremiumEventCallback(void* /*callback*/, void* /*use
 	return OK;
 }
 
-int KYTY_SYSV_ABI NpRegisterNpReachabilityStateCallback(void* /*callback*/, void* /*userdata*/) {
+int KYTY_SYSV_ABI NpRegisterNpReachabilityStateCallback(void* callback, void* userdata) {
 	PRINT_NAME();
+
+	if (callback == nullptr) {
+		return np_error_invalid_argument;
+	}
+	g_np_reachability_callback = {reinterpret_cast<NpReachabilityStateCallback>(callback), userdata, true};
 
 	return OK;
 }
