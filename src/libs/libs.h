@@ -7,7 +7,10 @@
 #include "common/threads.h"
 #include "loader/timer.h" // IWYU pragma: keep
 
+#include <cinttypes>
+#include <cstdint>
 #include <cstdlib>
+#include <type_traits>
 #include <fmt/format.h>
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
@@ -30,7 +33,7 @@
 	static constexpr int g_module_version_major = mv1;                                             \
 	static constexpr int g_module_version_minor = mv2;
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_ADD(n, f, t)                                                                           \
+#define LIB_ADD_ADDRESS(n, address, f, t)                                                          \
 	{                                                                                              \
 		Loader::SymbolResolve sr {};                                                               \
 		sr.name                 = n;                                                               \
@@ -40,14 +43,20 @@
 		sr.module_version_major = g_module_version_major;                                          \
 		sr.module_version_minor = g_module_version_minor;                                          \
 		sr.type                 = t;                                                               \
-		auto        func        = reinterpret_cast<uint64_t>(f);                                   \
+		auto        func        = (address);                                                       \
 		const char* dbg_name    = "" #f;                                                           \
 		s->Add(sr, func, dbg_name);                                                                \
 	}
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LIB_ADD(n, f, t) LIB_ADD_ADDRESS(n, reinterpret_cast<uint64_t>(f), f, t)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_OBJECT(n, f) LIB_ADD(n, f, Loader::SymbolType::Object)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LIB_FUNC(n, f) LIB_ADD(n, f, Loader::SymbolType::Func)
+#define LIB_FUNC(n, f)                                                                             \
+	LIB_ADD_ADDRESS(n,                                                                             \
+	                Libs::TraceAllCalls() ? Libs::TraceWrap<f>::Address()                         \
+	                                      : reinterpret_cast<uint64_t>(f),                         \
+	                f, Loader::SymbolType::Func)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME()                                                                               \
@@ -71,6 +80,40 @@ namespace Libs {
 	}();
 	return trace;
 }
+
+[[gnu::noinline]] inline void PrintResult(int64_t result) {
+	if (Log::GetDirection() != Log::Direction::Silent) {
+		LOGF("[%d] -> 0x%" PRIx64 " (%" PRId64 ")\n", Common::Thread::GetThreadIdUnique(),
+		     static_cast<uint64_t>(result), result);
+	}
+}
+
+// KYTY_TRACE_CALLS: a library function registered through a thunk that logs what it returned (an
+// integer other than 0). Functions it does not forward (variadic ones, other calling conventions,
+// structures by value) are registered as they are.
+template <auto F>
+struct TraceWrap {
+	static uint64_t Address() { return reinterpret_cast<uint64_t>(F); }
+};
+template <typename R, typename... A, R(KYTY_SYSV_ABI* F)(A...)>
+    requires((std::is_void_v<R> || std::is_scalar_v<R>) &&
+             ((std::is_scalar_v<A> || std::is_reference_v<A>) && ...))
+struct TraceWrap<F> {
+	static R KYTY_SYSV_ABI Call(A... args) {
+		if constexpr (std::is_void_v<R>) {
+			F(args...);
+		} else {
+			R result = F(args...);
+			if constexpr (std::is_integral_v<R>) {
+				if (result != 0) {
+					PrintResult(static_cast<int64_t>(result));
+				}
+			}
+			return result;
+		}
+	}
+	static uint64_t Address() { return reinterpret_cast<uint64_t>(&Call); }
+};
 
 // Keep the formatting path from inflating fiber functions' stack frames under LTO.
 [[gnu::noinline]] inline void PrintName(const char* library, const char* module, const char* function) {
