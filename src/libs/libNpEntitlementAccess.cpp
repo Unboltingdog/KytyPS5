@@ -9,6 +9,7 @@
 #include <cinttypes>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -452,6 +453,8 @@ static int KYTY_SYSV_ABI NpEntitlementAccessGetAddcontEntitlementInfo(
 	if (entitlement_label == nullptr || info == nullptr) {
 		return NP_ENTITLEMENT_ACCESS_ERROR_PARAMETER;
 	}
+	LOGF("\t label             = %.*s\n", static_cast<int>(sizeof(entitlement_label->data)),
+	     entitlement_label->data);
 
 	memset(info, 0, sizeof(*info));
 
@@ -466,6 +469,21 @@ static int KYTY_SYSV_ABI NpEntitlementAccessGetAddcontEntitlementInfo(
 	if (const auto* entry =
 	        Loader::AddContentFind(entitlement_label->data, sizeof(entitlement_label->data))) {
 		*info = MakeAddcontInfo(*entry);
+		return 0;
+	}
+
+	// KYTY_OWN_ALL_ADDCONT=1 (Unboltingdog fork): every add-on the game asks about is owned, as a
+	// license without extra data, for a game that will not start without its own (a Complete
+	// Edition's campaign, for one).
+	static const bool own_all = [] {
+		const char* value = std::getenv("KYTY_OWN_ALL_ADDCONT");
+		return value != nullptr && *value == '1';
+	}();
+	if (own_all) {
+		std::memcpy(info->entitlement_label.data, entitlement_label->data,
+		            sizeof(entitlement_label->data));
+		info->package_type    = 3; // PSAL: a license only
+		info->download_status = 0; // NO_EXTRA_DATA
 		return 0;
 	}
 
