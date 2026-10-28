@@ -94,9 +94,10 @@ jobs:
             if git rebase "$upstream"; then
               git push --force-with-lease=custom:"$(git rev-parse origin/custom)" origin HEAD:custom
               echo "Rebased custom onto upstream ${upstream::7}; the push starts the build."
-              number=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+              # (Issues may be off on the fork: the conflict report is best effort.)
+              number=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty' 2>/dev/null || true)
               if [ -n "$number" ]; then
-                gh issue close "$number" --comment "Resolved: custom rebased cleanly onto upstream ${upstream::7}."
+                gh issue close "$number" --comment "Resolved: custom rebased cleanly onto upstream ${upstream::7}." || true
               fi
               echo "build=false" >> "$GITHUB_OUTPUT"
               exit 0
@@ -106,11 +107,12 @@ jobs:
             git rebase --abort
             body=$(printf 'Rebasing `custom` onto upstream `%s` stopped at our commit %s.\n\nConflicting files:\n%s\n\nThe last custom release is unchanged. Resolve the conflict on `custom` and push; the next run builds it.\n\nRun: %s/%s/actions/runs/%s' \
               "${upstream::7}" "$commit" "$conflicts" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
-            number=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+            echo "$body" >> "$GITHUB_STEP_SUMMARY"
+            number=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty' 2>/dev/null || true)
             if [ -n "$number" ]; then
-              gh issue comment "$number" --body "$body"
+              gh issue comment "$number" --body "$body" || true
             else
-              gh issue create --title "$title" --body "$body"
+              gh issue create --title "$title" --body "$body" || true
             fi
             echo "::error::custom does not rebase cleanly onto upstream ${upstream::7}"
             exit 1
