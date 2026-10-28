@@ -15,6 +15,7 @@
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
+#include "kernel/hangProbe.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
@@ -1732,6 +1733,8 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 	     "base_size_aligned      = 0x%016" PRIx64 "\n"
 	     "mapped_size            = 0x%016" PRIx64 "\n",
 	     program->base_vaddr, program->base_size, program->base_size_aligned, program->mapped_size);
+	Kernel::HangProbe::ModuleLoaded(Common::PathToString(program->file_name.filename()),
+	                                program->base_vaddr, program->base_size);
 	if (!is_shared) {
 		LOGF("tls_handler_size       = 0x%016" PRIx64 "\n", tls_handler_size);
 	}
