@@ -36,6 +36,9 @@ concurrency:
 
 env:
   UPSTREAM: https://github.com/KytyPS5/KytyPS5.git
+  # Every gh command works on this fork: with an "upstream" remote in the checkout, gh would
+  # otherwise pick KytyPS5/KytyPS5.
+  GH_REPO: ${{ github.repository }}
 
 jobs:
   sync:
@@ -135,7 +138,9 @@ jobs:
   release:
     name: Release
     needs: [sync, build]
-    if: always() && needs.sync.outputs.build == 'true' && needs.build.result == 'success'
+    # The Windows build is what is released: a cancelled or failed macOS job (its runners can
+    # take long to start on a fork) does not hold it back. No Windows build: the download fails.
+    if: ${{ !cancelled() && needs.sync.result == 'success' && needs.sync.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
