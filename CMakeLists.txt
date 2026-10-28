@@ -174,8 +174,12 @@ add_custom_target(KytyGitVersion
 		-D GIT_EXECUTABLE=${GIT_EXECUTABLE}
 		-D GIT_WORKING_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}
 		-P ${KYTY_SOURCE_DIR}/generate_version.cmake
-	BYPRODUCTS ${PROJECT_BINARY_DIR}/kytyGitVersion.h
-	COMMENT "Generate kytyGitVersion.h"
+	COMMAND ${CMAKE_COMMAND}
+		-D SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+		-D OUTPUT_FILE=${PROJECT_BINARY_DIR}/kytyShaderCacheVersion.h
+		-P ${KYTY_SOURCE_DIR}/generate_shader_cache_version.cmake
+	BYPRODUCTS ${PROJECT_BINARY_DIR}/kytyGitVersion.h ${PROJECT_BINARY_DIR}/kytyShaderCacheVersion.h
+	COMMENT "Generate kytyGitVersion.h and kytyShaderCacheVersion.h"
 )
 
 add_library(kyty_git_version INTERFACE)

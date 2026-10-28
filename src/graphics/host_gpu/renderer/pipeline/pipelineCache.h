@@ -274,8 +274,8 @@ private:
 	                            const ModuleMap& modules);
 };
 
-// The shader store of the running title; empty unless --shader-cache is on in a Release build
-// without debug dumps, which change the SPIR-V.
+// The shader store of the running title; empty when the shader cache is off (--no-shader-cache),
+// outside a Release build, or with debug dumps, which change the SPIR-V.
 std::filesystem::path ShaderStorePath();
 // Host capabilities that change the emitted SPIR-V.
 ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics);
