@@ -7,6 +7,7 @@
 #include "common/threads.h"
 #include "loader/timer.h" // IWYU pragma: keep
 
+#include <cstdlib>
 #include <fmt/format.h>
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
@@ -19,7 +20,7 @@
 #define LIB_DEFINE(name) void name(Loader::SymbolDatabase* s)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_NAME(l, m)                                                                             \
-	[[maybe_unused]] static thread_local bool PRINT_NAME_ENABLED = false;                          \
+	[[maybe_unused]] static thread_local bool PRINT_NAME_ENABLED = Libs::TraceAllCalls();          \
 	static constexpr char                     g_library[]        = l;                              \
 	static constexpr char                     g_module[]         = m;
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
@@ -59,6 +60,17 @@ class SymbolDatabase;
 } // namespace Loader
 
 namespace Libs {
+
+// KYTY_TRACE_CALLS=1 (diagnostic, Unboltingdog fork): every library call is logged, not only the
+// ones a library turns on, so a hang shows the last call each guest thread made. Needs the log
+// on (--printf-direction File or Console).
+[[nodiscard]] inline bool TraceAllCalls() {
+	static const bool trace = [] {
+		const char* value = std::getenv("KYTY_TRACE_CALLS");
+		return value != nullptr && *value == '1';
+	}();
+	return trace;
+}
 
 // Keep the formatting path from inflating fiber functions' stack frames under LTO.
 [[gnu::noinline]] inline void PrintName(const char* library, const char* module, const char* function) {
