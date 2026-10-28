@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
+#include "kytyShaderCacheVersion.h"
 
 #include <algorithm>
 #include <chrono>
@@ -14,13 +15,6 @@
 #include <ranges>
 #include <xxhash.h>
 #include <zstd.h>
-
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#elif defined(__APPLE__)
-#include <mach-o/dyld.h>
-#endif
 
 // The shader store: a header, then zstd-compressed records of everything a run created first.
 // Records are only appended, so a store cut short by a crash keeps every complete record.
@@ -41,34 +35,13 @@ struct Frame {
 	uint64_t checksum        = 0; // XXH3 of the compressed bytes.
 };
 
-// Changes with every build, so records never meet code that encodes them differently. Zero when
-// the executable cannot be found.
-uint64_t BuildStamp() {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::array<wchar_t, 32768> name {};
-	GetModuleFileNameW(nullptr, name.data(), static_cast<DWORD>(name.size()));
-	const std::filesystem::path path = name.data();
-#elif defined(__APPLE__)
-	std::array<char, 4096> name {};
-	auto size = static_cast<uint32_t>(name.size());
-	_NSGetExecutablePath(name.data(), &size);
-	const std::filesystem::path path = name.data();
-#else
-	const std::filesystem::path path = "/proc/self/exe";
-#endif
-	std::error_code error;
-	const auto      time = std::filesystem::last_write_time(path, error).time_since_epoch().count();
-	return error ? 0 : static_cast<uint64_t>(time);
-}
-
-// What every record depends on besides its own fields; empty when the build is unknown.
+// What every record depends on besides its own fields. KYTY_SHADER_CACHE_VERSION hashes the
+// sources that write and read records (generate_shader_cache_version.cmake), so a store outlives
+// emulator builds that leave them alone and is started over by any that change them.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
-	const auto stamp = BuildStamp();
-	if (stamp == 0) {
-		return {};
-	}
-	Writer header;
-	IoAll(header, stamp, SpirvProfile(graphics),
+	const uint64_t version = KYTY_SHADER_CACHE_VERSION;
+	Writer         header;
+	IoAll(header, version, SpirvProfile(graphics),
 	      graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);
 	return std::move(header.bytes);
 }
@@ -142,9 +115,6 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		return;
 	}
 	const auto header = StoreHeader(m_graphics);
-	if (header.empty()) {
-		return;
-	}
 	const auto           start = std::chrono::steady_clock::now();
 	std::vector<uint8_t> bytes;
 	if (Common::File file;
