@@ -43,12 +43,15 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 	const auto indirect_buffer_handle = [&](const IR::Inst& handle) {
 		return program.info.uses_dma && handle.NumArgs() == 4u && !handle.Uses().empty() &&
 		       std::ranges::all_of(handle.Uses(), [&](const IR::Use& use) {
-			       if (IR::BufferAccessOf(use.user->GetOpcode()) != IR::BufferAccess::Read) {
+			       const auto access = IR::BufferAccessOf(use.user->GetOpcode());
+			       if (access != IR::BufferAccess::Read && access != IR::BufferAccess::Atomic) {
 				       return false;
 			       }
 			       const auto index = use.user->Flags<IR::MemoryFlags>().index;
 			       return index < program.memory_info.size() &&
-			              program.memory_info[index].kind == IR::ResourceKind::IndirectBuffer;
+			              program.memory_info[index].kind == IR::ResourceKind::IndirectBuffer &&
+			              (access == IR::BufferAccess::Read ||
+			               program.memory_info[index].SupportsIndirectBufferAtomic(use.user->GetOpcode()));
 		       });
 	};
 	const auto local_flat_handle = [&](const IR::Inst& handle) {
