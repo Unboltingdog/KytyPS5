@@ -34453,6 +34453,97 @@ TestCase BufferLoadGpuSelectedDescriptors(u32 wave, ShaderOpcode load) {
   return test;
 }
 
+// BUFFER_ATOMIC_ADD (GLC) through descriptors the GPU selects (Ghost of Yotei's GPU-driven counters):
+// the old value returns and the add lands on the descriptor's guest address (BDA); out of range,
+// an invalid format, zero records or an unmapped page return 0 and write nothing.
+TestCase BufferAtomicAddGpuSelectedDescriptors(u32 wave) {
+  using O = ShaderOpcode;
+  using F = Prospero::BufferFormat;
+  constexpr uint64_t GuestBase = 0x0000000110000000ull;
+  struct DescriptorCase {
+    F format;
+    u32 stride, records, mode, index, offset;
+    bool unmapped;
+    int word; // the payload word the add hits, -1 for none
+  };
+  const std::vector<DescriptorCase> cases = {
+      {F::k32UInt, 0, 16, 3, 0, 0, false, 0},   // raw, first dword
+      {F::k32UInt, 0, 16, 3, 0, 4, false, 1},   // raw, second dword
+      {F::k32UInt, 0, 16, 3, 0, 12, false, 3},  // raw, last dword in range
+      {F::k32UInt, 0, 16, 3, 0, 16, false, -1}, // raw, past the records
+      {F::kInvalid, 0, 16, 3, 0, 0, false, -1}, // invalid format
+      {F::k32UInt, 4, 2, 0, 1, 0, false, 1},    // structured: index 1 of stride 4
+      {F::k32UInt, 4, 2, 0, 2, 0, false, -1},   // structured: index past the records
+      {F::k32UInt, 4, 0, 2, 0, 0, false, -1},   // mode 2 with zero records
+      {F::k32UInt, 0, 16, 3, 0, 0, true, -1},   // in range, but the page is not mapped
+  };
+  const auto align256 = [](u32 bytes) { return (bytes + 255u) & ~255u; };
+  const auto count = static_cast<u32>(cases.size());
+  const auto selection_base = align256(count * 4u);
+  const auto descriptor_base = align256(selection_base + count * 4u);
+  const auto payload_base = align256(descriptor_base + count * 32u);
+  TestCase test;
+  test.name = wave == 32 ? "BufferAtomicAddGpuSelectedDescriptors32"
+                         : "BufferAtomicAddGpuSelectedDescriptors64";
+  test.initial.resize((payload_base + count * 64u) / 4u);
+  for (u32 i = 0; i < count; ++i) {
+    const auto &input = cases[i];
+    const u32 data_offset = payload_base + i * 64u;
+    const uint64_t data_address = GuestBase + (input.unmapped ? 0x100000u : data_offset);
+    const std::array<u32, 8> row{static_cast<u32>(data_address), 1u | (input.stride << 16u),
+                                 input.records,
+                                 4u | (static_cast<u32>(input.format) << 12u) | (input.mode << 28u),
+                                 input.index, input.offset, 0, 0};
+    std::copy(row.begin(), row.end(), test.initial.begin() + descriptor_base / 4u + i * 8u);
+    for (u32 word = 0; word < 4u; ++word)
+      test.initial[data_offset / 4u + word] = 0x1000u * (i + 1u) + word;
+    // The GPU reads which descriptor to use, in reverse order.
+    test.initial[selection_base / 4u + i] = count - 1u - i;
+  }
+  test.expected = test.initial;
+  for (u32 i = 0; i < count; ++i) {
+    const auto selected = count - 1u - i;
+    const auto &input = cases[selected];
+    const u32 data_word = (payload_base + selected * 64u) / 4u;
+    test.expected[i] = input.word < 0 ? 0u : test.initial[data_word + static_cast<u32>(input.word)];
+    if (input.word >= 0) test.expected[data_word + static_cast<u32>(input.word)] += 5u;
+  }
+  auto &code = test.code;
+  AppendSMovLiteral(&code, 28, 0);
+  AppendSMovLiteral(&code, 29, count);
+  const auto loop = static_cast<u32>(code.size());
+  code.push_back(EncodeVop1(0x01, 30, 28));
+  code.push_back(EncodeVop2(0x1a, 30, InlineU32(2), 30));
+  code.push_back(EncodeMubuf0(0x0c, selection_base));
+  code.push_back(EncodeMubuf1(2, 0, 30));
+  code.push_back(EncodeVop1(0x02, 20, Vgpr(2)));
+  code.push_back(EncodeSop2(0x1e, 20, 20, InlineU32(5)));
+  code.push_back(EncodeSmem0(0x0b, 8, 0));
+  code.push_back(EncodeSmem1(descriptor_base, 20));
+  code.push_back(EncodeVop1(0x01, 21, 12));
+  code.push_back(EncodeVop1(0x01, 22, 13));
+  AppendVMovU32(&code, 4, 5);
+  code.push_back(EncodeMubuf0(0x32, 0, true, true, true));
+  code.push_back(EncodeMubuf1(4, 2, 21, 14));
+  AppendBufferStoreDword(&code, 4, 30);
+  code.push_back(EncodeSop2(0x00, 28, 28, InlineU32(1)));
+  code.push_back(EncodeSopc(0x0a, 28, 29));
+  code.push_back(EncodeSopp(0x05, loop - static_cast<u32>(code.size()) - 1u));
+  AppendEnd(&code);
+  test.bda_mappings = {{GuestBase, 0}};
+  test.fault_free_address = GuestBase + 0x100000u;
+  test.compute_info.threads_num[0] = 1;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+  test.compute_info.wave_size = wave;
+  test.has_compute_info = true;
+  test.required_spirv = {"PhysicalStorageBuffer", "OpAtomicIAdd"};
+  test.opcodes = {O::S_MOV_B32, O::V_MOV_B32, O::V_LSHLREV_B32, O::BUFFER_LOAD_DWORD,
+                  O::V_READFIRSTLANE_B32, O::S_LSHL_B32, O::S_BUFFER_LOAD_DWORDX8,
+                  O::BUFFER_ATOMIC_ADD, O::BUFFER_STORE_DWORD, O::S_ADD_U32, O::S_CMP_LT_U32,
+                  O::S_CBRANCH_SCC1, O::S_ENDPGM};
+  return test;
+}
+
 TestCase BufferLoadFormatXGpuSelectedDescriptors() {
   return BufferLoadGpuSelectedDescriptors(32u, ShaderOpcode::BUFFER_LOAD_FORMAT_X);
 }
@@ -53560,6 +53651,23 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, ScratchIsPrivatePerInvocation());
     return 0;
   }
+  // Without a GPU with the harness's features: decode, IR, SPIR-V emission and validation only.
+  if (argc == 2 && std::strcmp(argv[1], "--indirect-buffer-atomic-compile-only") == 0) {
+    for (const u32 wave : {32u, 64u}) {
+      for (const u32 subgroup : {32u, 64u}) {
+        const auto test = BufferAtomicAddGpuSelectedDescriptors(wave);
+        (void)CompileCase(test, subgroup);
+        std::printf("[compile] %-40s subgroup %u ok\n", test.name, subgroup);
+      }
+    }
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--indirect-buffer-atomic-only") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, BufferAtomicAddGpuSelectedDescriptors(32));
+    RunCase(&vulkan, BufferAtomicAddGpuSelectedDescriptors(64));
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--indirect-buffer-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, ScalarBufferFromLoopReadlane(32));
@@ -54360,6 +54468,8 @@ int main(int argc, char **argv) {
   CheckStorageBufferBindingOver2GiB(vulkan);
   CheckRuntimeBufferRecords(vulkan);
   CheckSharedIndirectBufferLoads(vulkan);
+  RunCase(&vulkan, BufferAtomicAddGpuSelectedDescriptors(32));
+  RunCase(&vulkan, BufferAtomicAddGpuSelectedDescriptors(64));
   CheckComputeThreadDimensions(vulkan);
   CheckCountedRowImageSelector(vulkan);
   CheckPointerImageTable(vulkan);
