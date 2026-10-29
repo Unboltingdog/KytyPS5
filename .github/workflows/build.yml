@@ -120,7 +120,22 @@ jobs:
             resource_materialization_tests shader_vertex_metadata_tests archive_file_tests avplayer_file_tests ^
             memory_tracker_tests page_manager_tests image_page_table_tests bit_array_tests build_flags_tests ^
             event_queue_lifetime_tests sync_on_address_tests save_data_memory_tests trophy_system_tests ^
-            audio_out_timing_tests ajm_resample_tests png_enc_tests jpeg_dec_tests jpeg_enc_tests occlusion_queries_tests ces_tests save_data_dialog_tests psml_tests --parallel
+            audio_out_timing_tests ajm_resample_tests png_enc_tests jpeg_dec_tests jpeg_enc_tests occlusion_queries_tests ces_tests save_data_dialog_tests psml_tests --parallel > build.log 2>&1
+          set rc=%ERRORLEVEL%
+          type build.log
+          exit /b %rc%
+
+      # The fork's job logs are hard to reach: a failed build also reports its errors as an annotation.
+      - name: Report build errors
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path build.log) {
+            $lines = Select-String -Path build.log -Pattern 'error|FAILED:|undefined' -CaseSensitive:$false |
+              Select-Object -First 40 | ForEach-Object { $_.Line.Trim() }
+            $text = ($lines -join "`n") -replace '%','%25' -replace "`r",'' -replace "`n",'%0A'
+            Write-Output "::error title=Windows build errors::$text"
+          }
 
       - name: Test
         shell: cmd
