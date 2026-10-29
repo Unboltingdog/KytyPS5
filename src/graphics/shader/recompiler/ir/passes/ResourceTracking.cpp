@@ -830,45 +830,75 @@ private:
 		           ? native->src0.reg : UINT32_MAX;
 	}
 
+	// Visits every value `value` depends on, depth first, and notes the scalar reads among them
+	// (children before parents). A work stack rather than recursion: the operand chains of a
+	// large shader run thousands deep (Ghost of Yotei's overflowed the compiling thread's stack).
 	void CollectScalarRead(Value value, uint32_t use_pc) {
-		value = value.Resolve();
-		if (value.IsImmediate()) return;
-		auto* inst = value.TryInstruction();
-		if (inst == nullptr) Fail(use_pc, "invalid typed planning value");
-		if (m_srt_visited.contains(inst)) return;
-		const auto cycle = std::ranges::find(m_srt_visiting, inst);
-		if (cycle != m_srt_visiting.end()) {
-			if (std::any_of(cycle, m_srt_visiting.end(), [](const Inst* value) {
-				return value->GetOpcode() == ValueOpcode::Phi;
-			})) return;
-			Fail(use_pc, "cyclic typed planning value without a phi");
+		struct Frame {
+			Inst*                                     inst   = nullptr;
+			bool                                      memory = false;
+			std::vector<std::pair<Value, uint32_t>> children;
+			size_t                                    next = 0;
+		};
+		std::vector<Frame> stack;
+		// Enters `entered` (the recursive version's prologue): pushes its frame unless it is done.
+		const auto enter = [&](Value entered, uint32_t entered_pc) {
+			entered = entered.Resolve();
+			if (entered.IsImmediate()) return;
+			auto* inst = entered.TryInstruction();
+			if (inst == nullptr) Fail(entered_pc, "invalid typed planning value");
+			if (m_srt_visited.contains(inst)) return;
+			const auto cycle = std::ranges::find(m_srt_visiting, inst);
+			if (cycle != m_srt_visiting.end()) {
+				if (std::any_of(cycle, m_srt_visiting.end(), [](const Inst* visiting) {
+					return visiting->GetOpcode() == ValueOpcode::Phi;
+				})) return;
+				Fail(entered_pc, "cyclic typed planning value without a phi");
+			}
+			m_srt_visiting.push_back(inst);
+			uint32_t memory_index = 0;
+			const auto* memory = ScalarReadMemory(*inst, memory_index);
+			Frame frame;
+			frame.inst   = inst;
+			frame.memory = memory != nullptr;
+			if (memory != nullptr) {
+				const auto* handle = inst->Arg(0).Resolve().TryInstruction();
+				const auto width = memory->kind == ResourceKind::ScalarBuffer ? 4u : 2u;
+				if (handle == nullptr || handle->GetOpcode() !=
+				        (width == 4u ? ValueOpcode::GetBufferResource : ValueOpcode::GetAddressResource))
+					Fail(entered_pc, "scalar read has an invalid resource handle");
+				DescriptorSource source;
+				MakeSource(*handle, width, false, false, ScalarReadBase(*inst), source,
+				           inst->Flags<MemoryFlags>().pc);
+				for (uint32_t word = 0; word < width; ++word)
+					frame.children.emplace_back(source.dwords[word], inst->Flags<MemoryFlags>().pc);
+				for (size_t arg = 1; arg < inst->NumArgs(); ++arg)
+					frame.children.emplace_back(inst->Arg(arg), entered_pc);
+			} else {
+				for (size_t arg = 0; arg < inst->NumArgs(); ++arg)
+					frame.children.emplace_back(inst->Arg(arg), entered_pc);
+			}
+			stack.push_back(std::move(frame));
+		};
+		enter(value, use_pc);
+		while (!stack.empty()) {
+			auto& top = stack.back();
+			if (top.next < top.children.size()) {
+				const auto [child, child_pc] = top.children[top.next++];
+				enter(child, child_pc); // (may grow `stack`: `top` is not used after)
+				continue;
+			}
+			// The recursive version's epilogue.
+			auto* inst         = top.inst;
+			const bool memory  = top.memory;
+			stack.pop_back();
+			m_srt_visiting.pop_back();
+			m_srt_visited.insert(inst);
+			if (!memory) continue;
+			const auto offset = inst->Arg(1).Resolve();
+			if (!offset.IsImmediate() || offset.GetType() != Type::U32) continue;
+			m_scalar_reads.push_back(inst);
 		}
-		m_srt_visiting.push_back(inst);
-		uint32_t memory_index = 0;
-		const auto* memory = ScalarReadMemory(*inst, memory_index);
-		DescriptorSource source;
-		if (memory != nullptr) {
-			const auto* handle = inst->Arg(0).Resolve().TryInstruction();
-			const auto width = memory->kind == ResourceKind::ScalarBuffer ? 4u : 2u;
-			if (handle == nullptr || handle->GetOpcode() !=
-			        (width == 4u ? ValueOpcode::GetBufferResource : ValueOpcode::GetAddressResource))
-				Fail(use_pc, "scalar read has an invalid resource handle");
-			MakeSource(*handle, width, false, false, ScalarReadBase(*inst), source,
-			           inst->Flags<MemoryFlags>().pc);
-			for (uint32_t word = 0; word < width; ++word)
-				CollectScalarRead(source.dwords[word], inst->Flags<MemoryFlags>().pc);
-			for (size_t arg = 1; arg < inst->NumArgs(); ++arg)
-				CollectScalarRead(inst->Arg(arg), use_pc);
-		} else {
-			for (size_t arg = 0; arg < inst->NumArgs(); ++arg)
-				CollectScalarRead(inst->Arg(arg), use_pc);
-		}
-		m_srt_visiting.pop_back();
-		m_srt_visited.insert(inst);
-		if (memory == nullptr) return;
-		const auto offset = inst->Arg(1).Resolve();
-		if (!offset.IsImmediate() || offset.GetType() != Type::U32) return;
-		m_scalar_reads.push_back(inst);
 	}
 
 	void PlanScalarReads() {
