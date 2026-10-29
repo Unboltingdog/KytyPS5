@@ -116,6 +116,9 @@
 #include <windows.h>
 #undef min
 #undef max
+// windef.h's near/far macros break tests that name variables near and far.
+#undef near
+#undef far
 #endif
 
 namespace Libs {
