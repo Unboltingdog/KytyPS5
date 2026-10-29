@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/gpuCrashReport.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -389,6 +390,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
 	auto entry = m_program_cache.find(m_lookup_key);
 	const auto bind = [&](const ShaderModule& module) {
+		GpuCrashReport::NoteShader(params.hash, options.stage);
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};
 		module.info.bindings.AdvancePushData(push_data_cursor);
 		return &module;
