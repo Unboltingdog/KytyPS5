@@ -1408,8 +1408,38 @@ void DefineGetBdaPointer(EmitterState& state) {
 	state.builder.AddFunction(spv::OpFunctionEnd);
 }
 
+// A 32-bit buffer atomic through a GPU-selected descriptor: the descriptor's address and bounds as
+// LoadIndirectBuffer reads them, then the atomic on that guest address (BDA); out of bounds, an
+// invalid format or an unmapped page returns 0 and writes nothing, as a bounds-checked buffer does.
+uint32_t EmitIndirectBufferAtomic32(ValueEmitContext& ctx, const IR::Inst& inst) {
+	auto& state = ctx.state;
+	return EmitValueOrZeroIfCondition(state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+		const auto buffer       = PrepareIndirectBuffer(state, IndirectBufferArgs(ctx, inst), false);
+		const auto valid_format = Binary(state, spv::OpINotEqual, TypeBool(state), buffer.format,
+		                                  ConstantU32(state, 0));
+		const auto in_bounds    = AndCondition(
+		    state, valid_format,
+		    IndirectBufferInBounds(state, buffer, 0u, ConstantU32(state, 4u), false));
+		return EmitValueOrZeroIfCondition(state, in_bounds, [&]() {
+			const auto address = Binary(state, spv::OpBitwiseAnd, TypeU64(state), buffer.address,
+			                            ConstantU64(state, ~uint64_t {3}));
+			const auto bda     = GetBdaPointer(state, address);
+			const auto present =
+			    Binary(state, spv::OpINotEqual, TypeBool(state), bda, ConstantU64(state, 0));
+			return EmitValueOrZeroIfCondition(state, present, [&]() {
+				const auto pointer =
+				    Unary(state, spv::OpConvertUToPtr, TypePhysicalU32Pointer(state), bda);
+				const auto old = EmitAtomicOperation(ctx, inst, pointer, spv::ScopeDevice);
+				EmitAtomicMemoryBarrier(state, IR::ResourceKind::Buffer);
+				return old;
+			});
+		});
+	});
+}
+
 uint32_t EmitAtomic32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto& mem = ctx.Memory(inst);
+	if (mem.kind == IR::ResourceKind::IndirectBuffer) return EmitIndirectBufferAtomic32(ctx, inst);
 	return EmitAtomicAccess(ctx, inst, mem, [&](uint32_t pointer) {
 		const auto scope =
 		    mem.kind == IR::ResourceKind::Lds ? spv::ScopeWorkgroup : spv::ScopeDevice;

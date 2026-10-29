@@ -4265,7 +4265,7 @@ private:
 			               memory.resource * 4u, handle, source)) {
 				if (memory.kind != (op == ValueOpcode::ReadConstBuffer ? ResourceKind::ScalarBuffer
 				                                                        : ResourceKind::Buffer) ||
-				    !memory.SupportsIndirectBufferLoad(op)) {
+				    (!memory.SupportsIndirectBufferLoad(op) && !memory.SupportsIndirectBufferAtomic(op))) {
 					// A compute shader goes on without it and is skipped (pipelineCache.cpp): its
 					// work is missing, the game runs on (Ghost of Yotei's menu, for one).
 					if (m_program.stage == ShaderType::Compute && g_allow_unsupported_compute) {
