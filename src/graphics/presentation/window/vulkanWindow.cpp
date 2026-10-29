@@ -518,6 +518,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		shader_clock.pNext = supported_features2.pNext;
 		supported_features2.pNext = &shader_clock;
 	}
+	// (GPU crash reports: gpuCrashReport.h.)
+	const bool device_fault_extension = HasExtension(device_extensions, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+	vk::PhysicalDeviceFaultFeaturesEXT device_fault {};
+	if (device_fault_extension) {
+		device_fault.pNext = supported_features2.pNext;
+		supported_features2.pNext = &device_fault;
+	}
 	const bool image_atomic_int64_extension =
 	    HasExtension(device_extensions, VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME);
 	vk::PhysicalDeviceShaderImageAtomicInt64FeaturesEXT image_atomic_int64 {};
@@ -611,6 +618,7 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	graphics.robust_buffer_access_enabled =
 	    supported_robustness2.robustBufferAccess2 &&
 	    robustness2_properties.robustStorageBufferAccessSizeAlignment == 1u;
+	graphics.device_fault_enabled = device_fault_extension && device_fault.deviceFault;
 	// The device clock ticks at timestampPeriod nanoseconds.
 	if (shader_clock_extension && shader_clock.shaderDeviceClock) {
 		graphics.device_clock_period_ps = static_cast<uint32_t>(
@@ -744,6 +752,12 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	if (graphics.conditional_rendering_enabled) {
 		conditional_rendering.pNext = const_cast<void*>(create_info.pNext);
 		create_info.pNext = &conditional_rendering;
+	}
+	vk::PhysicalDeviceFaultFeaturesEXT device_fault_enable {};
+	if (graphics.device_fault_enabled) {
+		device_fault_enable.deviceFault = VK_TRUE;
+		device_fault_enable.pNext       = const_cast<void*>(create_info.pNext);
+		create_info.pNext               = &device_fault_enable;
 	}
 	// The renderer only uses the Vulkan 1.3 core dynamic states, but RADV (Mesa 26.3) creates its
 	// PS epilog cache only when this EXT feature is enabled and crashes in vkCmdDraw when a
@@ -1133,7 +1147,8 @@ void WindowContext::CreateVulkan() {
 		                             VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME,
 		                             VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME,
 		                             VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME,
-		                             VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME}) {
+		                             VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
+		                             VK_EXT_DEVICE_FAULT_EXTENSION_NAME}) {
 			if (HasExtension(available_extensions, extension)) {
 				device_extensions.push_back(extension);
 			}
