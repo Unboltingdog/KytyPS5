@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
@@ -425,6 +426,8 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		}
 	}
 	auto* current = entry == m_program_cache.end() ? &source : entry->second.call_source.get();
+	// (A compute shader with an access the tracker cannot place yet is skipped below, not fatal.)
+	const ShaderRecompiler::IR::AllowUnsupportedCompute allow_unsupported_compute;
 	ShaderRecompiler::TranslateResult translated;
 	if (current != nullptr) {
 		if (!current->calls.empty()) {
@@ -436,6 +439,18 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		}
 	} else {
 		translated = ShaderRecompiler::TranslateProgram(params.code, options);
+	}
+	if (const auto unsupported = ShaderRecompiler::IR::TakeUnsupportedCompute();
+	    unsupported.pc != UINT32_MAX) {
+		PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} pc=0x{:08x} "
+		                 "reason={}; rendering is incomplete",
+		                 params.hash, unsupported.pc, unsupported.reason);
+		if (entry == m_program_cache.end()) {
+			m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
+		} else {
+			entry->second.skip_dispatch = true;
+		}
+		return nullptr;
 	}
 	if (entry == m_program_cache.end()) {
 		auto retained = !source.calls.empty()

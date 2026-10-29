@@ -22,6 +22,23 @@
 #include <xxhash.h>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+namespace {
+thread_local UnsupportedCompute g_unsupported_compute;
+thread_local bool               g_allow_unsupported_compute = false;
+} // namespace
+
+AllowUnsupportedCompute::AllowUnsupportedCompute(): m_previous(g_allow_unsupported_compute) {
+	g_allow_unsupported_compute = true;
+}
+
+AllowUnsupportedCompute::~AllowUnsupportedCompute() {
+	g_allow_unsupported_compute = m_previous;
+}
+
+UnsupportedCompute TakeUnsupportedCompute() {
+	return std::exchange(g_unsupported_compute, UnsupportedCompute {});
+}
 namespace {
 
 constexpr uint32_t SamplerBorderClampMask    = (1u << 2u) | (1u << 5u) | (1u << 8u);
@@ -4249,6 +4266,18 @@ private:
 				if (memory.kind != (op == ValueOpcode::ReadConstBuffer ? ResourceKind::ScalarBuffer
 				                                                        : ResourceKind::Buffer) ||
 				    !memory.SupportsIndirectBufferLoad(op)) {
+					// A compute shader goes on without it and is skipped (pipelineCache.cpp): its
+					// work is missing, the game runs on (Ghost of Yotei's menu, for one).
+					if (m_program.stage == ShaderType::Compute && g_allow_unsupported_compute) {
+						if (g_unsupported_compute.pc == UINT32_MAX) {
+							g_unsupported_compute.pc     = flags.pc;
+							g_unsupported_compute.reason = fmt::format(
+							    "{} through a GPU-selected buffer descriptor (data_bits={} formatted={} "
+							    "typed={})",
+							    ValueOpcodeName(op), memory.data_bits, memory.formatted, memory.typed);
+						}
+						return;
+					}
 					Fail(flags.pc,
 					     "buffer descriptor is not a valid runtime value; GPU-selected access "
 					     "requires a scalar, raw 8/16-bit, raw DWORD x1/x2/x3/x4, or formatted X load");
@@ -4456,6 +4485,7 @@ UniformFillPlan RecognizePatternFill(Program& program, const Decoder::Program& d
 
 void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg,
                     ShaderStageInputInfo input) {
+	g_unsupported_compute = {};
 	Tracker(program, decoded, native_cfg, input).Run();
 	program.uniform_fill = RecognizePatternFill(program, decoded, input);
 }
