@@ -166,6 +166,9 @@ static constexpr NpEntitlementAccessAddcontEntitlementInfo NP_ENTITLEMENT_ACCESS
     {{{"85y-je"}, {}}, 3, 4}, // GTA V hash 0xf4315381
     {{{"5d5c48"}, {}}, 3, 4}, // GTA V hash 0x961c34b0
     {{{"_mtqu6"}, {}}, 3, 4}, // GTA V hash 0x9cd1bcad
+    // Ghost of Yotei (PPSA26344, seen on 02.002.000): an entitlement it asks for right after boot;
+    // without it the game waits on its first loading screen forever. A license, no extra data.
+    {{{"GHOSTYOTEIDUPLEX"}, {}}, 3, 0},
 };
 
 static NpEntitlementAccessAddcontEntitlementInfo
