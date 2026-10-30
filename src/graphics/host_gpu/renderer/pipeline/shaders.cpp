@@ -6,6 +6,7 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/debug.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
@@ -124,6 +125,9 @@ static void CreateDescriptorLayout(GraphicContext& graphics, PipelineCache::Pipe
 	create.pBindings    = bindings.data();
 	EXIT_IF(graphics.device.createDescriptorSetLayout(
 	            &create, nullptr, &pipeline.descriptor_set_layout) != vk::Result::eSuccess);
+	if (!pipeline.uses_push_descriptors) {
+		DescriptorHeap::NoteLayout(pipeline.descriptor_set_layout, bindings);
+	}
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
