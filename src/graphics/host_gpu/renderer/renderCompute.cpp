@@ -27,6 +27,7 @@
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
+#include <cstdlib>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -242,6 +243,25 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 	}
 	bindings.shared_memory = {storage.Handle(), 0, size};
 }
+
+
+namespace {
+
+// KYTY_SPLIT_DISPATCHES=1 (diagnostic, Unboltingdog fork): submits each compute dispatch in its
+// own command buffer, so a GPU crash report names the dispatch that faulted. Slow.
+bool SplitDispatches() {
+	static const bool split = [] {
+		const char* value   = std::getenv("KYTY_SPLIT_DISPATCHES");
+		const bool  enabled = value != nullptr && value[0] != '\0' && value[0] != '0';
+		if (enabled) {
+			Log::WriteToConsoleAndLog("GPU: submitting each compute dispatch separately\n");
+		}
+		return enabled;
+	}();
+	return split;
+}
+
+} // namespace
 
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
@@ -471,7 +491,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
-	ResetBindings();
+	ResetBindings();	if (SplitDispatches()) {
+		m_context.GetCommandScheduler().Flush();
+	}
 }
 
 void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
@@ -542,7 +564,9 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
-	ResetBindings();
+	ResetBindings();	if (SplitDispatches()) {
+		m_context.GetCommandScheduler().Flush();
+	}
 }
 
 } // namespace Libs::Graphics
