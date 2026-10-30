@@ -22,11 +22,13 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 #include <vulkan/vk_platform.h>
 
@@ -976,9 +978,9 @@ Presenter::~Presenter() = default;
 
 namespace {
 
-// KYTY_DUMP_FRAMES=<seconds> (diagnostic, Unboltingdog fork): every <seconds>, the frame the game
-// flips is scaled to 960x540 and written to frame-dumps/frame-NNNN.ppm, with its average color on
-// the console. Tells a game that renders black from a presenter that shows black.
+// KYTY_DUMP_FRAMES=<seconds>: every interval, writes the flipped frame and every large color
+// image the game has drawn into, each scaled to 960x540, to frame-dumps/<set>/*.ppm, and logs
+// their average and peak color. A black frame over a lit scene buffer points at the final passes.
 class FrameDumper {
 public:
 	static FrameDumper& Get() {
@@ -988,98 +990,46 @@ public:
 
 	[[nodiscard]] bool Enabled() const noexcept { return m_interval.count() > 0; }
 
-	// Writes a dump whose copy finished. Called on every prepared frame.
+	// Writes a dump set whose copies finished. Called on every prepared frame.
 	void Poll(GraphicContext& graphics, CommandScheduler& scheduler) {
-		if (m_buffer == nullptr || !scheduler.GetMasterSemaphore().IsFree(m_tick)) return;
-		vmaInvalidateAllocation(graphics.allocator, m_allocation, 0, VK_WHOLE_SIZE);
-		const auto* pixels = static_cast<const uint8_t*>(m_mapped);
-		std::filesystem::create_directories("frame-dumps");
-		char name[64];
-		std::snprintf(name, sizeof(name), "frame-dumps/frame-%04u.ppm", m_index++);
-		uint64_t sum[3] {};
-		uint32_t max[3] {};
-		if (FILE* file = std::fopen(name, "wb"); file != nullptr) {
-			std::fprintf(file, "P6\n%u %u\n255\n", Width, Height);
-			std::vector<uint8_t> row(static_cast<size_t>(Width) * 3);
-			for (uint32_t y = 0; y < Height; y++) {
-				for (uint32_t x = 0; x < Width; x++) {
-					const uint8_t* p = pixels + (static_cast<size_t>(y) * Width + x) * 4;
-					for (int c = 0; c < 3; c++) {
-						row[x * 3 + c] = p[c];
-						sum[c] += p[c];
-						max[c] = std::max<uint32_t>(max[c], p[c]);
-					}
-				}
-				std::fwrite(row.data(), 1, row.size(), file);
-			}
-			std::fclose(file);
+		if (m_captures.empty() || !scheduler.GetMasterSemaphore().IsFree(m_tick)) return;
+		char folder[64];
+		std::snprintf(folder, sizeof(folder), "frame-dumps/%04u", m_index++);
+		std::filesystem::create_directories(folder);
+		for (auto& capture: m_captures) {
+			Write(graphics, folder, *capture);
+			vmaDestroyBuffer(graphics.allocator, capture->buffer, capture->allocation);
+			graphics.DeleteImage(capture->small);
 		}
-		const double count = static_cast<double>(Width) * Height;
-		char         line[256];
-		std::snprintf(line, sizeof(line),
-		              "Frame dump: %s source %ux%u format %s, average RGB %.1f %.1f %.1f, max %u %u %u\n",
-		              name, m_source.width, m_source.height, vk::to_string(m_format).c_str(),
-		              static_cast<double>(sum[0]) / count, static_cast<double>(sum[1]) / count,
-		              static_cast<double>(sum[2]) / count, max[0], max[1], max[2]);
-		Log::WriteToConsoleAndLog(line);
-		vmaDestroyBuffer(graphics.allocator, m_buffer, m_allocation);
-		m_buffer = nullptr;
+		m_captures.clear();
 	}
 
-	// Records a copy of the prepared frame when one is due.
-	void Record(GraphicContext& graphics, CommandScheduler& scheduler, vk::CommandBuffer command,
-	            Presenter::Frame& frame) {
+	// Records copies of the prepared frame and the cache's drawn color images when a set is due.
+	void Record(GraphicContext& graphics, CommandScheduler& scheduler, TextureCache& cache,
+	            vk::CommandBuffer command, Presenter::Frame& frame) {
 		const auto now = std::chrono::steady_clock::now();
-		if (m_buffer != nullptr || now < m_next) return;
+		if (!m_captures.empty() || now < m_next) return;
 		m_next = now + m_interval;
-		if (m_small.image == nullptr) {
-			vk::ImageCreateInfo create {};
-			create.imageType   = vk::ImageType::e2D;
-			create.extent      = {Width, Height, 1};
-			create.mipLevels   = 1;
-			create.arrayLayers = 1;
-			create.format      = vk::Format::eR8G8B8A8Unorm;
-			create.tiling      = vk::ImageTiling::eOptimal;
-			create.usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
-			create.sharingMode = vk::SharingMode::eExclusive;
-			create.samples     = vk::SampleCountFlagBits::e1;
-			if (!graphics.CreateImage(create, m_small)) {
-				Log::WriteToConsoleAndLog("Frame dump: could not create the scaled image\n");
-				m_interval = {};
-				return;
-			}
-		}
-		vk::BufferCreateInfo buffer {};
-		buffer.size  = static_cast<vk::DeviceSize>(Width) * Height * 4;
-		buffer.usage = vk::BufferUsageFlagBits::eTransferDst;
-		VmaAllocationCreateInfo allocation {};
-		allocation.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
-		allocation.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
-		VmaAllocationInfo mapped {};
-		if (vmaCreateBuffer(graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer),
-		                    &allocation, &m_buffer, &m_allocation, &mapped) != VK_SUCCESS) {
-			m_buffer = nullptr;
-			return;
-		}
-		m_mapped = mapped.pMappedData;
-		m_source = {frame.image.extent.width, frame.image.extent.height};
-		m_format = frame.image.format;
 
-		frame.Transit(command, vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead);
-		Barrier(command, vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite);
-		vk::ImageBlit blit {};
-		blit.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
-		blit.srcOffsets[1]  = vk::Offset3D {static_cast<int32_t>(m_source.width),
-		                                    static_cast<int32_t>(m_source.height), 1};
-		blit.dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
-		blit.dstOffsets[1]  = vk::Offset3D {static_cast<int32_t>(Width), static_cast<int32_t>(Height), 1};
-		command.blitImage(frame.image.image, vk::ImageLayout::eTransferSrcOptimal, m_small.image,
-		                  vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
-		Barrier(command, vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead);
-		vk::BufferImageCopy copy {};
-		copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
-		copy.imageExtent      = vk::Extent3D {Width, Height, 1};
-		command.copyImageToBuffer(m_small.image, vk::ImageLayout::eTransferSrcOptimal, m_buffer, copy);
+		if (auto* capture = Begin(graphics, "flip", frame.image.extent, frame.image.format)) {
+			frame.Transit(command, vk::ImageLayout::eTransferSrcOptimal,
+			              vk::AccessFlagBits2::eTransferRead);
+			Copy(command, *capture, frame.image.image);
+		}
+		cache.ForEachImage([&](Image& image) {
+			if (m_captures.size() >= MaxCaptures || !Dumpable(graphics, image)) return;
+			char name[96];
+			std::snprintf(name, sizeof(name), "%010" PRIx64 "%s%s%s-%s", image.info.data.address,
+			              image.usage.video_out ? "-videoout" : "",
+			              image.usage.render_target ? "-rt" : "", image.usage.storage ? "-storage" : "",
+			              vk::to_string(image.backing.format).c_str());
+			auto* capture = Begin(graphics, name, image.backing.extent, image.backing.format);
+			if (capture == nullptr) return;
+			image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
+			              command);
+			Copy(command, *capture, image.backing.image);
+		});
+
 		vk::MemoryBarrier2 host {};
 		host.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
 		host.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
@@ -1093,48 +1043,167 @@ public:
 	}
 
 private:
-	static constexpr uint32_t Width  = 960;
-	static constexpr uint32_t Height = 540;
+	static constexpr uint32_t Width       = 960;
+	static constexpr uint32_t Height      = 540;
+	static constexpr size_t   MaxCaptures = 24;
+
+	struct Capture {
+		std::string   name;
+		VulkanImage   small;
+		VkBuffer      buffer     = nullptr;
+		VmaAllocation allocation = nullptr;
+		void*         mapped     = nullptr;
+		vk::Extent3D  source {};
+		vk::Format    format = vk::Format::eUndefined;
+	};
 
 	FrameDumper() {
-		const char* value = std::getenv("KYTY_DUMP_FRAMES");
+		const char* value   = std::getenv("KYTY_DUMP_FRAMES");
 		const int   seconds = value != nullptr ? std::atoi(value) : 0;
 		if (seconds > 0) {
 			m_interval = std::chrono::seconds(seconds);
 			m_next     = std::chrono::steady_clock::now() + m_interval;
-			Log::WriteToConsoleAndLog("Frame dump: on, writing frame-dumps/*.ppm\n");
+			Log::WriteToConsoleAndLog("Frame dump: on, writing frame-dumps/<set>/*.ppm\n");
 		}
 	}
 
-	void Barrier(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access) {
+	// Single-sample 2D color images of at least 1280x720 the GPU drew into, in a format the
+	// device can blit from into 8-bit color.
+	static bool Dumpable(GraphicContext& graphics, const Image& image) {
+		const auto& backing = image.backing;
+		if (!image.registered || image.depth_id || image.info.IsDepth() || backing.image == nullptr ||
+		    backing.samples != 1 || backing.image_type != vk::ImageType::e2D ||
+		    backing.extent.width < 1280 || backing.extent.height < 720 || !image.IsGpuModified() ||
+		    !(image.usage.render_target || image.usage.storage || image.usage.video_out)) {
+			return false;
+		}
+		const auto name = vk::to_string(backing.format);
+		if (name.find("int") != std::string::npos || name.find("Int") != std::string::npos) {
+			return false;
+		}
+		const auto features =
+		    graphics.physical_device.getFormatProperties(backing.format).optimalTilingFeatures;
+		return static_cast<bool>(features & vk::FormatFeatureFlagBits::eBlitSrc) &&
+		       static_cast<bool>(features & vk::FormatFeatureFlagBits::eSampledImageFilterLinear);
+	}
+
+	Capture* Begin(GraphicContext& graphics, const char* name, vk::Extent3D source,
+	               vk::Format format) {
+		auto& capture = *m_captures.emplace_back(std::make_unique<Capture>());
+		capture.name  = name;
+		capture.source = source;
+		capture.format = format;
+		vk::ImageCreateInfo create {};
+		create.imageType   = vk::ImageType::e2D;
+		create.extent      = {Width, Height, 1};
+		create.mipLevels   = 1;
+		create.arrayLayers = 1;
+		create.format      = vk::Format::eR8G8B8A8Unorm;
+		create.tiling      = vk::ImageTiling::eOptimal;
+		create.usage       = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
+		create.sharingMode = vk::SharingMode::eExclusive;
+		create.samples     = vk::SampleCountFlagBits::e1;
+		if (!graphics.CreateImage(create, capture.small)) {
+			Log::WriteToConsoleAndLog("Frame dump: could not create a scaled image\n");
+			m_captures.pop_back();
+			return nullptr;
+		}
+		vk::BufferCreateInfo buffer {};
+		buffer.size  = static_cast<vk::DeviceSize>(Width) * Height * 4;
+		buffer.usage = vk::BufferUsageFlagBits::eTransferDst;
+		VmaAllocationCreateInfo allocation {};
+		allocation.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+		allocation.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+		VmaAllocationInfo mapped {};
+		if (vmaCreateBuffer(graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer),
+		                    &allocation, &capture.buffer, &capture.allocation, &mapped) != VK_SUCCESS) {
+			graphics.DeleteImage(capture.small);
+			m_captures.pop_back();
+			return nullptr;
+		}
+		capture.mapped = mapped.pMappedData;
+		return &capture;
+	}
+
+	static void Copy(vk::CommandBuffer command, Capture& capture, vk::Image source) {
+		Barrier(command, capture.small, vk::ImageLayout::eTransferDstOptimal,
+		        vk::AccessFlagBits2::eTransferWrite);
+		vk::ImageBlit blit {};
+		blit.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+		blit.srcOffsets[1]  = vk::Offset3D {static_cast<int32_t>(capture.source.width),
+		                                    static_cast<int32_t>(capture.source.height), 1};
+		blit.dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+		blit.dstOffsets[1]  = vk::Offset3D {static_cast<int32_t>(Width), static_cast<int32_t>(Height), 1};
+		command.blitImage(source, vk::ImageLayout::eTransferSrcOptimal, capture.small.image,
+		                  vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
+		Barrier(command, capture.small, vk::ImageLayout::eTransferSrcOptimal,
+		        vk::AccessFlagBits2::eTransferRead);
+		vk::BufferImageCopy copy {};
+		copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+		copy.imageExtent      = vk::Extent3D {Width, Height, 1};
+		command.copyImageToBuffer(capture.small.image, vk::ImageLayout::eTransferSrcOptimal,
+		                          capture.buffer, copy);
+	}
+
+	static void Write(GraphicContext& graphics, const char* folder, const Capture& capture) {
+		vmaInvalidateAllocation(graphics.allocator, capture.allocation, 0, VK_WHOLE_SIZE);
+		const auto* pixels = static_cast<const uint8_t*>(capture.mapped);
+		const auto  path   = std::string(folder) + "/" + capture.name + ".ppm";
+		uint64_t    sum[4] {};
+		uint32_t    max[4] {};
+		if (FILE* file = std::fopen(path.c_str(), "wb"); file != nullptr) {
+			std::fprintf(file, "P6\n%u %u\n255\n", Width, Height);
+			std::vector<uint8_t> row(static_cast<size_t>(Width) * 3);
+			for (uint32_t y = 0; y < Height; y++) {
+				for (uint32_t x = 0; x < Width; x++) {
+					const uint8_t* p = pixels + (static_cast<size_t>(y) * Width + x) * 4;
+					for (int c = 0; c < 4; c++) {
+						if (c < 3) row[x * 3 + c] = p[c];
+						sum[c] += p[c];
+						max[c] = std::max<uint32_t>(max[c], p[c]);
+					}
+				}
+				std::fwrite(row.data(), 1, row.size(), file);
+			}
+			std::fclose(file);
+		}
+		const double count = static_cast<double>(Width) * Height;
+		char         line[384];
+		std::snprintf(line, sizeof(line),
+		              "Frame dump: %s source %ux%u format %s, average RGBA %.1f %.1f %.1f %.1f, "
+		              "max %u %u %u %u\n",
+		              path.c_str(), capture.source.width, capture.source.height,
+		              vk::to_string(capture.format).c_str(), static_cast<double>(sum[0]) / count,
+		              static_cast<double>(sum[1]) / count, static_cast<double>(sum[2]) / count,
+		              static_cast<double>(sum[3]) / count, max[0], max[1], max[2], max[3]);
+		Log::WriteToConsoleAndLog(line);
+	}
+
+	static void Barrier(vk::CommandBuffer command, VulkanImage& image, vk::ImageLayout layout,
+	                    vk::AccessFlags2 access) {
 		vk::ImageMemoryBarrier2 barrier {};
 		barrier.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
-		barrier.srcAccessMask       = m_small.state.access_mask;
+		barrier.srcAccessMask       = image.state.access_mask;
 		barrier.dstStageMask        = vk::PipelineStageFlagBits2::eTransfer;
 		barrier.dstAccessMask       = access;
-		barrier.oldLayout           = m_small.state.layout;
+		barrier.oldLayout           = image.state.layout;
 		barrier.newLayout           = layout;
 		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		barrier.image               = m_small.image;
+		barrier.image               = image.image;
 		barrier.subresourceRange    = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
 		vk::DependencyInfo dependency {};
 		dependency.imageMemoryBarrierCount = 1;
 		dependency.pImageMemoryBarriers    = &barrier;
 		command.pipelineBarrier2(dependency);
-		m_small.state = {vk::PipelineStageFlagBits2::eTransfer, access, layout};
+		image.state = {vk::PipelineStageFlagBits2::eTransfer, access, layout};
 	}
 
 	std::chrono::steady_clock::duration   m_interval {};
 	std::chrono::steady_clock::time_point m_next {};
-	VulkanImage                           m_small;
-	VkBuffer                              m_buffer     = nullptr;
-	VmaAllocation                         m_allocation = nullptr;
-	void*                                 m_mapped     = nullptr;
-	uint64_t                              m_tick       = 0;
-	uint32_t                              m_index      = 0;
-	vk::Extent2D                          m_source {};
-	vk::Format                            m_format = vk::Format::eUndefined;
+	std::vector<std::unique_ptr<Capture>> m_captures;
+	uint64_t                              m_tick  = 0;
+	uint32_t                              m_index = 0;
 };
 
 } // namespace
@@ -1163,7 +1232,8 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	if (auto& dumper = FrameDumper::Get(); dumper.Enabled()) {
 		auto& scheduler = m_impl->renderer.GetCommandScheduler();
 		dumper.Poll(m_impl->window.graphic_ctx, scheduler);
-		dumper.Record(m_impl->window.graphic_ctx, scheduler, buffer.Handle(), *frame);
+		dumper.Record(m_impl->window.graphic_ctx, scheduler, m_impl->renderer.GetTextureCache(),
+		              buffer.Handle(), *frame);
 	}
 	if (headset) {
 		// The frame holds the raw display-encoded pixels the headset needs.
