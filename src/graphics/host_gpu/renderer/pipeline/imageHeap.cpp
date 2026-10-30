@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/imageHeap.h"
 
+#include "common/logging/log.h"
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/profiler.h"
@@ -389,6 +390,10 @@ uint32_t ImageHeap::Allocate() {
 			EXIT("image heaps exceed %u resident images\n", IR::ImageHeapCapacity);
 		}
 		m_elements.emplace_back();
+		if (const auto size = m_elements.size(); size >= 16384u && (size & (size - 1u)) == 0u) {
+			LOGF("ImageHeap: %zu resident images (%zu retired awaiting the GPU)\n", size,
+			     m_retired.size());
+		}
 		return static_cast<uint32_t>(m_elements.size() - 1u);
 	}
 	const auto index = m_free.back();
