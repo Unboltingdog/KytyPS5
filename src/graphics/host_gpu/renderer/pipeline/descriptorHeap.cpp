@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
@@ -54,7 +55,17 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 
 	m_sets.clear();
 	auto& fresh_batch = m_sets[layout];
-	EXIT_IF(!Allocate(layout, fresh_batch));
+	// PPSA26344: a set layout can need more descriptors of one type than a whole pool holds.
+	// Grow the pools until one set fits.
+	while (!Allocate(layout, fresh_batch)) {
+		EXIT_IF(m_pool_scale >= 64);
+		m_pool_scale *= 2;
+		LOGF("DescriptorHeap: a set did not fit an empty pool; growing pools to %ux\n",
+		     m_pool_scale);
+		m_pending_pools.emplace_back(m_current_pool, m_master_semaphore.CurrentTick());
+		CreateDescriptorPool();
+		fresh_batch = {};
+	}
 	return fresh_batch.sets[--fresh_batch.size];
 }
 
@@ -83,10 +94,14 @@ bool DescriptorHeap::Allocate(vk::DescriptorSetLayout layout, Batch& batch) {
 }
 
 void DescriptorHeap::CreateDescriptorPool() {
+	auto sizes = DescriptorPoolSizes;
+	for (auto& size: sizes) {
+		size.descriptorCount *= m_pool_scale;
+	}
 	vk::DescriptorPoolCreateInfo create {};
 	create.maxSets       = DescriptorHeapCount;
-	create.poolSizeCount = static_cast<uint32_t>(DescriptorPoolSizes.size());
-	create.pPoolSizes    = DescriptorPoolSizes.data();
+	create.poolSizeCount = static_cast<uint32_t>(sizes.size());
+	create.pPoolSizes    = sizes.data();
 	EXIT_IF(m_graphics.device.createDescriptorPool(&create, nullptr, &m_current_pool) !=
 	        vk::Result::eSuccess);
 }
