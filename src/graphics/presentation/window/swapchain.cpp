@@ -999,7 +999,7 @@ public:
 		for (auto& capture: m_captures) {
 			Write(graphics, folder, *capture);
 			vmaDestroyBuffer(graphics.allocator, capture->buffer, capture->allocation);
-			graphics.DeleteImage(capture->small);
+			graphics.DeleteImage(capture->scaled);
 		}
 		m_captures.clear();
 	}
@@ -1049,7 +1049,7 @@ private:
 
 	struct Capture {
 		std::string   name;
-		VulkanImage   small;
+		VulkanImage   scaled;
 		VkBuffer      buffer     = nullptr;
 		VmaAllocation allocation = nullptr;
 		void*         mapped     = nullptr;
@@ -1103,7 +1103,7 @@ private:
 		create.usage       = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
 		create.sharingMode = vk::SharingMode::eExclusive;
 		create.samples     = vk::SampleCountFlagBits::e1;
-		if (!graphics.CreateImage(create, capture.small)) {
+		if (!graphics.CreateImage(create, capture.scaled)) {
 			Log::WriteToConsoleAndLog("Frame dump: could not create a scaled image\n");
 			m_captures.pop_back();
 			return nullptr;
@@ -1117,7 +1117,7 @@ private:
 		VmaAllocationInfo mapped {};
 		if (vmaCreateBuffer(graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer),
 		                    &allocation, &capture.buffer, &capture.allocation, &mapped) != VK_SUCCESS) {
-			graphics.DeleteImage(capture.small);
+			graphics.DeleteImage(capture.scaled);
 			m_captures.pop_back();
 			return nullptr;
 		}
@@ -1126,7 +1126,7 @@ private:
 	}
 
 	static void Copy(vk::CommandBuffer command, Capture& capture, vk::Image source) {
-		Barrier(command, capture.small, vk::ImageLayout::eTransferDstOptimal,
+		Barrier(command, capture.scaled, vk::ImageLayout::eTransferDstOptimal,
 		        vk::AccessFlagBits2::eTransferWrite);
 		vk::ImageBlit blit {};
 		blit.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
@@ -1134,14 +1134,14 @@ private:
 		                                    static_cast<int32_t>(capture.source.height), 1};
 		blit.dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
 		blit.dstOffsets[1]  = vk::Offset3D {static_cast<int32_t>(Width), static_cast<int32_t>(Height), 1};
-		command.blitImage(source, vk::ImageLayout::eTransferSrcOptimal, capture.small.image,
+		command.blitImage(source, vk::ImageLayout::eTransferSrcOptimal, capture.scaled.image,
 		                  vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
-		Barrier(command, capture.small, vk::ImageLayout::eTransferSrcOptimal,
+		Barrier(command, capture.scaled, vk::ImageLayout::eTransferSrcOptimal,
 		        vk::AccessFlagBits2::eTransferRead);
 		vk::BufferImageCopy copy {};
 		copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
 		copy.imageExtent      = vk::Extent3D {Width, Height, 1};
-		command.copyImageToBuffer(capture.small.image, vk::ImageLayout::eTransferSrcOptimal,
+		command.copyImageToBuffer(capture.scaled.image, vk::ImageLayout::eTransferSrcOptimal,
 		                          capture.buffer, copy);
 	}
 
