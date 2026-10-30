@@ -248,17 +248,30 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 namespace {
 
 // KYTY_SPLIT_DISPATCHES=1 (diagnostic, Unboltingdog fork): submits each compute dispatch in its
-// own command buffer, so a GPU crash report names the dispatch that faulted. Slow.
-bool SplitDispatches() {
-	static const bool split = [] {
-		const char* value   = std::getenv("KYTY_SPLIT_DISPATCHES");
-		const bool  enabled = value != nullptr && value[0] != '\0' && value[0] != '0';
-		if (enabled) {
+// own command buffer, so a GPU crash report names the dispatch that faulted. =2 also waits for
+// each one to finish, so only the faulting dispatch is ever in flight. Slow.
+int SplitDispatchMode() {
+	static const int mode = [] {
+		const char* value = std::getenv("KYTY_SPLIT_DISPATCHES");
+		const int   parsed = value != nullptr ? std::atoi(value) : 0;
+		if (parsed == 1) {
 			Log::WriteToConsoleAndLog("GPU: submitting each compute dispatch separately\n");
+		} else if (parsed >= 2) {
+			Log::WriteToConsoleAndLog(
+			    "GPU: submitting and waiting for each compute dispatch separately\n");
 		}
-		return enabled;
+		return parsed;
 	}();
-	return split;
+	return mode;
+}
+
+void SplitDispatch(CommandScheduler& scheduler) {
+	const int mode = SplitDispatchMode();
+	if (mode == 1) {
+		scheduler.Flush();
+	} else if (mode >= 2) {
+		scheduler.FlushAndWait();
+	}
 }
 
 } // namespace
@@ -491,9 +504,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
-	ResetBindings();	if (SplitDispatches()) {
-		m_context.GetCommandScheduler().Flush();
-	}
+	ResetBindings();
+	SplitDispatch(m_context.GetCommandScheduler());
 }
 
 void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
@@ -564,9 +576,8 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
-	ResetBindings();	if (SplitDispatches()) {
-		m_context.GetCommandScheduler().Flush();
-	}
+	ResetBindings();
+	SplitDispatch(m_context.GetCommandScheduler());
 }
 
 } // namespace Libs::Graphics
