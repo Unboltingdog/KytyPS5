@@ -6,6 +6,7 @@
 
 #include <array>
 #include <deque>
+#include <span>
 #include <unordered_map>
 
 namespace Libs::Graphics {
@@ -21,6 +22,11 @@ public:
 
 	[[nodiscard]] vk::DescriptorSet Commit(vk::DescriptorSetLayout layout);
 
+	// Records how many descriptors of each type a set layout holds, so a pool can be sized for a
+	// layout larger than the default pool.
+	static void NoteLayout(vk::DescriptorSetLayout                         layout,
+	                       std::span<const vk::DescriptorSetLayoutBinding> bindings);
+
 private:
 	static constexpr uint32_t DescriptorSetBatch = 32;
 
@@ -31,13 +37,11 @@ private:
 	};
 
 	[[nodiscard]] bool Allocate(vk::DescriptorSetLayout layout, Batch& batch);
-	void               CreateDescriptorPool();
+	void               CreateDescriptorPool(std::span<const uint32_t> minimum = {});
 
 	GraphicContext&                                     m_graphics;
 	MasterSemaphore&                                    m_master_semaphore;
 	vk::DescriptorPool                                  m_current_pool = nullptr;
-	// Pools grow when one set layout needs more descriptors than a pool holds.
-	uint32_t                                            m_pool_scale   = 1;
 	std::deque<std::pair<vk::DescriptorPool, uint64_t>> m_pending_pools;
 	std::unordered_map<vk::DescriptorSetLayout, Batch>  m_sets;
 };
