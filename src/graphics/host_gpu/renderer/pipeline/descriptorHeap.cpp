@@ -43,14 +43,18 @@ void DescriptorHeap::NoteLayout(vk::DescriptorSetLayout                         
 
 DescriptorHeap::DescriptorHeap(GraphicContext& graphics, MasterSemaphore& master_semaphore)
     : m_graphics(graphics), m_master_semaphore(master_semaphore) {
+	static_assert(DescriptorPoolSizes.size() == 4);
+	for (size_t i = 0; i < DescriptorPoolSizes.size(); i++) {
+		m_pool_sizes[i] = DescriptorPoolSizes[i].descriptorCount;
+	}
 	CreateDescriptorPool();
 }
 
 DescriptorHeap::~DescriptorHeap() {
 	m_graphics.device.destroyDescriptorPool(m_current_pool, nullptr);
-	for (const auto& [pool, tick]: m_pending_pools) {
-		m_master_semaphore.Wait(tick);
-		m_graphics.device.destroyDescriptorPool(pool, nullptr);
+	for (const auto& pending: m_pending_pools) {
+		m_master_semaphore.Wait(pending.tick);
+		m_graphics.device.destroyDescriptorPool(pending.pool, nullptr);
 	}
 }
 
@@ -66,12 +70,8 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 		return batch.sets[--batch.size];
 	}
 
-	m_pending_pools.emplace_back(m_current_pool, m_master_semaphore.CurrentTick());
-	if (const auto& [pool, tick] = m_pending_pools.front(); m_master_semaphore.IsFree(tick)) {
-		m_current_pool = pool;
-		m_pending_pools.pop_front();
-		EXIT_IF(m_graphics.device.resetDescriptorPool(m_current_pool, {}) != vk::Result::eSuccess);
-	} else {
+	RetirePool();
+	if (!ReusePool()) {
 		CreateDescriptorPool();
 	}
 
@@ -81,7 +81,7 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 		return fresh_batch.sets[--fresh_batch.size];
 	}
 	// PPSA26344: one set layout can need more descriptors of a type than a default pool holds.
-	// Give it a pool sized for a batch of its sets.
+	// Grow every pool from now on to hold a good number of its sets.
 	std::array<uint32_t, DescriptorPoolSizes.size()> needs {};
 	{
 		std::scoped_lock lock {g_layout_mutex};
@@ -89,16 +89,18 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 			needs = it->second;
 		}
 	}
-	std::array<uint32_t, DescriptorPoolSizes.size()> minimum {};
+	constexpr uint64_t LargeSetsPerPool = 256;
 	for (size_t i = 0; i < needs.size(); i++) {
-		minimum[i] = static_cast<uint32_t>(
-		    std::min<uint64_t>(uint64_t {needs[i]} * DescriptorSetBatch, UINT32_MAX));
+		m_pool_sizes[i] = static_cast<uint32_t>(std::max<uint64_t>(
+		    m_pool_sizes[i], std::min<uint64_t>(uint64_t {needs[i]} * LargeSetsPerPool, UINT32_MAX)));
 	}
+	RetirePool(); // At the old size, so it is destroyed rather than reused.
+	m_generation++;
 	LOGF("DescriptorHeap: a set needs storage buffers=%u sampled images=%u storage images=%u "
-	     "samplers=%u; sizing a pool for it\n",
-	     needs[0], needs[1], needs[2], needs[3]);
-	m_pending_pools.emplace_back(m_current_pool, m_master_semaphore.CurrentTick());
-	CreateDescriptorPool(minimum);
+	     "samplers=%u; pools now hold %u/%u/%u/%u\n",
+	     needs[0], needs[1], needs[2], needs[3], m_pool_sizes[0], m_pool_sizes[1],
+	     m_pool_sizes[2], m_pool_sizes[3]);
+	CreateDescriptorPool();
 	fresh_batch = {};
 	if (!Allocate(layout, fresh_batch)) {
 		EXIT("DescriptorHeap: a set needing storage buffers=%u sampled images=%u storage "
@@ -106,6 +108,28 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 		     needs[0], needs[1], needs[2], needs[3]);
 	}
 	return fresh_batch.sets[--fresh_batch.size];
+}
+
+void DescriptorHeap::RetirePool() {
+	m_pending_pools.push_back({m_current_pool, m_master_semaphore.CurrentTick(), m_generation});
+	m_current_pool = nullptr;
+}
+
+// Reuses the oldest retired pool once the GPU is done with it; one made before the pools last
+// grew is destroyed instead.
+bool DescriptorHeap::ReusePool() {
+	while (!m_pending_pools.empty() && m_master_semaphore.IsFree(m_pending_pools.front().tick)) {
+		const auto pending = m_pending_pools.front();
+		m_pending_pools.pop_front();
+		if (pending.generation != m_generation) {
+			m_graphics.device.destroyDescriptorPool(pending.pool, nullptr);
+			continue;
+		}
+		m_current_pool = pending.pool;
+		EXIT_IF(m_graphics.device.resetDescriptorPool(m_current_pool, {}) != vk::Result::eSuccess);
+		return true;
+	}
+	return false;
 }
 
 bool DescriptorHeap::Allocate(vk::DescriptorSetLayout layout, Batch& batch) {
@@ -132,10 +156,10 @@ bool DescriptorHeap::Allocate(vk::DescriptorSetLayout layout, Batch& batch) {
 	}
 }
 
-void DescriptorHeap::CreateDescriptorPool(std::span<const uint32_t> minimum) {
+void DescriptorHeap::CreateDescriptorPool() {
 	auto sizes = DescriptorPoolSizes;
-	for (size_t i = 0; i < sizes.size() && i < minimum.size(); i++) {
-		sizes[i].descriptorCount = std::max(sizes[i].descriptorCount, minimum[i]);
+	for (size_t i = 0; i < sizes.size(); i++) {
+		sizes[i].descriptorCount = m_pool_sizes[i];
 	}
 	vk::DescriptorPoolCreateInfo create {};
 	create.maxSets       = DescriptorHeapCount;
