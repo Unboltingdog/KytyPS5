@@ -51,6 +51,11 @@ void SetMaster(const MasterSemaphore* master) {
 	g_master.store(master, std::memory_order_release);
 }
 
+void ClearMaster(const MasterSemaphore* master) {
+	const MasterSemaphore* expected = master;
+	g_master.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
+}
+
 void NoteShader(uint64_t hash, ShaderType stage) {
 	const auto* master = g_master.load(std::memory_order_acquire);
 	const auto  tick   = master != nullptr ? master->CurrentTick() : 0;
@@ -66,6 +71,10 @@ void NoteShader(uint64_t hash, ShaderType stage) {
 void Report(GraphicContext& graphics, vk::Result result, uint64_t completed) {
 	static std::atomic_bool reported {false};
 	if (reported.exchange(true)) return;
+	// The semaphore that failed may be another scheduler's (presentation); notes use the render one.
+	if (const auto* master = g_master.load(std::memory_order_acquire); master != nullptr) {
+		completed = master->KnownGpuTick();
+	}
 	std::string text = "\n===== GPU crash report =====\n";
 	char        line[512];
 	std::snprintf(line, sizeof(line), "Vulkan result: %s (%d); last finished tick %" PRIu64 "\n",

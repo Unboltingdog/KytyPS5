@@ -17,11 +17,10 @@ MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics)
 
 	const auto result = m_graphics.device.createSemaphore(&create_info, nullptr, &m_semaphore);
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess || m_semaphore == nullptr);
-	GpuCrashReport::SetMaster(this);
 }
 
 MasterSemaphore::~MasterSemaphore() {
-	GpuCrashReport::SetMaster(nullptr);
+	GpuCrashReport::ClearMaster(this);
 	if (m_semaphore != nullptr) {
 		m_graphics.device.destroySemaphore(m_semaphore, nullptr);
 	}
