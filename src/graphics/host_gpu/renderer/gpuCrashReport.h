@@ -19,7 +19,9 @@ class MasterSemaphore;
 namespace GpuCrashReport {
 
 // The semaphore whose ticks the notes carry.
+// The render scheduler's semaphore: shader notes carry its ticks.
 void SetMaster(const MasterSemaphore* master);
+void ClearMaster(const MasterSemaphore* master);
 // A shader goes into the current command buffer.
 void NoteShader(uint64_t hash, ShaderType stage);
 // The device is lost (or a wait or counter read failed with `result`): writes the report.

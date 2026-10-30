@@ -21,6 +21,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -970,6 +974,171 @@ Presenter::Presenter(WindowContext& window): m_impl(std::make_unique<Impl>(windo
 
 Presenter::~Presenter() = default;
 
+namespace {
+
+// KYTY_DUMP_FRAMES=<seconds> (diagnostic, Unboltingdog fork): every <seconds>, the frame the game
+// flips is scaled to 960x540 and written to frame-dumps/frame-NNNN.ppm, with its average color on
+// the console. Tells a game that renders black from a presenter that shows black.
+class FrameDumper {
+public:
+	static FrameDumper& Get() {
+		static FrameDumper dumper;
+		return dumper;
+	}
+
+	[[nodiscard]] bool Enabled() const noexcept { return m_interval.count() > 0; }
+
+	// Writes a dump whose copy finished. Called on every prepared frame.
+	void Poll(GraphicContext& graphics, CommandScheduler& scheduler) {
+		if (m_buffer == nullptr || !scheduler.GetMasterSemaphore().IsFree(m_tick)) return;
+		vmaInvalidateAllocation(graphics.allocator, m_allocation, 0, VK_WHOLE_SIZE);
+		const auto* pixels = static_cast<const uint8_t*>(m_mapped);
+		std::filesystem::create_directories("frame-dumps");
+		char name[64];
+		std::snprintf(name, sizeof(name), "frame-dumps/frame-%04u.ppm", m_index++);
+		uint64_t sum[3] {};
+		uint32_t max[3] {};
+		if (FILE* file = std::fopen(name, "wb"); file != nullptr) {
+			std::fprintf(file, "P6\n%u %u\n255\n", Width, Height);
+			std::vector<uint8_t> row(static_cast<size_t>(Width) * 3);
+			for (uint32_t y = 0; y < Height; y++) {
+				for (uint32_t x = 0; x < Width; x++) {
+					const uint8_t* p = pixels + (static_cast<size_t>(y) * Width + x) * 4;
+					for (int c = 0; c < 3; c++) {
+						row[x * 3 + c] = p[c];
+						sum[c] += p[c];
+						max[c] = std::max<uint32_t>(max[c], p[c]);
+					}
+				}
+				std::fwrite(row.data(), 1, row.size(), file);
+			}
+			std::fclose(file);
+		}
+		const double count = static_cast<double>(Width) * Height;
+		char         line[256];
+		std::snprintf(line, sizeof(line),
+		              "Frame dump: %s source %ux%u format %s, average RGB %.1f %.1f %.1f, max %u %u %u\n",
+		              name, m_source.width, m_source.height, vk::to_string(m_format).c_str(),
+		              static_cast<double>(sum[0]) / count, static_cast<double>(sum[1]) / count,
+		              static_cast<double>(sum[2]) / count, max[0], max[1], max[2]);
+		Log::WriteToConsoleAndLog(line);
+		vmaDestroyBuffer(graphics.allocator, m_buffer, m_allocation);
+		m_buffer = nullptr;
+	}
+
+	// Records a copy of the prepared frame when one is due.
+	void Record(GraphicContext& graphics, CommandScheduler& scheduler, vk::CommandBuffer command,
+	            Presenter::Frame& frame) {
+		const auto now = std::chrono::steady_clock::now();
+		if (m_buffer != nullptr || now < m_next) return;
+		m_next = now + m_interval;
+		if (m_small.image == nullptr) {
+			vk::ImageCreateInfo create {};
+			create.imageType   = vk::ImageType::e2D;
+			create.extent      = {Width, Height, 1};
+			create.mipLevels   = 1;
+			create.arrayLayers = 1;
+			create.format      = vk::Format::eR8G8B8A8Unorm;
+			create.tiling      = vk::ImageTiling::eOptimal;
+			create.usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
+			create.sharingMode = vk::SharingMode::eExclusive;
+			create.samples     = vk::SampleCountFlagBits::e1;
+			if (!graphics.CreateImage(create, m_small)) {
+				Log::WriteToConsoleAndLog("Frame dump: could not create the scaled image\n");
+				m_interval = {};
+				return;
+			}
+		}
+		vk::BufferCreateInfo buffer {};
+		buffer.size  = static_cast<vk::DeviceSize>(Width) * Height * 4;
+		buffer.usage = vk::BufferUsageFlagBits::eTransferDst;
+		VmaAllocationCreateInfo allocation {};
+		allocation.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+		allocation.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+		VmaAllocationInfo mapped {};
+		if (vmaCreateBuffer(graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer),
+		                    &allocation, &m_buffer, &m_allocation, &mapped) != VK_SUCCESS) {
+			m_buffer = nullptr;
+			return;
+		}
+		m_mapped = mapped.pMappedData;
+		m_source = {frame.image.extent.width, frame.image.extent.height};
+		m_format = frame.image.format;
+
+		frame.Transit(command, vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead);
+		Barrier(command, vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite);
+		vk::ImageBlit blit {};
+		blit.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+		blit.srcOffsets[1]  = vk::Offset3D {static_cast<int32_t>(m_source.width),
+		                                    static_cast<int32_t>(m_source.height), 1};
+		blit.dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+		blit.dstOffsets[1]  = vk::Offset3D {static_cast<int32_t>(Width), static_cast<int32_t>(Height), 1};
+		command.blitImage(frame.image.image, vk::ImageLayout::eTransferSrcOptimal, m_small.image,
+		                  vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
+		Barrier(command, vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead);
+		vk::BufferImageCopy copy {};
+		copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+		copy.imageExtent      = vk::Extent3D {Width, Height, 1};
+		command.copyImageToBuffer(m_small.image, vk::ImageLayout::eTransferSrcOptimal, m_buffer, copy);
+		vk::MemoryBarrier2 host {};
+		host.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
+		host.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
+		host.dstStageMask  = vk::PipelineStageFlagBits2::eHost;
+		host.dstAccessMask = vk::AccessFlagBits2::eHostRead;
+		vk::DependencyInfo dependency {};
+		dependency.memoryBarrierCount = 1;
+		dependency.pMemoryBarriers    = &host;
+		command.pipelineBarrier2(dependency);
+		m_tick = scheduler.CurrentTick();
+	}
+
+private:
+	static constexpr uint32_t Width  = 960;
+	static constexpr uint32_t Height = 540;
+
+	FrameDumper() {
+		const char* value = std::getenv("KYTY_DUMP_FRAMES");
+		const int   seconds = value != nullptr ? std::atoi(value) : 0;
+		if (seconds > 0) {
+			m_interval = std::chrono::seconds(seconds);
+			m_next     = std::chrono::steady_clock::now() + m_interval;
+			Log::WriteToConsoleAndLog("Frame dump: on, writing frame-dumps/*.ppm\n");
+		}
+	}
+
+	void Barrier(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access) {
+		vk::ImageMemoryBarrier2 barrier {};
+		barrier.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
+		barrier.srcAccessMask       = m_small.state.access_mask;
+		barrier.dstStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+		barrier.dstAccessMask       = access;
+		barrier.oldLayout           = m_small.state.layout;
+		barrier.newLayout           = layout;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image               = m_small.image;
+		barrier.subresourceRange    = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+		vk::DependencyInfo dependency {};
+		dependency.imageMemoryBarrierCount = 1;
+		dependency.pImageMemoryBarriers    = &barrier;
+		command.pipelineBarrier2(dependency);
+		m_small.state = {vk::PipelineStageFlagBits2::eTransfer, access, layout};
+	}
+
+	std::chrono::steady_clock::duration   m_interval {};
+	std::chrono::steady_clock::time_point m_next {};
+	VulkanImage                           m_small;
+	VkBuffer                              m_buffer     = nullptr;
+	VmaAllocation                         m_allocation = nullptr;
+	void*                                 m_mapped     = nullptr;
+	uint64_t                              m_tick       = 0;
+	uint32_t                              m_index      = 0;
+	vk::Extent2D                          m_source {};
+	vk::Format                            m_format = vk::Format::eUndefined;
+};
+
+} // namespace
+
 Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info, bool hdr,
                                           bool headset) {
 	KYTY_PROFILER_FUNCTION();
@@ -991,6 +1160,11 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	frame->Configure(m_impl->window.graphic_ctx,
 	                 {image.backing.extent.width, image.backing.extent.height}, frame_format);
 	frame->CopyFrom(buffer, image);
+	if (auto& dumper = FrameDumper::Get(); dumper.Enabled()) {
+		auto& scheduler = m_impl->renderer.GetCommandScheduler();
+		dumper.Poll(m_impl->window.graphic_ctx, scheduler);
+		dumper.Record(m_impl->window.graphic_ctx, scheduler, buffer.Handle(), *frame);
+	}
 	if (headset) {
 		// The frame holds the raw display-encoded pixels the headset needs.
 		frame->Transit(buffer.Handle(), vk::ImageLayout::eTransferSrcOptimal,
