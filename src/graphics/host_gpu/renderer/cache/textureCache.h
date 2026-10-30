@@ -64,6 +64,12 @@ public:
 		return image;
 	}
 	void MarkGpuWritten(ImageId id);
+	// Diagnostics: visits every cached image under the cache lock.
+	template <typename F>
+	void ForEachImage(F&& fn) {
+		std::scoped_lock lock {m_lock};
+		m_slot_images.ForEach([&](auto, Image& image) { fn(image); });
+	}
 
 	[[nodiscard]] bool ClearImageFromBuffer(CommandBuffer& command, uint64_t address, uint64_t size,
 	                                        uint32_t packed_clear);
