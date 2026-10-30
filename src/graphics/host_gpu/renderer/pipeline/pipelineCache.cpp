@@ -25,6 +25,8 @@
 #include "kernel/memory.h"
 #include "loader/systemContent.h"
 
+#include <filesystem>
+#include <cstdlib>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -119,11 +121,41 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
 }
 
-void DumpShader(std::span<const uint32_t> words, const std::string& name) {
-	if (!Config::GraphicsDebugDumpEnabled()) {
+std::vector<uint64_t> HashList(const char* variable) {
+	std::vector<uint64_t> list;
+	const char*           value = std::getenv(variable);
+	for (const char* p = value; p != nullptr && *p != '\0';) {
+		char*      end    = nullptr;
+		const auto parsed = std::strtoull(p, &end, 16);
+		if (end == p) break;
+		list.push_back(parsed);
+		p = *end == ',' ? end + 1 : end;
+	}
+	return list;
+}
+
+// KYTY_DUMP_SHADER=<hash>[,<hash>...] (diagnostic, Unboltingdog fork): writes the guest binary and
+// SPIR-V of the named shaders to shader-dumps/, without the full graphics debug dump.
+bool ForcedShaderDump(uint64_t hash) {
+	static const auto hashes = HashList("KYTY_DUMP_SHADER");
+	return std::find(hashes.begin(), hashes.end(), hash) != hashes.end();
+}
+
+// KYTY_SKIP_SHADER=<hash>[,<hash>...] (diagnostic, Unboltingdog fork): never dispatches the named
+// compute shaders, to test whether one is what loses the device.
+bool SkippedShader(uint64_t hash) {
+	static const auto hashes = HashList("KYTY_SKIP_SHADER");
+	return std::find(hashes.begin(), hashes.end(), hash) != hashes.end();
+}
+
+void DumpShader(std::span<const uint32_t> words, const std::string& name, uint64_t hash) {
+	const bool forced = ForcedShaderDump(hash);
+	if (!Config::GraphicsDebugDumpEnabled() && !forced) {
 		return;
 	}
-	const auto path = Config::GetShaderLogFolder() / name;
+	const auto path = Config::GraphicsDebugDumpEnabled()
+	                      ? Config::GetShaderLogFolder() / name
+	                      : std::filesystem::path("shader-dumps") / name;
 	Common::File::CreateDirectories(path.parent_path());
 	Common::File file(path);
 	if (file.IsInvalid()) {
@@ -132,6 +164,10 @@ void DumpShader(std::span<const uint32_t> words, const std::string& name) {
 		return;
 	}
 	file.Write(words.data(), words.size_bytes());
+	if (forced) {
+		const auto path_text = Common::PathToString(path);
+		Log::WriteToConsoleAndLog("Shader dump: " + path_text + "\n");
+	}
 }
 
 void ValidateShaderSpirv(const char* stage, uint64_t shader_hash,
@@ -320,7 +356,8 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	const auto id = XXH3_64bits(inputs.bytes.data(), inputs.bytes.size());
 
 	const auto* stage = ShaderRecompiler::StageName(key.stage);
-	DumpShader(result.spirv, fmt::format("{}_{:016x}_{:016x}.spv", stage, key.hash, id));
+	DumpShader(result.spirv, fmt::format("{}_{:016x}_{:016x}.spv", stage, key.hash, id),
+	           key.hash);
 	ValidateShaderSpirv(stage, key.hash, result.spirv, profile.maintenance8);
 	auto& module = program.modules.emplace_back(ShaderModule {
 	    .id             = id,
@@ -364,6 +401,16 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	    .read_specialization_memory = ReadShaderGuestMemory,
 	    .image_heap                 = m_image_heap,
 	};
+	if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+		if (SkippedShader(params.hash)) {
+			static std::atomic_bool logged {false};
+			if (!logged.exchange(true)) {
+				PipelineCacheLog("KYTY_SKIP_SHADER: skipping dispatches of shader 0x{:016x}",
+				                 params.hash);
+			}
+			return nullptr;
+		}
+	}
 	ShaderRecompiler::CompileOptions options {.wave_size = input_info.wave_size};
 	if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 		options.stage            = input_info.logical_stage;
@@ -417,8 +464,10 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	options.emit_debug_info = Config::GraphicsDebugDumpEnabled();
 	ShaderRecompiler::ShaderSource source;
 	if (entry == m_program_cache.end()) {
-		DumpShader(params.code, fmt::format("original/{}_{:016x}.bin",
-		                                    ShaderRecompiler::StageName(options.stage), params.hash));
+		DumpShader(params.code,
+		           fmt::format("original/{}_{:016x}.bin", ShaderRecompiler::StageName(options.stage),
+		                       params.hash),
+		           params.hash);
 		source = ShaderRecompiler::PrepareShaderSource(params.code, options);
 		if (source.unsupported_call_pc != UINT32_MAX) {
 			PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} pc=0x{:08x} "
