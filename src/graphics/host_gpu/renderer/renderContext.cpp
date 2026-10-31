@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 
 #include "common/assert.h"
@@ -112,6 +113,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		    (m_buffer_cache.IsRegionRegistered(vaddr, size) ||
 		     m_texture_cache.IsRegionRegistered(vaddr, size) ||
 		     m_command_scheduler.HasPendingPriorityOperations())) {
+			GpuWaitStats::Scope reason("unmap");
 			const auto tick = m_command_scheduler.CurrentTick();
 			m_command_scheduler.Finish();
 			m_command_scheduler.WaitPriorityOperations(tick);
