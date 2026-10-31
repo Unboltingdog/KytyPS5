@@ -166,6 +166,9 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	// Guards changes to m_gpu_modified_ranges (GPU thread) against CanReadAroundGpuWrites (guest
+	// threads); GPU-thread reads need no lock.
+	std::mutex                                        m_gpu_ranges_mutex;
 	// One per TileManager::ColorClearSlots key slot.
 	std::array<RangeSet, 8>                           m_checked_color_metadata;
 	MemoryTracker                                     m_memory_tracker;
