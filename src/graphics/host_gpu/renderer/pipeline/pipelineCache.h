@@ -178,6 +178,8 @@ public:
 	~PipelineCache();
 	KYTY_CLASS_NO_COPY(PipelineCache);
 	void Save();
+	// Compiles the shader store given to the constructor. Call once the image heap exists.
+	void WarmUpStore();
 
 	struct Pipeline {
 		vk::PipelineLayout      pipeline_layout       = nullptr;
@@ -262,6 +264,7 @@ private:
 
 	// pipelineSerialization.cpp
 	void WarmUp(const std::filesystem::path& path);
+	std::filesystem::path m_warm_up_store;
 	bool LoadRecord(std::span<const uint8_t>& records);
 	void StoreModule(const ProgramKey& key, const Program& program, const ShaderModule& module,
 	                 const std::vector<uint32_t>& spirv);
