@@ -20,6 +20,7 @@ struct Totals {
 	uint64_t submits     = 0;
 	uint64_t waits       = 0;
 	uint64_t nanoseconds = 0;
+	uint64_t events      = 0;
 };
 
 struct State {
@@ -46,10 +47,15 @@ void MaybePrint(State& state) {
 	std::string text = "GPU waits (2 s):";
 	for (const auto& [reason, totals]: rows) {
 		char line[160];
-		std::snprintf(line, sizeof(line), " %s submits=%llu waits=%llu wait_ms=%.0f;",
-		              reason.c_str(), static_cast<unsigned long long>(totals.submits),
-		              static_cast<unsigned long long>(totals.waits),
-		              static_cast<double>(totals.nanoseconds) / 1e6);
+		if (totals.events != 0 && totals.submits == 0 && totals.waits == 0) {
+			std::snprintf(line, sizeof(line), " %s events=%llu;", reason.c_str(),
+			              static_cast<unsigned long long>(totals.events));
+		} else {
+			std::snprintf(line, sizeof(line), " %s submits=%llu waits=%llu wait_ms=%.0f;",
+			              reason.c_str(), static_cast<unsigned long long>(totals.submits),
+			              static_cast<unsigned long long>(totals.waits),
+			              static_cast<double>(totals.nanoseconds) / 1e6);
+		}
 		text += line;
 	}
 	text += "\n";
@@ -82,6 +88,14 @@ void RecordSubmit() noexcept {
 
 void RecordWait(uint64_t nanoseconds) noexcept {
 	if (Enabled()) Record(0, 1, nanoseconds);
+}
+
+void RecordEvent(const char* name, uint64_t count) noexcept {
+	if (!Enabled()) return;
+	auto&            state = GetState();
+	std::scoped_lock lock {state.mutex};
+	state.totals[name].events += count;
+	MaybePrint(state);
 }
 
 const char* CurrentReason() noexcept {

@@ -11,6 +11,8 @@ namespace Libs::Graphics::GpuWaitStats {
 [[nodiscard]] bool Enabled() noexcept;
 void               RecordSubmit() noexcept;
 void               RecordWait(uint64_t nanoseconds) noexcept;
+// Counts one occurrence of a named event (shown as events=N).
+void               RecordEvent(const char* name, uint64_t count = 1) noexcept;
 // The reason named by the innermost Scope on this thread, or nullptr.
 [[nodiscard]] const char* CurrentReason() noexcept;
 
