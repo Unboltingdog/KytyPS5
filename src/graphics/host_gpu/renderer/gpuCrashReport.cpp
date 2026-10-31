@@ -56,7 +56,22 @@ void ClearMaster(const MasterSemaphore* master) {
 	g_master.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
 }
 
+namespace {
+thread_local uint64_t t_last_compute = 0;
+thread_local uint64_t t_last_pixel   = 0;
+} // namespace
+
+uint64_t LastComputeShader() noexcept {
+	return t_last_compute;
+}
+
+uint64_t LastPixelShader() noexcept {
+	return t_last_pixel;
+}
+
 void NoteShader(uint64_t hash, ShaderType stage) {
+	if (stage == ShaderType::Compute) t_last_compute = hash;
+	if (stage == ShaderType::Pixel) t_last_pixel = hash;
 	const auto* master = g_master.load(std::memory_order_acquire);
 	const auto  tick   = master != nullptr ? master->CurrentTick() : 0;
 	std::scoped_lock lock(g_mutex);

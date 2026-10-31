@@ -46,6 +46,11 @@ public:
 	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
 	void                           CheckActive() const;
 	CommandBuffer&                 Current();
+	// KYTY_GPU_PROFILE: brackets one dispatch or draw in the current command buffer with
+	// timestamps; its GPU time is added to `key` once the buffer finishes. Begin returns
+	// UINT32_MAX when profiling is off or this buffer's slots are used up; End ignores that.
+	[[nodiscard]] uint32_t         ProfileBegin(uint64_t key);
+	void                           ProfileEnd(uint32_t slot);
 	[[nodiscard]] uint64_t         CurrentTick() const noexcept { return m_master.CurrentTick(); }
 	[[nodiscard]] bool             IsFree(uint64_t tick);
 	[[nodiscard]] MasterSemaphore& GetMasterSemaphore() noexcept { return m_master; }
@@ -101,6 +106,18 @@ private:
 	std::vector<TimestampSlot>   m_timestamp_pending;
 	uint64_t                     m_timestamp_last_end = 0;
 	double                       m_timestamp_period   = 1.0;
+	struct ProfileChunk {
+		uint64_t tick = 0; // 0: in use by the command buffer being recorded, or free
+		uint32_t used = 0;
+		bool     busy = false;
+	};
+	vk::QueryPool                m_profile_pool  = nullptr;
+	std::vector<ProfileChunk>    m_profile_chunks;
+	std::vector<uint64_t>        m_profile_keys;
+	int32_t                      m_profile_chunk = -1;
+	uint32_t                     m_profile_next  = 0;
+	void                         BeginProfileChunk();
+	void                         CollectProfile();
 	RenderContext&               m_context;
 	GraphicContext&              m_graphics;
 	CommandPool                  m_command_pool;
