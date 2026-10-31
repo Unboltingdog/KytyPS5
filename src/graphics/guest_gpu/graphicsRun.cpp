@@ -1128,6 +1128,7 @@ void CommandProcessor::Flip(int handle, int index, int flip_mode, int64_t flip_a
 	(void)command.Handle();
 	GetScheduler().DeferPriorityOperation(
 	    [&renderer = m_renderer, request] { renderer.GetVideoOut().CompleteFlip(request); });
+	m_renderer.GetBufferCache().IssueProactiveReadbacks();
 	GetScheduler().Flush();
 }
 
@@ -1145,6 +1146,7 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 	m_renderer.GetVideoOut().PrepareFlip(request_id, command);
 	GetScheduler().DeferPriorityOperation(
 	    [this, request_id] { m_renderer.GetVideoOut().CompleteFlip(request_id); });
+	m_renderer.GetBufferCache().IssueProactiveReadbacks();
 	GetScheduler().Flush();
 }
 
