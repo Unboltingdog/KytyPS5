@@ -11,6 +11,8 @@ namespace Libs::Graphics::GpuWaitStats {
 [[nodiscard]] bool Enabled() noexcept;
 void               RecordSubmit() noexcept;
 void               RecordWait(uint64_t nanoseconds) noexcept;
+// The reason named by the innermost Scope on this thread, or nullptr.
+[[nodiscard]] const char* CurrentReason() noexcept;
 
 class Scope {
 public:
