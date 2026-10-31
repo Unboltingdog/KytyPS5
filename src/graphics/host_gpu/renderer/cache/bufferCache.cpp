@@ -329,6 +329,14 @@ std::pair<uint64_t, uint64_t> BufferCache::ReadbackRange(const Buffer& buffer, u
 	return {std::min(start, vaddr), std::max(end, vaddr + size)};
 }
 
+bool BufferCache::CanReadAroundGpuWrites(uint64_t vaddr, uint64_t size) {
+	bool readable = false;
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, &readable] {
+		readable = IsRegionRegistered(vaddr, size) && !m_gpu_modified_ranges.Intersects(vaddr, size);
+	});
+	return readable;
+}
+
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool cpu_fault) {
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
