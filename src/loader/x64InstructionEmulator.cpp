@@ -822,6 +822,170 @@ bool TryEmulate(void* native_context) {
 	       TryEmulateCpuExtensions(context);
 }
 
+
+static ZydisDecoder& LoadDecoder() {
+	static ZydisDecoder decoder = [] {
+		ZydisDecoder value {};
+		ZydisDecoderInit(&value, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+		return value;
+	}();
+	return decoder;
+}
+
+// The index of a 64-bit general register in Context::Gpr order, or -1.
+static int GprIndex(ZydisRegister reg) {
+	const auto enclosing = ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, reg);
+	if (enclosing < ZYDIS_REGISTER_RAX || enclosing > ZYDIS_REGISTER_R15) {
+		return -1;
+	}
+	return static_cast<int>(enclosing - ZYDIS_REGISTER_RAX);
+}
+
+static void WriteGpr(Context& context, ZydisRegister reg, uint64_t value, uint32_t bits) {
+	auto& target = context.Gpr(static_cast<uint8_t>(GprIndex(reg)));
+	const bool high_byte = reg == ZYDIS_REGISTER_AH || reg == ZYDIS_REGISTER_CH ||
+	                       reg == ZYDIS_REGISTER_DH || reg == ZYDIS_REGISTER_BH;
+	if (high_byte) {
+		target = (target & ~uint64_t {0xff00}) | ((value & 0xffu) << 8u);
+	} else if (bits == 8) {
+		target = (target & ~uint64_t {0xff}) | (value & 0xffu);
+	} else if (bits == 16) {
+		target = (target & ~uint64_t {0xffff}) | (value & 0xffffu);
+	} else if (bits == 32) {
+		target = value & 0xffffffffu; // A 32-bit destination clears the upper half.
+	} else {
+		target = value;
+	}
+}
+
+static uint64_t SignExtend(uint64_t value, uint32_t bits) {
+	if (bits >= 64) return value;
+	const uint64_t sign = uint64_t {1} << (bits - 1u);
+	value &= (sign << 1u) - 1u;
+	return (value ^ sign) - sign;
+}
+
+bool TryEmulateLoad(void* native_context, uint64_t fault_address, LoadCheck can_read, LoadRead read,
+                    const char** unsupported) {
+	*unsupported = nullptr;
+	if (native_context == nullptr) {
+		return false;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	Context context {static_cast<PCONTEXT>(native_context)};
+#elif defined(__APPLE__)
+	auto* saved_context = static_cast<ucontext_t*>(native_context);
+	if (saved_context->uc_mcontext == nullptr) {
+		return false;
+	}
+	Context context {saved_context};
+#else
+	Context context {static_cast<ucontext_t*>(native_context)};
+#endif
+	ZydisDecodedInstruction insn {};
+	ZydisDecodedOperand     operands[ZYDIS_MAX_OPERAND_COUNT] {};
+	const auto              rip = context.Rip();
+	if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&LoadDecoder(), reinterpret_cast<const void*>(rip),
+	                                         ZYDIS_MAX_INSTRUCTION_LENGTH, &insn, operands))) {
+		return false;
+	}
+	if (insn.operand_count_visible != 2 || operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+	    operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY) {
+		*unsupported = ZydisMnemonicGetString(insn.mnemonic);
+		return false;
+	}
+	const auto& memory = operands[1];
+	if (memory.mem.segment != ZYDIS_REGISTER_DS && memory.mem.segment != ZYDIS_REGISTER_SS &&
+	    memory.mem.segment != ZYDIS_REGISTER_NONE) {
+		*unsupported = ZydisMnemonicGetString(insn.mnemonic);
+		return false;
+	}
+	ZydisRegisterContext registers {};
+	for (int i = 0; i < 16; i++) {
+		const auto value = context.Gpr(static_cast<uint8_t>(i));
+		registers.values[ZYDIS_REGISTER_RAX + i] = value;
+		registers.values[ZYDIS_REGISTER_EAX + i] = value & 0xffffffffu;
+	}
+	registers.values[ZYDIS_REGISTER_RIP] = rip + insn.length;
+	uint64_t address = 0;
+	if (!ZYAN_SUCCESS(ZydisCalcAbsoluteAddressEx(&insn, &memory, rip, &registers, &address))) {
+		return false;
+	}
+	const uint64_t size = memory.size / 8u;
+	if (size == 0 || size > 16 || fault_address < address || fault_address >= address + size) {
+		return false;
+	}
+
+	const auto destination = operands[0].reg.value;
+	switch (insn.mnemonic) {
+		case ZYDIS_MNEMONIC_MOV:
+		case ZYDIS_MNEMONIC_MOVZX:
+		case ZYDIS_MNEMONIC_MOVSX:
+		case ZYDIS_MNEMONIC_MOVSXD: {
+			if (GprIndex(destination) < 0 || size > 8 || !can_read(address, size)) {
+				return false;
+			}
+			uint64_t value = 0;
+			if (!read(address, &value, size)) {
+				return false;
+			}
+			if (insn.mnemonic == ZYDIS_MNEMONIC_MOVSX || insn.mnemonic == ZYDIS_MNEMONIC_MOVSXD) {
+				value = SignExtend(value, static_cast<uint32_t>(size * 8u));
+			}
+			WriteGpr(context, destination, value, operands[0].size);
+			break;
+		}
+		case ZYDIS_MNEMONIC_MOVUPS:
+		case ZYDIS_MNEMONIC_MOVAPS:
+		case ZYDIS_MNEMONIC_MOVUPD:
+		case ZYDIS_MNEMONIC_MOVAPD:
+		case ZYDIS_MNEMONIC_MOVDQU:
+		case ZYDIS_MNEMONIC_MOVDQA:
+		case ZYDIS_MNEMONIC_MOVSS:
+		case ZYDIS_MNEMONIC_MOVSD:
+		case ZYDIS_MNEMONIC_MOVD:
+		case ZYDIS_MNEMONIC_MOVQ:
+		case ZYDIS_MNEMONIC_VMOVUPS:
+		case ZYDIS_MNEMONIC_VMOVAPS:
+		case ZYDIS_MNEMONIC_VMOVUPD:
+		case ZYDIS_MNEMONIC_VMOVAPD:
+		case ZYDIS_MNEMONIC_VMOVDQU:
+		case ZYDIS_MNEMONIC_VMOVDQA:
+		case ZYDIS_MNEMONIC_VMOVSS:
+		case ZYDIS_MNEMONIC_VMOVSD:
+		case ZYDIS_MNEMONIC_VMOVD:
+		case ZYDIS_MNEMONIC_VMOVQ: {
+			if (destination < ZYDIS_REGISTER_XMM0 || destination > ZYDIS_REGISTER_XMM15) {
+				*unsupported = ZydisMnemonicGetString(insn.mnemonic);
+				return false;
+			}
+			if (!can_read(address, size)) {
+				return false;
+			}
+			uint8_t value[16] {};
+			if (!read(address, value, size)) {
+				return false;
+			}
+			const auto index = static_cast<uint8_t>(destination - ZYDIS_REGISTER_XMM0);
+			auto*      xmm   = static_cast<uint8_t*>(context.Xmm(index));
+			if (xmm == nullptr) {
+				return false;
+			}
+			// Loads narrower than 16 bytes zero the rest of the register.
+			std::memset(xmm, 0, 16);
+			std::memcpy(xmm, value, size);
+			if (insn.encoding == ZYDIS_INSTRUCTION_ENCODING_VEX ||
+			    insn.encoding == ZYDIS_INSTRUCTION_ENCODING_EVEX) {
+				context.ClearUpperYmm(index);
+			}
+			break;
+		}
+		default: *unsupported = ZydisMnemonicGetString(insn.mnemonic); return false;
+	}
+	context.Advance(insn.length);
+	return true;
+}
+
 void SkipLoad(void* native_context, size_t length) {
 	Context context {static_cast<decltype(Context::native)>(native_context)};
 	context.Gpr(0) = 0;
