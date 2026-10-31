@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/gpuCrashReport.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
 
 #include "common/assert.h"
@@ -1222,6 +1223,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	auto&         occlusion_queries = m_context.GetOcclusionQueries();
 	const int32_t occlusion_query   = occlusion_queries.Begin(vk_buffer);
+	// Draws count under their pixel shader (top bit set), or none for depth-only draws.
+	const auto draw_profile = m_context.GetCommandScheduler().ProfileBegin(
+	    (state.ps_active ? GpuCrashReport::LastPixelShader() : 0) | (uint64_t {1} << 63u));
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else if (args_buffer.first == nullptr) {
@@ -1233,6 +1237,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		vk_buffer.drawIndirect(args_buffer.first->Handle(), args_buffer.second,
 		                       emit.indirect.count, emit.indirect.stride);
 	}
+	m_context.GetCommandScheduler().ProfileEnd(draw_profile);
 	occlusion_queries.End(vk_buffer, occlusion_query);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);

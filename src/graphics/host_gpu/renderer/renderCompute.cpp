@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/gpuWaitStats.h"
+#include "graphics/host_gpu/renderer/gpuCrashReport.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -500,7 +501,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			}
 		}
 	} else {
+		auto&      scheduler = m_context.GetCommandScheduler();
+		const auto profile   = scheduler.ProfileBegin(GpuCrashReport::LastComputeShader());
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+		scheduler.ProfileEnd(profile);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 
@@ -575,7 +579,12 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
 	                          1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	{
+		auto&      scheduler = m_context.GetCommandScheduler();
+		const auto profile   = scheduler.ProfileBegin(GpuCrashReport::LastComputeShader());
+		vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+		scheduler.ProfileEnd(profile);
+	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();

@@ -24,6 +24,9 @@ void SetMaster(const MasterSemaphore* master);
 void ClearMaster(const MasterSemaphore* master);
 // A shader goes into the current command buffer.
 void NoteShader(uint64_t hash, ShaderType stage);
+// The hash of the compute or pixel shader this thread last bound (0 if none).
+[[nodiscard]] uint64_t LastComputeShader() noexcept;
+[[nodiscard]] uint64_t LastPixelShader() noexcept;
 // The device is lost (or a wait or counter read failed with `result`): writes the report.
 // `completed` is the last tick the GPU was known to finish.
 void Report(GraphicContext& graphics, vk::Result result, uint64_t completed);
