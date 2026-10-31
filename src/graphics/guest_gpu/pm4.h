@@ -1004,6 +1004,7 @@ constexpr uint32_t UC_NOP = 0xA2;
 
 constexpr uint32_t UC_NUM = 0x3FFF + 1;
 
+[[nodiscard]] const char* OpcodeName(uint32_t opcode) noexcept;
 void DumpPm4PacketStream(Common::File* file, const uint32_t* cmd_buffer, uint32_t start_dw,
                          uint32_t num_dw);
 

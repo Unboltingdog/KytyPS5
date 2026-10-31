@@ -9,6 +9,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <string>
 
 namespace Libs::Graphics {
 
@@ -74,8 +75,16 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	} else {
 		// Which thread stalls on this read: a guest CPU thread, or the GPU thread itself while it
 		// processes the guest's command buffers.
-		GpuWaitStats::RecordEvent(GuestGpu::IsGpuThread() ? "rb:read-fault-on-gpu-thread"
-		                                                  : "rb:read-fault-on-guest-thread");
+		if (GpuWaitStats::Enabled()) {
+			const char* reason = GpuWaitStats::CurrentReason();
+			std::string name   = GuestGpu::IsGpuThread() ? "rb:read-fault-on-gpu-thread"
+			                                             : "rb:read-fault-on-guest-thread";
+			if (reason != nullptr) {
+				name += ":";
+				name += reason;
+			}
+			GpuWaitStats::RecordEvent(name.c_str());
+		}
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size, false, true);
 	}
 	return true;
