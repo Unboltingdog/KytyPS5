@@ -347,6 +347,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool 
 		if (FastReadbackEnabled()) {
 			RetireProactiveReadbacks();
 			if (!m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
+				GpuWaitStats::RecordEvent("rb:fault-already-read-back");
 				// A proactive readback already brought the data to guest memory.
 				if (is_write) {
 					m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
@@ -362,6 +363,9 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool 
 		// GPU-written run around the faulting page, up to ReadbackWindow each side, at once.
 		auto [start, end] = ReadbackRange(buffer, vaddr, size);
 		if (FastReadbackEnabled() && cpu_fault && !is_write) {
+			GpuWaitStats::RecordEvent(m_readback_hot.Intersects(vaddr, size)
+			                              ? "rb:read-fault-on-hot-range"
+			                              : "rb:read-fault-new-range");
 			// The CPU reads this memory: read it back ahead of time once the GPU rewrites it.
 			m_readback_hot.Add(start, end - start);
 		}
@@ -412,6 +416,7 @@ void BufferCache::NoteGpuWrite(uint64_t vaddr, uint64_t size) {
 		}
 	}
 	m_readback_hot.ForEachInRange(vaddr, size, [&](uint64_t begin, uint64_t last) {
+		GpuWaitStats::RecordEvent("rb:gpu-rewrote-hot-range");
 		m_readback_pending.Add(begin, last - begin);
 	});
 }
@@ -428,6 +433,7 @@ void BufferCache::IssueProactiveReadbacks() {
 	m_readback_pending.ForEach(
 	    [&](uint64_t begin, uint64_t end) { ranges.emplace_back(begin, end); });
 	m_readback_pending.Clear();
+	GpuWaitStats::RecordEvent("rb:proactive-ranges-issued", ranges.size());
 	GpuWaitStats::Scope reason("proactive-readback");
 	for (auto [begin, end]: ranges) {
 		const auto id = FindBuffer(begin, end - begin);
