@@ -30,6 +30,7 @@ struct State {
 	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> pages; // count, bytes
 	uint64_t                                       gpu_busy_ns = 0;
 	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> shaders; // ns, count
+	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> pixel_shaders; // ns, count
 };
 
 State& GetState() {
@@ -88,10 +89,17 @@ void MaybePrint(State& state) {
 		std::snprintf(tail, sizeof(tail), " (%zu pages)\n", pages.size());
 		text += tail;
 	}
-	if (!state.shaders.empty()) {
-		std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> shaders(
-		    state.shaders.begin(), state.shaders.end());
+	if (!state.shaders.empty() || !state.pixel_shaders.empty()) {
+		struct Entry {
+			uint64_t                       key;
+			bool                           pixel;
+			std::pair<uint64_t, uint64_t> second;
+		};
+		std::vector<Entry> shaders;
+		for (const auto& [key, value]: state.shaders) shaders.push_back({key, false, value});
+		for (const auto& [key, value]: state.pixel_shaders) shaders.push_back({key, true, value});
 		state.shaders.clear();
+		state.pixel_shaders.clear();
 		std::sort(shaders.begin(), shaders.end(),
 		          [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
 		uint64_t total = 0;
@@ -101,11 +109,10 @@ void MaybePrint(State& state) {
 		              static_cast<double>(total) / 1e6);
 		text += head;
 		for (size_t i = 0; i < shaders.size() && i < 12; i++) {
-			const auto key = shaders[i].first;
+			const auto key = shaders[i].key;
 			char       line[96];
 			std::snprintf(line, sizeof(line), " %s%016llx %.1fms x%llu;",
-			              (key >> 63u) != 0 ? "ps:" : "cs:",
-			              static_cast<unsigned long long>(key & ~(uint64_t {1} << 63u)),
+			              shaders[i].pixel ? "ps:" : "cs:", static_cast<unsigned long long>(key),
 			              static_cast<double>(shaders[i].second.first) / 1e6,
 			              static_cast<unsigned long long>(shaders[i].second.second));
 			text += line;
@@ -143,11 +150,11 @@ bool Enabled() noexcept {
 	return enabled;
 }
 
-void RecordShaderTime(uint64_t key, uint64_t nanoseconds) noexcept {
+void RecordShaderTime(uint64_t key, bool pixel, uint64_t nanoseconds) noexcept {
 	if (!ProfileEnabled()) return;
 	auto&            state = GetState();
 	std::scoped_lock lock {state.mutex};
-	auto&            entry = state.shaders[key];
+	auto&            entry = pixel ? state.pixel_shaders[key] : state.shaders[key];
 	entry.first += nanoseconds;
 	entry.second++;
 }
