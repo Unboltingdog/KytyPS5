@@ -84,6 +84,10 @@ void RecordWait(uint64_t nanoseconds) noexcept {
 	if (Enabled()) Record(0, 1, nanoseconds);
 }
 
+const char* CurrentReason() noexcept {
+	return t_reason;
+}
+
 Scope::Scope(const char* reason) noexcept: m_previous(t_reason) {
 	t_reason = reason;
 }
