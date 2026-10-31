@@ -368,7 +368,9 @@ bool BufferCache::AsyncReadbackEnabled() {
 }
 
 bool BufferCache::WaitAsyncReadback(uint64_t vaddr, uint64_t size) {
-	if (GuestGpu::IsGpuThread() || CommandScheduler::InDeferredOperation()) {
+	if (GuestGpu::IsGpuThread() || CommandScheduler::InDeferredOperation() ||
+	    CanReadAroundGpuWrites(vaddr, size)) {
+		// Guest memory is already current here; nothing to read back.
 		return false;
 	}
 	std::vector<std::shared_ptr<std::atomic_bool>> waits;
