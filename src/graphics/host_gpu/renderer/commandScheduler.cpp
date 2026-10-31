@@ -268,6 +268,8 @@ bool CommandScheduler::HasPendingPriorityOperations() {
 }
 
 void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
+	// This thread waits for every tick by design; label it so its waits aren't mistaken for stalls.
+	GpuWaitStats::Scope reason("priority-thread (not a stall)");
 	while (!stop.stop_requested()) {
 		PendingOperation operation;
 		{

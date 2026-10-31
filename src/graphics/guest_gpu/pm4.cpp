@@ -89,6 +89,10 @@ constexpr auto g_opcode_names   = MakeOpcodeNames();
 
 } // namespace
 
+const char* OpcodeName(uint32_t opcode) noexcept {
+	return g_opcode_names[opcode & 0xffu];
+}
+
 void DumpPm4PacketStream(Common::File* file, const uint32_t* cmd_buffer, uint32_t start_dw,
                          uint32_t num_dw) {
 	// db_dump();
