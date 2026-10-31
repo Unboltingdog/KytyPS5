@@ -367,6 +367,7 @@ void CommandScheduler::BeginProfileChunk() {
 		}
 		m_profile_chunks.resize(ProfileChunks);
 		m_profile_keys.resize(static_cast<size_t>(ProfileChunks) * ProfileChunkQueries);
+		m_profile_pixel.resize(static_cast<size_t>(ProfileChunks) * ProfileChunkQueries);
 		m_timestamp_period = m_graphics.physical_device_properties.limits.timestampPeriod;
 	}
 	CollectProfile();
@@ -380,12 +381,13 @@ void CommandScheduler::BeginProfileChunk() {
 	                                  ProfileChunkQueries * 2);
 }
 
-uint32_t CommandScheduler::ProfileBegin(uint64_t key) {
+uint32_t CommandScheduler::ProfileBegin(uint64_t key, bool pixel) {
 	if (m_profile_chunk < 0) return UINT32_MAX;
 	auto& chunk = m_profile_chunks[static_cast<size_t>(m_profile_chunk)];
 	if (chunk.used == ProfileChunkQueries) return UINT32_MAX;
 	const auto slot = static_cast<uint32_t>(m_profile_chunk) * ProfileChunkQueries + chunk.used++;
-	m_profile_keys[slot] = key;
+	m_profile_keys[slot]   = key;
+	m_profile_pixel[slot]  = pixel ? 1 : 0;
 	m_command.m_buffer.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, m_profile_pool,
 	                                  slot * 2);
 	return slot;
@@ -415,6 +417,7 @@ void CommandScheduler::CollectProfile() {
 					if (end > begin) {
 						GpuWaitStats::RecordShaderTime(
 						    m_profile_keys[index * ProfileChunkQueries + i],
+						    m_profile_pixel[index * ProfileChunkQueries + i] != 0,
 						    static_cast<uint64_t>(static_cast<double>(end - begin) *
 						                          m_timestamp_period));
 					}
