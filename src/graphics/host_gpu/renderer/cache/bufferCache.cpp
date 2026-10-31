@@ -16,6 +16,7 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <chrono>
 #include <mutex>
 #include <cinttypes>
 #include <cstdlib>
@@ -338,6 +339,13 @@ bool BufferCache::CanReadAroundGpuWrites(uint64_t vaddr, uint64_t size) {
 	// the check needs no round trip to it. A range outside every cached buffer holds no
 	// GPU-written bytes either, so guest memory is current there too.
 	std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
+	for (const auto& readback: m_unpublished_readbacks) {
+		if (readback.begin < vaddr + size && vaddr < readback.end &&
+		    !readback.published->load(std::memory_order_acquire)) {
+			// Queued for readback, but guest memory still holds the old bytes.
+			return false;
+		}
+	}
 	if (!m_gpu_modified_ranges.Intersects(vaddr, size)) {
 		return true;
 	}
@@ -349,6 +357,70 @@ bool BufferCache::CanReadAroundGpuWrites(uint64_t vaddr, uint64_t size) {
 		return true;
 	}
 	return false;
+}
+
+bool BufferCache::AsyncReadbackEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_ASYNC_READBACK");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled && FastReadbackEnabled();
+}
+
+bool BufferCache::WaitAsyncReadback(uint64_t vaddr, uint64_t size) {
+	if (GuestGpu::IsGpuThread() || CommandScheduler::InDeferredOperation()) {
+		return false;
+	}
+	std::vector<std::shared_ptr<std::atomic_bool>> waits;
+	bool                                           queued = false;
+	m_scheduler.Context().GetGpu().SendCommandSync([&] {
+		GpuWaitStats::Scope reason("async-readback");
+		RetireProactiveReadbacks();
+		if (m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
+			const auto id = FindBuffer(vaddr, size);
+			if (IsBufferInvalid(id)) {
+				return;
+			}
+			auto& buffer       = m_slot_buffers[id];
+			auto [start, end]  = ReadbackRange(buffer, vaddr, size);
+			GpuWaitStats::RecordEvent(m_readback_hot.Intersects(vaddr, size)
+			                              ? "rb:async-read-hot-range"
+			                              : "rb:async-read-new-range");
+			{
+				std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
+				m_readback_hot.Add(start, end - start);
+			}
+			// Everything the CPU reads every frame that the GPU has rewritten goes in the same
+			// submission, this range included.
+			m_readback_pending.Add(start, end - start);
+			IssueProactiveReadbacks();
+		}
+		for (const auto& readback: m_readbacks_in_flight) {
+			if (readback.begin < vaddr + size && vaddr < readback.end &&
+			    !readback.published->load(std::memory_order_acquire)) {
+				waits.push_back(readback.published);
+			}
+		}
+		if (!waits.empty()) {
+			// Submit now, but do not wait here: the GPU thread goes back to the guest's
+			// command buffers while only the faulting thread waits for its data.
+			m_scheduler.Flush();
+			queued = true;
+		}
+	});
+	if (!queued) {
+		return false;
+	}
+	const auto begin = std::chrono::steady_clock::now();
+	for (const auto& published: waits) {
+		published->wait(false, std::memory_order_acquire);
+	}
+	GpuWaitStats::Scope reason("async-readback-wait");
+	GpuWaitStats::RecordWait(static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+	                                                         begin)
+	        .count()));
+	return true;
 }
 
 bool BufferCache::StaleReadsEnabled() {
@@ -501,14 +573,26 @@ void BufferCache::IssueProactiveReadbacks() {
 		}
 		auto published = std::make_shared<std::atomic_bool>(false);
 		// Priority operations run in order, so this one follows the download's publish.
-		m_scheduler.DeferPriorityOperation(
-		    [published] { published->store(true, std::memory_order_release); });
+		m_scheduler.DeferPriorityOperation([published] {
+			published->store(true, std::memory_order_release);
+			published->notify_all();
+		});
+		{
+			std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
+			m_unpublished_readbacks.push_back({begin, end, published});
+		}
 		m_readbacks_in_flight.push_back(
 		    {begin, end, m_scheduler.CurrentTick(), std::move(published), {}});
 	}
 }
 
 void BufferCache::RetireProactiveReadbacks() {
+	{
+		std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
+		std::erase_if(m_unpublished_readbacks, [](const UnpublishedReadback& readback) {
+			return readback.published->load(std::memory_order_acquire);
+		});
+	}
 	std::erase_if(m_readbacks_in_flight, [this](ProactiveReadback& readback) {
 		if (!readback.published->load(std::memory_order_acquire)) {
 			return false;

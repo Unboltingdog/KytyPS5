@@ -914,6 +914,15 @@ bool CanReadAroundGpuWrites(uint64_t vaddr, uint64_t size) noexcept {
 	       g_gpu_resources->GetBufferCache().CanReadAroundGpuWrites(vaddr, size);
 }
 
+bool AsyncReadbackEnabled() noexcept {
+	return Graphics::BufferCache::AsyncReadbackEnabled();
+}
+
+bool WaitAsyncReadback(uint64_t vaddr, uint64_t size) noexcept {
+	return g_gpu_resources != nullptr &&
+	       g_gpu_resources->GetBufferCache().WaitAsyncReadback(vaddr, size);
+}
+
 bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept {
 	return g_gpu_resources != nullptr && g_gpu_resources->HandleFault(access, fault_vaddr);
 }

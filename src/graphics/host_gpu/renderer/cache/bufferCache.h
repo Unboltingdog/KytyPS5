@@ -62,6 +62,12 @@ public:
 	// faulting on a page it shares with GPU writes can read guest memory without a readback.
 	[[nodiscard]] bool CanReadAroundGpuWrites(uint64_t vaddr, uint64_t size);
 	static bool        StaleReadsEnabled();
+	static bool        AsyncReadbackEnabled();
+	// KYTY_ASYNC_READBACK: called on a guest thread that faulted reading GPU-written memory.
+	// Queues the readback on the GPU thread without waiting there, then waits on this thread
+	// for the data to reach guest memory. Returns false when the caller should take the
+	// synchronous fault path instead.
+	bool WaitAsyncReadback(uint64_t vaddr, uint64_t size);
 	// At each flip: queues readbacks of the ranges the CPU has read before that the GPU wrote
 	// this frame, so a later CPU read finds the data in guest memory instead of faulting into a
 	// full GPU wait. Issuing once a frame keeps the barriers these copies add rare.
@@ -170,6 +176,14 @@ private:
 	// Guards changes to m_gpu_modified_ranges (GPU thread) against CanReadAroundGpuWrites (guest
 	// threads); GPU-thread reads need no lock.
 	std::mutex                                        m_gpu_ranges_mutex;
+	// Readbacks queued but not yet copied into guest memory, guarded by m_gpu_ranges_mutex. Their
+	// bytes are no longer in m_gpu_modified_ranges, but guest memory is not current there yet.
+	struct UnpublishedReadback {
+		uint64_t                          begin = 0;
+		uint64_t                          end   = 0;
+		std::shared_ptr<std::atomic_bool> published;
+	};
+	std::vector<UnpublishedReadback>                  m_unpublished_readbacks;
 	// One per TileManager::ColorClearSlots key slot.
 	std::array<RangeSet, 8>                           m_checked_color_metadata;
 	MemoryTracker                                     m_memory_tracker;
