@@ -49,7 +49,7 @@ public:
 	// KYTY_GPU_PROFILE: brackets one dispatch or draw in the current command buffer with
 	// timestamps; its GPU time is added to `key` once the buffer finishes. Begin returns
 	// UINT32_MAX when profiling is off or this buffer's slots are used up; End ignores that.
-	[[nodiscard]] uint32_t         ProfileBegin(uint64_t key);
+	[[nodiscard]] uint32_t         ProfileBegin(uint64_t key, bool pixel = false);
 	void                           ProfileEnd(uint32_t slot);
 	[[nodiscard]] uint64_t         CurrentTick() const noexcept { return m_master.CurrentTick(); }
 	[[nodiscard]] bool             IsFree(uint64_t tick);
@@ -114,6 +114,7 @@ private:
 	vk::QueryPool                m_profile_pool  = nullptr;
 	std::vector<ProfileChunk>    m_profile_chunks;
 	std::vector<uint64_t>        m_profile_keys;
+	std::vector<uint8_t>         m_profile_pixel;
 	int32_t                      m_profile_chunk = -1;
 	uint32_t                     m_profile_next  = 0;
 	void                         BeginProfileChunk();
