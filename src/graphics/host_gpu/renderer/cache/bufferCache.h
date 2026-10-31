@@ -12,6 +12,8 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <array>
+#include <atomic>
+#include <memory>
 #include <map>
 #include <mutex>
 #include <span>
@@ -53,7 +55,13 @@ public:
 	KYTY_CLASS_NO_COPY(BufferCache);
 
 	void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
-	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false);
+	// cpu_fault: a guest CPU access faulted on the range (as opposed to an emulator lookup).
+	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false,
+	                                  bool cpu_fault = false);
+	// At each flip: queues readbacks of the ranges the CPU has read before that the GPU wrote
+	// this frame, so a later CPU read finds the data in guest memory instead of faulting into a
+	// full GPU wait. Issuing once a frame keeps the barriers these copies add rare.
+	void                   IssueProactiveReadbacks();
 	[[nodiscard]] Buffer&  GetBuffer(BufferId id) { return m_slot_buffers[id]; }
 	[[nodiscard]] BufferId FindBuffer(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBuffer(uint64_t vaddr, uint64_t size,
@@ -130,6 +138,20 @@ private:
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] static bool FastReadbackEnabled();
+	void               NoteGpuWrite(uint64_t vaddr, uint64_t size);
+	void               RetireProactiveReadbacks();
+	[[nodiscard]] bool WaitProactiveReadbacks(uint64_t vaddr, uint64_t size);
+
+	// A queued readback; once the GPU finished it and its data reached guest memory, its range
+	// stops being GPU-modified, except the parts the GPU wrote again after it was recorded.
+	struct ProactiveReadback {
+		uint64_t                           begin = 0;
+		uint64_t                           end   = 0;
+		uint64_t                           tick  = 0;
+		std::shared_ptr<std::atomic_bool>  published;
+		RangeSet                           rewritten;
+	};
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
@@ -155,6 +177,10 @@ private:
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
+	// GPU thread only.
+	RangeSet                       m_readback_hot;     // ranges CPU reads faulted on
+	RangeSet                       m_readback_pending; // hot ranges written since the last issue
+	std::vector<ProactiveReadback> m_readbacks_in_flight;
 };
 
 } // namespace Libs::Graphics
