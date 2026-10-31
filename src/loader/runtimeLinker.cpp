@@ -698,8 +698,11 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			}
 			if (unsupported != nullptr) {
 				Libs::Graphics::GpuWaitStats::RecordEvent(unsupported);
-			} else if (Libs::LibKernel::Memory::AsyncReadbackEnabled() &&
-			           Libs::LibKernel::Memory::WaitAsyncReadback(info->access_violation_vaddr, 1)) {
+			}
+			// The wait happens here even when the load can't be emulated (a 32-byte AVX load,
+			// say): the synchronous path below then finds the data already read back.
+			if (Libs::LibKernel::Memory::AsyncReadbackEnabled() &&
+			    Libs::LibKernel::Memory::WaitAsyncReadback(info->access_violation_vaddr, 1)) {
 				// KYTY_ASYNC_READBACK: the data is now in guest memory; the page stays protected
 				// until the GPU thread retires the readback, so complete this load from there.
 				if (Loader::X64InstructionEmulator::TryEmulateLoad(
