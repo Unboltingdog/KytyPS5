@@ -303,6 +303,31 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	QueueBdaSync(vaddr, size);
 }
 
+std::pair<uint64_t, uint64_t> BufferCache::ReadbackRange(const Buffer& buffer, uint64_t vaddr,
+                                                         uint64_t size) const {
+	constexpr uint64_t ReadbackWindow = 4ull << 20u;
+	constexpr uint64_t Page           = 4096;
+	const uint64_t     buffer_begin   = buffer.CpuAddress();
+	const uint64_t     buffer_end     = buffer_begin + buffer.Size();
+	const uint64_t     window_begin =
+	    std::max(buffer_begin, vaddr > ReadbackWindow ? vaddr - ReadbackWindow : 0);
+	const uint64_t window_end = std::min(buffer_end, vaddr + size + ReadbackWindow);
+	uint64_t       start      = vaddr;
+	uint64_t       end        = vaddr + size;
+	if (window_begin < window_end) {
+		m_gpu_modified_ranges.ForEachInRange(
+		    window_begin, window_end - window_begin, [&](uint64_t begin, uint64_t last) {
+			    if (begin <= end && last >= start) {
+				    start = std::min(start, begin);
+				    end   = std::max(end, last);
+			    }
+		    });
+	}
+	start = std::max(buffer_begin, start & ~(Page - 1));
+	end   = std::min(buffer_end, (end + Page - 1) & ~(Page - 1));
+	return {std::min(start, vaddr), std::max(end, vaddr + size)};
+}
+
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
@@ -316,8 +341,12 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		}
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
-		if (DownloadBufferMemory<false>(buffer, vaddr, size)) {
-			m_memory_tracker.UnmarkRegionAsGpuModified(vaddr, size);
+		// PPSA26344: the CPU writes across GPU-written memory page by page, and each page fault
+		// cost a submission and a full GPU wait (about 6,000 a second, 3 fps). Download the whole
+		// GPU-written run around the faulting page, up to ReadbackWindow each side, at once.
+		auto [start, end] = ReadbackRange(buffer, vaddr, size);
+		if (DownloadBufferMemory<false>(buffer, start, end - start)) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
 		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
