@@ -14,6 +14,7 @@
 #include "common/threads.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/pageManager.h"
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "kernel/hangProbe.h"
 #include "kernel/fileSystem.h"
@@ -651,6 +652,15 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 	return true;
 }
 
+// KYTY_NO_SHARED_READ=1 sends every read fault on a GPU-written page through a readback.
+static bool SharedPageReadsEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_NO_SHARED_READ");
+		return value == nullptr || value[0] == '\0' || value[0] == '0';
+	}();
+	return enabled;
+}
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -669,6 +679,26 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			case CoreAccess::Write: access = GpuAccess::Write; break;
 			case CoreAccess::Execute: access = GpuAccess::Execute; break;
 			case CoreAccess::Unknown: return false;
+		}
+		if (access == GpuAccess::Read && SharedPageReadsEnabled()) {
+			// PPSA26344: about half of the CPU's read faults on GPU-written pages touch bytes the
+			// GPU never wrote. Complete such a load from guest memory instead of a readback.
+			const char* unsupported = nullptr;
+			if (Loader::X64InstructionEmulator::TryEmulateLoad(
+			        info->native_context, info->access_violation_vaddr,
+			        [](uint64_t address, uint64_t size) {
+				        return Libs::LibKernel::Memory::CanReadAroundGpuWrites(address, size);
+			        },
+			        [](uint64_t address, void* destination, uint64_t size) {
+				        return Libs::LibKernel::Memory::TryReadBacking(address, destination, size);
+			        },
+			        &unsupported)) {
+				Libs::Graphics::GpuWaitStats::RecordEvent("rb:shared-page-load-emulated");
+				return true;
+			}
+			if (unsupported != nullptr) {
+				Libs::Graphics::GpuWaitStats::RecordEvent(unsupported);
+			}
 		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);

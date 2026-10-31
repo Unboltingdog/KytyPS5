@@ -58,6 +58,9 @@ public:
 	// cpu_fault: a guest CPU access faulted on the range (as opposed to an emulator lookup).
 	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false,
 	                                  bool cpu_fault = false);
+	// PPSA26344: true when [vaddr, vaddr + size) holds no GPU-written bytes, so a CPU load
+	// faulting on a page it shares with GPU writes can read guest memory without a readback.
+	[[nodiscard]] bool CanReadAroundGpuWrites(uint64_t vaddr, uint64_t size);
 	// At each flip: queues readbacks of the ranges the CPU has read before that the GPU wrote
 	// this frame, so a later CPU read finds the data in guest memory instead of faulting into a
 	// full GPU wait. Issuing once a frame keeps the barriers these copies add rare.
