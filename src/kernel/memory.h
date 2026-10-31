@@ -142,6 +142,8 @@ void                   InstallGpuResources(Graphics::RenderContext* renderer) no
 [[nodiscard]] bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept;
 // True when [vaddr, vaddr + size) holds no GPU-written bytes of a cached buffer.
 [[nodiscard]] bool CanReadAroundGpuWrites(uint64_t vaddr, uint64_t size) noexcept;
+[[nodiscard]] bool AsyncReadbackEnabled() noexcept;
+[[nodiscard]] bool WaitAsyncReadback(uint64_t vaddr, uint64_t size) noexcept;
 
 int KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags,
                                                const char* name);
