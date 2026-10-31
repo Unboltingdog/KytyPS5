@@ -363,6 +363,12 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool 
 		// GPU-written run around the faulting page, up to ReadbackWindow each side, at once.
 		auto [start, end] = ReadbackRange(buffer, vaddr, size);
 		if (cpu_fault) {
+			// Is the byte the CPU touched one the GPU wrote, or does it only share the page?
+			GpuWaitStats::RecordEvent(m_gpu_modified_ranges.Intersects(vaddr, size)
+			                              ? (is_write ? "rb:write-byte-gpu-written"
+			                                          : "rb:read-byte-gpu-written")
+			                              : (is_write ? "rb:write-byte-only-shares-page"
+			                                          : "rb:read-byte-only-shares-page"));
 			GpuWaitStats::RecordFaultPage((vaddr & ~uint64_t {4095}) | (is_write ? 1u : 0u), end - start);
 		}
 		if (FastReadbackEnabled() && cpu_fault && !is_write) {
