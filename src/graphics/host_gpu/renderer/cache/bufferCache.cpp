@@ -338,7 +338,25 @@ bool BufferCache::CanReadAroundGpuWrites(uint64_t vaddr, uint64_t size) {
 	// the check needs no round trip to it. A range outside every cached buffer holds no
 	// GPU-written bytes either, so guest memory is current there too.
 	std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
-	return !m_gpu_modified_ranges.Intersects(vaddr, size);
+	if (!m_gpu_modified_ranges.Intersects(vaddr, size)) {
+		return true;
+	}
+	// KYTY_STALE_READS=1 (experimental): memory the CPU reads every frame and that has been read
+	// back before is read as it was at the last readback instead of waiting for the GPU. The
+	// readback at each flip keeps it at most about a frame old.
+	if (StaleReadsEnabled() && m_readback_hot.Contains(vaddr, size)) {
+		GpuWaitStats::RecordEvent("rb:stale-read");
+		return true;
+	}
+	return false;
+}
+
+bool BufferCache::StaleReadsEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_STALE_READS");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
 }
 
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool cpu_fault) {
@@ -388,6 +406,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool 
 			                              ? "rb:read-fault-on-hot-range"
 			                              : "rb:read-fault-new-range");
 			// The CPU reads this memory: read it back ahead of time once the GPU rewrites it.
+			std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
 			m_readback_hot.Add(start, end - start);
 		}
 		if (FastReadbackEnabled() && cpu_fault && !is_write) {
