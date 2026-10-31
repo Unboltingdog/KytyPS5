@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -328,16 +329,31 @@ std::pair<uint64_t, uint64_t> BufferCache::ReadbackRange(const Buffer& buffer, u
 	return {std::min(start, vaddr), std::max(end, vaddr + size)};
 }
 
-void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
+void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool cpu_fault) {
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 		     vaddr, size);
 	}
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
-		GpuWaitStats::Scope reason(is_write ? "cpu-write-readback" : "cpu-read-readback");
+	const char* caller_reason = GpuWaitStats::CurrentReason();
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, cpu_fault,
+	                                                caller_reason] {
+		GpuWaitStats::Scope reason(caller_reason != nullptr ? caller_reason
+		                           : is_write               ? "cpu-write-readback"
+		                                                    : "cpu-read-readback");
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
+		}
+		if (FastReadbackEnabled()) {
+			RetireProactiveReadbacks();
+			if (!m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
+				// A proactive readback already brought the data to guest memory.
+				if (is_write) {
+					m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
+					QueueBdaSync(vaddr, size);
+				}
+				return;
+			}
 		}
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
@@ -345,14 +361,127 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		// cost a submission and a full GPU wait (about 6,000 a second, 3 fps). Download the whole
 		// GPU-written run around the faulting page, up to ReadbackWindow each side, at once.
 		auto [start, end] = ReadbackRange(buffer, vaddr, size);
+		if (FastReadbackEnabled() && cpu_fault && !is_write) {
+			// The CPU reads this memory: read it back ahead of time once the GPU rewrites it.
+			m_readback_hot.Add(start, end - start);
+		}
 		if (DownloadBufferMemory<false>(buffer, start, end - start)) {
 			m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
+		} else if (FastReadbackEnabled() && m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
+			// Its data is on the way in a proactive readback; wait for that one.
+			GpuWaitStats::Scope in_flight("proactive-readback-wait");
+			(void)WaitProactiveReadbacks(vaddr, size);
 		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 			QueueBdaSync(vaddr, size);
 		}
 	});
+}
+
+// KYTY_NO_FAST_READBACK=1 turns proactive readbacks off.
+bool BufferCache::FastReadbackEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_NO_FAST_READBACK");
+		return value == nullptr || value[0] == '\0' || value[0] == '0';
+	}();
+	return enabled;
+}
+
+namespace {
+
+constexpr uint64_t ReadbackPage = 4096;
+
+std::pair<uint64_t, uint64_t> PageAligned(uint64_t begin, uint64_t end) {
+	return {begin & ~(ReadbackPage - 1), (end + ReadbackPage - 1) & ~(ReadbackPage - 1)};
+}
+
+} // namespace
+
+void BufferCache::NoteGpuWrite(uint64_t vaddr, uint64_t size) {
+	if (!FastReadbackEnabled()) {
+		return;
+	}
+	const uint64_t end = vaddr + size;
+	for (auto& readback: m_readbacks_in_flight) {
+		const auto begin = std::max(vaddr, readback.begin);
+		const auto last  = std::min(end, readback.end);
+		if (begin < last) {
+			const auto [page_begin, page_end] = PageAligned(begin, last);
+			readback.rewritten.Add(page_begin, page_end - page_begin);
+		}
+	}
+	m_readback_hot.ForEachInRange(vaddr, size, [&](uint64_t begin, uint64_t last) {
+		m_readback_pending.Add(begin, last - begin);
+	});
+}
+
+void BufferCache::IssueProactiveReadbacks() {
+	if (!FastReadbackEnabled()) {
+		return;
+	}
+	RetireProactiveReadbacks();
+	if (m_readback_pending.Empty()) {
+		return;
+	}
+	std::vector<std::pair<uint64_t, uint64_t>> ranges;
+	m_readback_pending.ForEach(
+	    [&](uint64_t begin, uint64_t end) { ranges.emplace_back(begin, end); });
+	m_readback_pending.Clear();
+	GpuWaitStats::Scope reason("proactive-readback");
+	for (auto [begin, end]: ranges) {
+		const auto id = FindBuffer(begin, end - begin);
+		if (IsBufferInvalid(id)) {
+			continue;
+		}
+		auto& buffer = m_slot_buffers[id];
+		// Whole pages, inside the buffer: the tracker clears GPU state a page at a time.
+		const auto [page_begin, page_end] = PageAligned(begin, end);
+		begin = std::max(page_begin, buffer.CpuAddress());
+		end   = std::min(page_end, buffer.CpuAddress() + buffer.Size());
+		if (begin >= end || !m_memory_tracker.IsRegionGpuModified(begin, end - begin) ||
+		    !DownloadBufferMemory<true>(buffer, begin, end - begin)) {
+			continue;
+		}
+		auto published = std::make_shared<std::atomic_bool>(false);
+		// Priority operations run in order, so this one follows the download's publish.
+		m_scheduler.DeferPriorityOperation(
+		    [published] { published->store(true, std::memory_order_release); });
+		m_readbacks_in_flight.push_back(
+		    {begin, end, m_scheduler.CurrentTick(), std::move(published), {}});
+	}
+}
+
+void BufferCache::RetireProactiveReadbacks() {
+	std::erase_if(m_readbacks_in_flight, [this](ProactiveReadback& readback) {
+		if (!readback.published->load(std::memory_order_acquire)) {
+			return false;
+		}
+		RangeSet settled;
+		settled.Add(readback.begin, readback.end - readback.begin);
+		readback.rewritten.ForEach(
+		    [&](uint64_t begin, uint64_t end) { settled.Subtract(begin, end - begin); });
+		settled.ForEach([&](uint64_t begin, uint64_t end) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(begin, end - begin);
+		});
+		return true;
+	});
+}
+
+bool BufferCache::WaitProactiveReadbacks(uint64_t vaddr, uint64_t size) {
+	uint64_t tick = 0;
+	for (const auto& readback: m_readbacks_in_flight) {
+		if (readback.begin < vaddr + size && vaddr < readback.end) {
+			tick = std::max(tick, readback.tick);
+		}
+	}
+	if (tick == 0) {
+		return false;
+	}
+	m_scheduler.Wait(tick);
+	m_scheduler.WaitPriorityOperations(tick);
+	RetireProactiveReadbacks();
+	return true;
 }
 
 BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {
@@ -554,6 +683,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	if (is_written) {
 		m_gpu_modified_ranges.Add(vaddr, size);
 		ForgetColorMetadataChecks(vaddr, size);
+		NoteGpuWrite(vaddr, size);
 	}
 	return {&buffer, buffer.Offset(vaddr)};
 }
