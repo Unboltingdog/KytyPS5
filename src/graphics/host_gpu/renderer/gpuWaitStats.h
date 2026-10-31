@@ -13,6 +13,9 @@ void               RecordSubmit() noexcept;
 void               RecordWait(uint64_t nanoseconds) noexcept;
 // Adds GPU busy time measured with timestamps (shown as gpu_busy_ms).
 void               RecordGpuBusy(uint64_t nanoseconds) noexcept;
+// KYTY_GPU_PROFILE=1: adds one dispatch's or draw's GPU time to its shader (top ones listed).
+[[nodiscard]] bool ProfileEnabled() noexcept;
+void               RecordShaderTime(uint64_t key, uint64_t nanoseconds) noexcept;
 // Counts one occurrence of a named event (shown as events=N).
 void               RecordEvent(const char* name, uint64_t count = 1) noexcept;
 // Counts a CPU readback fault at a page, with the size read back; the busiest pages are listed.
