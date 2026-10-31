@@ -532,7 +532,14 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
       m_next_driver_cache_save(std::chrono::steady_clock::now() + DriverCacheSaveInterval) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	InitializeDriverCache();
-	WarmUp(shader_store);
+	m_warm_up_store = shader_store;
+}
+
+// PPSA26344: warming up in the constructor ran before RenderContext built the image heap, so
+// cached pipelines that sample it got a null set layout and the emulator crashed on the next
+// launch. RenderContext calls this once the image heap exists.
+void PipelineCache::WarmUpStore() {
+	WarmUp(m_warm_up_store);
 }
 
 PipelineCache::~PipelineCache() {
