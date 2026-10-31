@@ -16,6 +16,7 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <mutex>
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
@@ -175,7 +176,10 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			    // Keep packed ranges on separate cache lines, as in shadPS4.
 			    total_size += Common::AlignUp(end - start, 64);
 		    });
-		    m_gpu_modified_ranges.Subtract(address, bytes);
+		    {
+			    std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
+			    m_gpu_modified_ranges.Subtract(address, bytes);
+		    }
 		    ForgetColorMetadataChecks(address, bytes);
 	    });
 	if (copies.empty()) {
@@ -330,11 +334,11 @@ std::pair<uint64_t, uint64_t> BufferCache::ReadbackRange(const Buffer& buffer, u
 }
 
 bool BufferCache::CanReadAroundGpuWrites(uint64_t vaddr, uint64_t size) {
-	bool readable = false;
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, &readable] {
-		readable = IsRegionRegistered(vaddr, size) && !m_gpu_modified_ranges.Intersects(vaddr, size);
-	});
-	return readable;
+	// Called on the faulting guest thread: the GPU thread changes the ranges under this lock, so
+	// the check needs no round trip to it. A range outside every cached buffer holds no
+	// GPU-written bytes either, so guest memory is current there too.
+	std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
+	return !m_gpu_modified_ranges.Intersects(vaddr, size);
 }
 
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool cpu_fault) {
@@ -704,7 +708,10 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
-		m_gpu_modified_ranges.Add(vaddr, size);
+		{
+			std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
+			m_gpu_modified_ranges.Add(vaddr, size);
+		}
 		ForgetColorMetadataChecks(vaddr, size);
 		NoteGpuWrite(vaddr, size);
 	}
