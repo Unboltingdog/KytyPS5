@@ -93,6 +93,9 @@ public:
 	void               RunGarbageCollector();
 
 private:
+	// The GPU-written run around a faulting range, clamped to the buffer, to read back at once.
+	[[nodiscard]] std::pair<uint64_t, uint64_t> ReadbackRange(const Buffer& buffer, uint64_t vaddr,
+	                                                          uint64_t size) const;
 	friend struct BufferCacheTestAccess;
 
 	bool IsBufferInvalid(BufferId id) const { return !id || m_slot_buffers[id].is_deleted; }
