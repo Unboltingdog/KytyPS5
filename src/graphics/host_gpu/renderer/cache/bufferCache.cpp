@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 
 #include "common/alignment.h"
@@ -311,6 +312,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		     vaddr, size);
 	}
 	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
+		GpuWaitStats::Scope reason(is_write ? "cpu-write-readback" : "cpu-read-readback");
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
 		}
@@ -708,6 +710,7 @@ void BufferCache::RunGarbageCollector() {
 	}
 
 	// Publish all queued downloads before releasing their tracked pages and owners.
+	GpuWaitStats::Scope reason("buffer-gc");
 	const auto completion_tick = m_scheduler.CurrentTick();
 	m_scheduler.Wait(completion_tick);
 	m_scheduler.WaitPriorityOperations(completion_tick);
