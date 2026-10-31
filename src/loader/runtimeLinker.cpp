@@ -698,6 +698,22 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			}
 			if (unsupported != nullptr) {
 				Libs::Graphics::GpuWaitStats::RecordEvent(unsupported);
+			} else if (Libs::LibKernel::Memory::AsyncReadbackEnabled() &&
+			           Libs::LibKernel::Memory::WaitAsyncReadback(info->access_violation_vaddr, 1)) {
+				// KYTY_ASYNC_READBACK: the data is now in guest memory; the page stays protected
+				// until the GPU thread retires the readback, so complete this load from there.
+				if (Loader::X64InstructionEmulator::TryEmulateLoad(
+				        info->native_context, info->access_violation_vaddr,
+				        [](uint64_t address, uint64_t size) {
+					        return Libs::LibKernel::Memory::CanReadAroundGpuWrites(address, size);
+				        },
+				        [](uint64_t address, void* destination, uint64_t size) {
+					        return Libs::LibKernel::Memory::TryReadBacking(address, destination, size);
+				        },
+				        &unsupported)) {
+					Libs::Graphics::GpuWaitStats::RecordEvent("rb:async-load-emulated");
+					return true;
+				}
 			}
 		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
