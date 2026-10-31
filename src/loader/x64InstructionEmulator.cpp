@@ -913,6 +913,9 @@ bool TryEmulateLoad(void* native_context, uint64_t fault_address, LoadCheck can_
 	}
 	const uint64_t size = memory.size / 8u;
 	if (size == 0 || size > 16 || fault_address < address || fault_address >= address + size) {
+		if (size > 16) {
+			*unsupported = "emu:load-wider-than-16-bytes";
+		}
 		return false;
 	}
 
