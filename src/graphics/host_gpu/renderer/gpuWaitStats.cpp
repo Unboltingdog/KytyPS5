@@ -29,6 +29,7 @@ struct State {
 	std::chrono::steady_clock::time_point          next = std::chrono::steady_clock::now();
 	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> pages; // count, bytes
 	uint64_t                                       gpu_busy_ns = 0;
+	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> shaders; // ns, count
 };
 
 State& GetState() {
@@ -87,6 +88,30 @@ void MaybePrint(State& state) {
 		std::snprintf(tail, sizeof(tail), " (%zu pages)\n", pages.size());
 		text += tail;
 	}
+	if (!state.shaders.empty()) {
+		std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> shaders(
+		    state.shaders.begin(), state.shaders.end());
+		state.shaders.clear();
+		std::sort(shaders.begin(), shaders.end(),
+		          [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+		uint64_t total = 0;
+		for (const auto& entry: shaders) total += entry.second.first;
+		char head[64];
+		std::snprintf(head, sizeof(head), "  GPU time by shader (sum %.0f ms):",
+		              static_cast<double>(total) / 1e6);
+		text += head;
+		for (size_t i = 0; i < shaders.size() && i < 12; i++) {
+			const auto key = shaders[i].first;
+			char       line[96];
+			std::snprintf(line, sizeof(line), " %s%016llx %.1fms x%llu;",
+			              (key >> 63u) != 0 ? "ps:" : "cs:",
+			              static_cast<unsigned long long>(key & ~(uint64_t {1} << 63u)),
+			              static_cast<double>(shaders[i].second.first) / 1e6,
+			              static_cast<unsigned long long>(shaders[i].second.second));
+			text += line;
+		}
+		text += "\n";
+	}
 	Log::WriteToConsoleAndLog(text);
 }
 
@@ -102,12 +127,29 @@ void Record(uint64_t submits, uint64_t waits, uint64_t nanoseconds) noexcept {
 
 } // namespace
 
-bool Enabled() noexcept {
+bool ProfileEnabled() noexcept {
 	static const bool enabled = [] {
-		const char* value = std::getenv("KYTY_WAIT_STATS");
+		const char* value = std::getenv("KYTY_GPU_PROFILE");
 		return value != nullptr && value[0] != '\0' && value[0] != '0';
 	}();
 	return enabled;
+}
+
+bool Enabled() noexcept {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_WAIT_STATS");
+		return (value != nullptr && value[0] != '\0' && value[0] != '0') || ProfileEnabled();
+	}();
+	return enabled;
+}
+
+void RecordShaderTime(uint64_t key, uint64_t nanoseconds) noexcept {
+	if (!ProfileEnabled()) return;
+	auto&            state = GetState();
+	std::scoped_lock lock {state.mutex};
+	auto&            entry = state.shaders[key];
+	entry.first += nanoseconds;
+	entry.second++;
 }
 
 void RecordSubmit() noexcept {
