@@ -390,8 +390,18 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool 
 			// The CPU reads this memory: read it back ahead of time once the GPU rewrites it.
 			m_readback_hot.Add(start, end - start);
 		}
+		if (FastReadbackEnabled() && cpu_fault && !is_write) {
+			// PPSA26344: each frame the CPU reads ~60 GPU-written pages, one after another, and
+			// each read cost its own submission and full GPU wait. Since this read waits for the
+			// GPU anyway, bring back every other page the CPU reads that the GPU has rewritten
+			// in the same submission: the following reads find their data already there.
+			IssueProactiveReadbacks();
+		}
 		if (DownloadBufferMemory<false>(buffer, start, end - start)) {
 			m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
+			if (FastReadbackEnabled()) {
+				RetireProactiveReadbacks();
+			}
 		} else if (FastReadbackEnabled() && m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
 			// Its data is on the way in a proactive readback; wait for that one.
 			GpuWaitStats::Scope in_flight("proactive-readback-wait");
