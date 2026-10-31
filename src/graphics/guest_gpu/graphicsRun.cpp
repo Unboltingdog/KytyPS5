@@ -23,6 +23,7 @@
 #include "libs/agc.h"
 #include "libs/errno.h"
 
+#include <cstdlib>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -969,6 +970,18 @@ void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_
 	                                      static_cast<int>(display_buffer_index));
 }
 
+static bool DeferredLabelsEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_DEFERRED_LABELS");
+		const bool  on    = value != nullptr && value[0] != '\0' && value[0] != '0';
+		if (on) {
+			Log::WriteToConsoleAndLog("GPU: end-of-pipe labels are written when the GPU finishes\n");
+		}
+		return on;
+	}();
+	return enabled;
+}
+
 void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector, void* address,
                                   uint64_t data, uint32_t interrupt_context_id) {
 	if (GraphicsRunDebugDumpEnabled()) {
@@ -1009,6 +1022,23 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 			std::memcpy(address, value, size);
 		}
 	};
+	// KYTY_DEFERRED_LABELS=1 (experiment, Unboltingdog fork): write kImmediate labels when the GPU
+	// finishes the work before them, as the hardware does, instead of while recording it. A guest
+	// that checks the label before reading GPU results then waits for, or works around, the GPU
+	// instead of faulting into a readback of data that is not there yet. Hot readbacks are queued
+	// first so their data reaches guest memory before the label does.
+	if (DeferredLabelsEnabled() && (data_sel == 1 || data_sel == 2) && address != nullptr) {
+		m_renderer.GetBufferCache().IssueProactiveReadbacks();
+		const auto vaddr = reinterpret_cast<uint64_t>(address);
+		const auto size  = data_sel == 1 ? sizeof(uint32_t) : sizeof(uint64_t);
+		GetScheduler().DeferPriorityOperation([vaddr, size, data] {
+			if (!GuestRange {vaddr, size}.Valid() ||
+			    !LibKernel::Memory::TryWriteBacking(vaddr, &data, size)) {
+				std::memcpy(reinterpret_cast<void*>(vaddr), &data, size);
+			}
+		});
+		data_sel = 0;
+	}
 	// EndOfPipeData: kNone, kImmediate32b, kImmediate64b, kRefClk; 5 reads GDS.
 	switch (data_sel) {
 		case 0: break;
