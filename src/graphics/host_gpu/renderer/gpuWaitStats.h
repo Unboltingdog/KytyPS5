@@ -11,6 +11,8 @@ namespace Libs::Graphics::GpuWaitStats {
 [[nodiscard]] bool Enabled() noexcept;
 void               RecordSubmit() noexcept;
 void               RecordWait(uint64_t nanoseconds) noexcept;
+// Adds GPU busy time measured with timestamps (shown as gpu_busy_ms).
+void               RecordGpuBusy(uint64_t nanoseconds) noexcept;
 // Counts one occurrence of a named event (shown as events=N).
 void               RecordEvent(const char* name, uint64_t count = 1) noexcept;
 // Counts a CPU readback fault at a page, with the size read back; the busiest pages are listed.

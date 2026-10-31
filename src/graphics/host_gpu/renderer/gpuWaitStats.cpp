@@ -28,6 +28,7 @@ struct State {
 	std::unordered_map<std::string, Totals>        totals;
 	std::chrono::steady_clock::time_point          next = std::chrono::steady_clock::now();
 	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> pages; // count, bytes
+	uint64_t                                       gpu_busy_ns = 0;
 };
 
 State& GetState() {
@@ -45,7 +46,11 @@ void MaybePrint(State& state) {
 	std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
 		return a.second.nanoseconds + a.second.submits > b.second.nanoseconds + b.second.submits;
 	});
-	std::string text = "GPU waits (2 s):";
+	char busy[64];
+	std::snprintf(busy, sizeof(busy), " gpu_busy_ms=%.0f;",
+	              static_cast<double>(state.gpu_busy_ns) / 1e6);
+	state.gpu_busy_ns = 0;
+	std::string text = std::string("GPU waits (2 s):") + busy;
 	for (const auto& [reason, totals]: rows) {
 		char line[160];
 		if (totals.events != 0 && totals.submits == 0 && totals.waits == 0) {
@@ -120,6 +125,13 @@ void RecordFaultPage(uint64_t page, uint64_t bytes) noexcept {
 	auto&            entry = state.pages[page];
 	entry.first++;
 	entry.second += bytes;
+}
+
+void RecordGpuBusy(uint64_t nanoseconds) noexcept {
+	if (!Enabled()) return;
+	auto&            state = GetState();
+	std::scoped_lock lock {state.mutex};
+	state.gpu_busy_ns += nanoseconds;
 }
 
 void RecordEvent(const char* name, uint64_t count) noexcept {

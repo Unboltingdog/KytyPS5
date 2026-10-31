@@ -88,6 +88,19 @@ private:
 	void RunOperation(Common::UniqueFunction<void>&& operation);
 
 	MasterSemaphore              m_master;
+	// KYTY_WAIT_STATS: timestamps around each command buffer, to measure GPU busy time.
+	struct TimestampSlot {
+		uint32_t index = 0;
+		uint64_t tick  = 0;
+	};
+	void                         BeginTimestamps();
+	void                         EndTimestamps();
+	void                         CollectTimestamps();
+	vk::QueryPool                m_timestamp_pool = nullptr;
+	uint32_t                     m_timestamp_next = 0;
+	std::vector<TimestampSlot>   m_timestamp_pending;
+	uint64_t                     m_timestamp_last_end = 0;
+	double                       m_timestamp_period   = 1.0;
 	RenderContext&               m_context;
 	GraphicContext&              m_graphics;
 	CommandPool                  m_command_pool;
