@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 #include "graphics/host_gpu/renderer/occlusionQueries.h"
 
 #include "graphics/host_gpu/graphicContext.h"
@@ -54,6 +55,7 @@ void OcclusionQueries::Dump(uint64_t address) {
 
 void OcclusionQueries::PublishDumps() {
 	if (const auto last = m_dumps.back().queries; last != m_read) {
+		GpuWaitStats::Scope reason("occlusion");
 		m_scheduler.Wait(m_dumps.back().tick);
 		// The unread queries wrap around the pool at most once.
 		for (uint64_t read = m_read; read < last;) {

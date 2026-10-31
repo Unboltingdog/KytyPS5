@@ -1,9 +1,12 @@
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/gpuCrashReport.h"
+
+#include <chrono>
 
 namespace Libs::Graphics {
 
@@ -55,7 +58,12 @@ void MasterSemaphore::Wait(uint64_t tick) {
 
 	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuWaits,
 	                                         Common::DebugCounters::Counter::GpuWaitNs);
-	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+	const auto wait_start = std::chrono::steady_clock::now();
+	const auto result     = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+	GpuWaitStats::RecordWait(static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+	                                                         wait_start)
+	        .count()));
 	if (result != vk::Result::eSuccess) GpuCrashReport::Report(m_graphics, result, KnownGpuTick());
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	Refresh();
