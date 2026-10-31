@@ -226,8 +226,23 @@ void CommandProcessor::BufferInit() {
 	GetScheduler().Begin(m_ctx, m_ucfg, m_sh_ctx);
 }
 
+// KYTY_EARLY_READBACK=1 (experiment): queue the readback of memory the CPU reads every frame at
+// the end of each command buffer that rewrote it, rather than only at the flip or when the CPU
+// faults. A later CPU read then waits for the submission that wrote its data, not for all the
+// GPU work recorded since.
+static bool EarlyReadbackEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_EARLY_READBACK");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
+}
+
 void CommandProcessor::BufferFlush() {
 	GpuWaitStats::Scope reason("pm4-flush");
+	if (EarlyReadbackEnabled()) {
+		m_renderer.GetBufferCache().IssueProactiveReadbacks();
+	}
 	GetScheduler().Flush();
 	// The occlusion counters reach a guest that polls them without waiting for a later fence.
 	m_renderer.GetOcclusionQueries().Publish();
