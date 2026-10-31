@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 
 #include "common/assert.h"
@@ -225,6 +226,7 @@ void CommandProcessor::BufferInit() {
 }
 
 void CommandProcessor::BufferFlush() {
+	GpuWaitStats::Scope reason("pm4-flush");
 	GetScheduler().Flush();
 	// The occlusion counters reach a guest that polls them without waiting for a later fence.
 	m_renderer.GetOcclusionQueries().Publish();
@@ -232,6 +234,7 @@ void CommandProcessor::BufferFlush() {
 
 void CommandProcessor::BufferWait() {
 	BufferInit();
+	GpuWaitStats::Scope reason("pm4-wait");
 	GetScheduler().Finish();
 }
 
@@ -1017,6 +1020,7 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 		case 3: data = Sync::ReadReferenceClock(); [[fallthrough]];
 		case 2: write_label(&data, sizeof(data)); break;
 		case 5: {
+			GpuWaitStats::Scope reason("release-mem-gds");
 			GetScheduler().Finish();
 			const auto gds = static_cast<uint32_t>(data);
 			Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(),
