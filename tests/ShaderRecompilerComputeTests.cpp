@@ -34972,6 +34972,15 @@ TestCase BufferLoadUbyteGpuSelectedDescriptors64() {
   return BufferLoadGpuSelectedDescriptors(64u, ShaderOpcode::BUFFER_LOAD_UBYTE);
 }
 
+// A non-formatted DWORD load of two or more components also translates its page once on the fast,
+// in-bounds path, ahead of the per-component checked reads.
+u32 FastIndirectLoadReads(const std::string &name, u32 components) {
+  return components >= 2u && name.starts_with("load_indirect_buffer_32x") &&
+                 !name.ends_with("_formatted")
+             ? 1u
+             : 0u;
+}
+
 void CheckSharedIndirectBufferLoads(VulkanHarness &vulkan) {
   using namespace ShaderRecompiler::IR;
   for (const u32 wave : {32u, 64u}) {
@@ -35026,7 +35035,7 @@ void CheckSharedIndirectBufferLoads(VulkanHarness &vulkan) {
       for (const auto &[name, profile] : profiles)
         Require(test.name, name.c_str(), profile.uses != 0u && profile.definitions == 1u &&
                     profile.calls == profile.uses * (wave == 64u && vulkan.SubgroupSize() == 32u ? 2u : 1u) &&
-                    profile.reads == profile.components,
+                    profile.reads == profile.components + FastIndirectLoadReads(name, profile.components),
                 "indirect load helpers duplicated definitions, calls or component reads");
       auto buffer = vulkan.CreateStorageBuffer(test.name, test.initial, test.initial.size(), true);
       vulkan.Dispatch(test, compiled, buffer);

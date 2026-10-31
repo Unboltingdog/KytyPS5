@@ -1225,7 +1225,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const int32_t occlusion_query   = occlusion_queries.Begin(vk_buffer);
 	// Draws count under their pixel shader (top bit set), or none for depth-only draws.
 	const auto draw_profile = m_context.GetCommandScheduler().ProfileBegin(
-	    (state.ps_active ? GpuCrashReport::LastPixelShader() : 0) | (uint64_t {1} << 63u));
+	    state.ps_active ? GpuCrashReport::LastPixelShader() : 0, true);
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else if (args_buffer.first == nullptr) {
