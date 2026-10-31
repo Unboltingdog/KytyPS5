@@ -105,6 +105,9 @@ CommandScheduler::~CommandScheduler() {
 	if (m_timestamp_pool != nullptr) {
 		m_graphics.device.destroyQueryPool(m_timestamp_pool, nullptr);
 	}
+	if (m_profile_pool != nullptr) {
+		m_graphics.device.destroyQueryPool(m_profile_pool, nullptr);
+	}
 }
 
 void CommandScheduler::Shutdown() {
@@ -341,7 +344,85 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	m_command.Begin();
 	m_dynamic_state.Invalidate();
 	BeginTimestamps();
+	BeginProfileChunk();
 	return m_command;
+}
+
+namespace {
+constexpr uint32_t ProfileChunks      = 32;
+constexpr uint32_t ProfileChunkQueries = 1024; // dispatches or draws per command buffer
+} // namespace
+
+void CommandScheduler::BeginProfileChunk() {
+	m_profile_chunk = -1;
+	if (!GpuWaitStats::ProfileEnabled()) return;
+	if (m_profile_pool == nullptr) {
+		vk::QueryPoolCreateInfo create {};
+		create.queryType  = vk::QueryType::eTimestamp;
+		create.queryCount = ProfileChunks * ProfileChunkQueries * 2;
+		if (m_graphics.device.createQueryPool(&create, nullptr, &m_profile_pool) !=
+		    vk::Result::eSuccess) {
+			m_profile_pool = nullptr;
+			return;
+		}
+		m_profile_chunks.resize(ProfileChunks);
+		m_profile_keys.resize(static_cast<size_t>(ProfileChunks) * ProfileChunkQueries);
+		m_timestamp_period = m_graphics.physical_device_properties.limits.timestampPeriod;
+	}
+	CollectProfile();
+	auto& chunk = m_profile_chunks[m_profile_next];
+	if (chunk.busy) return; // The GPU has not finished with it: leave this buffer unprofiled.
+	chunk           = {0, 0, true};
+	m_profile_chunk = static_cast<int32_t>(m_profile_next);
+	m_profile_next  = (m_profile_next + 1) % ProfileChunks;
+	m_command.m_buffer.resetQueryPool(m_profile_pool,
+	                                  static_cast<uint32_t>(m_profile_chunk) * ProfileChunkQueries * 2,
+	                                  ProfileChunkQueries * 2);
+}
+
+uint32_t CommandScheduler::ProfileBegin(uint64_t key) {
+	if (m_profile_chunk < 0) return UINT32_MAX;
+	auto& chunk = m_profile_chunks[static_cast<size_t>(m_profile_chunk)];
+	if (chunk.used == ProfileChunkQueries) return UINT32_MAX;
+	const auto slot = static_cast<uint32_t>(m_profile_chunk) * ProfileChunkQueries + chunk.used++;
+	m_profile_keys[slot] = key;
+	m_command.m_buffer.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, m_profile_pool,
+	                                  slot * 2);
+	return slot;
+}
+
+void CommandScheduler::ProfileEnd(uint32_t slot) {
+	if (slot == UINT32_MAX || m_profile_pool == nullptr) return;
+	m_command.m_buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, m_profile_pool,
+	                                  slot * 2 + 1);
+}
+
+void CommandScheduler::CollectProfile() {
+	std::vector<uint64_t> stamps;
+	for (uint32_t index = 0; index < m_profile_chunks.size(); index++) {
+		auto& chunk = m_profile_chunks[index];
+		if (!chunk.busy || chunk.tick == 0 || !m_master.IsFree(chunk.tick)) continue;
+		if (chunk.used != 0) {
+			stamps.resize(static_cast<size_t>(chunk.used) * 2);
+			const auto result = m_graphics.device.getQueryPoolResults(
+			    m_profile_pool, index * ProfileChunkQueries * 2, chunk.used * 2,
+			    stamps.size() * sizeof(uint64_t), stamps.data(), sizeof(uint64_t),
+			    vk::QueryResultFlagBits::e64);
+			if (result == vk::Result::eSuccess) {
+				for (uint32_t i = 0; i < chunk.used; i++) {
+					const auto begin = stamps[i * 2];
+					const auto end   = stamps[i * 2 + 1];
+					if (end > begin) {
+						GpuWaitStats::RecordShaderTime(
+						    m_profile_keys[index * ProfileChunkQueries + i],
+						    static_cast<uint64_t>(static_cast<double>(end - begin) *
+						                          m_timestamp_period));
+					}
+				}
+			}
+		}
+		chunk = {};
+	}
 }
 
 namespace {
@@ -422,6 +503,10 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		if (m_timestamp_pool != nullptr && !m_timestamp_pending.empty() &&
 		    m_timestamp_pending.back().tick == 0) {
 			m_timestamp_pending.back().tick = tick;
+		}
+		if (m_profile_chunk >= 0) {
+			m_profile_chunks[static_cast<size_t>(m_profile_chunk)].tick = tick;
+			m_profile_chunk = -1;
 		}
 		submit.AddSignal(m_master.Handle(), tick);
 
