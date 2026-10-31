@@ -21,6 +21,7 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
       m_image_heap(*this, m_page_manager), m_occlusion_queries(graphics, m_command_scheduler) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	GpuCrashReport::SetMaster(&m_command_scheduler.GetMasterSemaphore());
+	m_pipeline_cache.WarmUpStore();
 }
 
 RenderContext::~RenderContext() {
