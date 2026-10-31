@@ -27,6 +27,7 @@ struct State {
 	std::mutex                                     mutex;
 	std::unordered_map<std::string, Totals>        totals;
 	std::chrono::steady_clock::time_point          next = std::chrono::steady_clock::now();
+	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> pages; // count, bytes
 };
 
 State& GetState() {
@@ -59,6 +60,28 @@ void MaybePrint(State& state) {
 		text += line;
 	}
 	text += "\n";
+	if (!state.pages.empty()) {
+		std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> pages(state.pages.begin(),
+		                                                                     state.pages.end());
+		state.pages.clear();
+		std::sort(pages.begin(), pages.end(),
+		          [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+		text += "  busiest readback pages:";
+		for (size_t i = 0; i < pages.size() && i < 8; i++) {
+			char line[96];
+			std::snprintf(line, sizeof(line), " 0x%llx%s x%llu (%llu KB)",
+			              static_cast<unsigned long long>(pages[i].first & ~uint64_t {1}),
+			              (pages[i].first & 1u) != 0 ? "w" : "r",
+			              static_cast<unsigned long long>(pages[i].second.first),
+			              static_cast<unsigned long long>(pages[i].second.second /
+			                                              std::max<uint64_t>(pages[i].second.first, 1) /
+			                                              1024));
+			text += line;
+		}
+		char tail[64];
+		std::snprintf(tail, sizeof(tail), " (%zu pages)\n", pages.size());
+		text += tail;
+	}
 	Log::WriteToConsoleAndLog(text);
 }
 
@@ -88,6 +111,15 @@ void RecordSubmit() noexcept {
 
 void RecordWait(uint64_t nanoseconds) noexcept {
 	if (Enabled()) Record(0, 1, nanoseconds);
+}
+
+void RecordFaultPage(uint64_t page, uint64_t bytes) noexcept {
+	if (!Enabled()) return;
+	auto&            state = GetState();
+	std::scoped_lock lock {state.mutex};
+	auto&            entry = state.pages[page];
+	entry.first++;
+	entry.second += bytes;
 }
 
 void RecordEvent(const char* name, uint64_t count) noexcept {
