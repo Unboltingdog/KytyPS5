@@ -1,5 +1,5 @@
-#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -102,6 +102,9 @@ CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graph
 
 CommandScheduler::~CommandScheduler() {
 	Shutdown();
+	if (m_timestamp_pool != nullptr) {
+		m_graphics.device.destroyQueryPool(m_timestamp_pool, nullptr);
+	}
 }
 
 void CommandScheduler::Shutdown() {
@@ -337,7 +340,67 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	m_command.m_buffer = m_command_pool.Commit();
 	m_command.Begin();
 	m_dynamic_state.Invalidate();
+	BeginTimestamps();
 	return m_command;
+}
+
+namespace {
+constexpr uint32_t TimestampSlots = 4096;
+} // namespace
+
+void CommandScheduler::BeginTimestamps() {
+	if (!GpuWaitStats::Enabled()) return;
+	if (m_timestamp_pool == nullptr) {
+		vk::QueryPoolCreateInfo create {};
+		create.queryType  = vk::QueryType::eTimestamp;
+		create.queryCount = TimestampSlots * 2;
+		if (m_graphics.device.createQueryPool(&create, nullptr, &m_timestamp_pool) !=
+		    vk::Result::eSuccess) {
+			m_timestamp_pool = nullptr;
+			return;
+		}
+		m_timestamp_period = m_graphics.physical_device_properties.limits.timestampPeriod;
+	}
+	CollectTimestamps();
+	if (m_timestamp_pending.size() >= TimestampSlots) return; // GPU far behind: skip this one.
+	const auto slot = m_timestamp_next;
+	m_command.m_buffer.resetQueryPool(m_timestamp_pool, slot * 2, 2);
+	m_command.m_buffer.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, m_timestamp_pool,
+	                                  slot * 2);
+	m_timestamp_pending.push_back({slot, 0});
+	m_timestamp_next = (m_timestamp_next + 1) % TimestampSlots;
+}
+
+void CommandScheduler::EndTimestamps() {
+	if (m_timestamp_pool == nullptr || m_timestamp_pending.empty() ||
+	    m_timestamp_pending.back().tick != 0) {
+		return;
+	}
+	m_command.m_buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, m_timestamp_pool,
+	                                  m_timestamp_pending.back().index * 2 + 1);
+}
+
+// Adds the busy time of finished command buffers, counting overlap once.
+void CommandScheduler::CollectTimestamps() {
+	size_t done = 0;
+	for (; done < m_timestamp_pending.size(); done++) {
+		const auto& slot = m_timestamp_pending[done];
+		if (slot.tick == 0 || !m_master.IsFree(slot.tick)) break;
+		uint64_t   stamps[2] {};
+		const auto result = m_graphics.device.getQueryPoolResults(
+		    m_timestamp_pool, slot.index * 2, 2, sizeof(stamps), stamps, sizeof(uint64_t),
+		    vk::QueryResultFlagBits::e64);
+		if (result == vk::Result::eSuccess && stamps[1] > stamps[0]) {
+			const auto begin = std::max(stamps[0], m_timestamp_last_end);
+			if (stamps[1] > begin) {
+				GpuWaitStats::RecordGpuBusy(
+				    static_cast<uint64_t>(static_cast<double>(stamps[1] - begin) * m_timestamp_period));
+			}
+			m_timestamp_last_end = std::max(m_timestamp_last_end, stamps[1]);
+		}
+	}
+	m_timestamp_pending.erase(m_timestamp_pending.begin(),
+	                          m_timestamp_pending.begin() + static_cast<ptrdiff_t>(done));
 }
 
 uint64_t CommandScheduler::Submit(SubmitInfo submit) {
@@ -345,6 +408,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 
+	EndTimestamps();
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;
@@ -355,6 +419,10 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	{
 		Common::LockGuard lock(graphics.queue_mutex);
 		tick = m_master.NextTick();
+		if (m_timestamp_pool != nullptr && !m_timestamp_pending.empty() &&
+		    m_timestamp_pending.back().tick == 0) {
+			m_timestamp_pending.back().tick = tick;
+		}
 		submit.AddSignal(m_master.Handle(), tick);
 
 		vk::TimelineSemaphoreSubmitInfo timeline_info {};
