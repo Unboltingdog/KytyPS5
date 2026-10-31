@@ -72,6 +72,10 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_image_heap.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
+		// Which thread stalls on this read: a guest CPU thread, or the GPU thread itself while it
+		// processes the guest's command buffers.
+		GpuWaitStats::RecordEvent(GuestGpu::IsGpuThread() ? "rb:read-fault-on-gpu-thread"
+		                                                  : "rb:read-fault-on-guest-thread");
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size, false, true);
 	}
 	return true;
