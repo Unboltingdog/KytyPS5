@@ -362,6 +362,9 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool 
 		// cost a submission and a full GPU wait (about 6,000 a second, 3 fps). Download the whole
 		// GPU-written run around the faulting page, up to ReadbackWindow each side, at once.
 		auto [start, end] = ReadbackRange(buffer, vaddr, size);
+		if (cpu_fault) {
+			GpuWaitStats::RecordFaultPage((vaddr & ~uint64_t {4095}) | (is_write ? 1u : 0u), end - start);
+		}
 		if (FastReadbackEnabled() && cpu_fault && !is_write) {
 			GpuWaitStats::RecordEvent(m_readback_hot.Intersects(vaddr, size)
 			                              ? "rb:read-fault-on-hot-range"
