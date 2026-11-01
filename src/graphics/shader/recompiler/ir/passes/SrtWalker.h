@@ -83,6 +83,24 @@ bool WalkedImageActive(const ResourcePlan& plan, uint32_t image);
 // The exception handler completes such a load as a zero read.
 uint32_t SrtWalkerLoadLength(uint64_t rip);
 
+// KYTY_WALKER_NO_STALL=1 (experimental): while a scope is open on this thread, a walker load from
+// memory the GPU has written but not read back is treated as an unknown value instead of waiting
+// for the GPU. Branches on it count as both taken; a descriptor that needs it stays unresolved.
+bool SrtWalkerNoStallEnabled();
+class SrtWalkerNoStallScope {
+public:
+	SrtWalkerNoStallScope();
+	~SrtWalkerNoStallScope();
+	SrtWalkerNoStallScope(const SrtWalkerNoStallScope&)            = delete;
+	SrtWalkerNoStallScope& operator=(const SrtWalkerNoStallScope&) = delete;
+
+private:
+	bool m_previous;
+};
+// Called by the fault handler for a load that would wait for the GPU. Returns the walker load's
+// length to skip when the load can be treated as unknown, else 0.
+uint32_t SrtWalkerDeferLoad(uint64_t rip);
+
 // Nonnegative affine coefficients: element zero is constant, remaining elements are
 // caller-selected leaves. Runtime range proofs must additionally exclude U32 wrap.
 template <size_t Size>

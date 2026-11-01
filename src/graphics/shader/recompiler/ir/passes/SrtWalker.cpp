@@ -7,6 +7,8 @@
 #include <xbyak/xbyak.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <bit>
 #include <cstring>
 #include <deque>
@@ -167,11 +169,23 @@ const uint8_t* Scratch(const ResourcePlan& plan) {
 }
 
 thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
+// KYTY_WALKER_NO_STALL: set by the fault handler when a walker load hits memory the GPU has
+// written but not yet read back. The load's node then has no value, as an unknown operand.
+std::atomic<uint8_t>                     g_walker_deferred_load {0};
+thread_local bool                        t_walker_no_stall = false;
 
-// Every guest load is mov eax, [r10] (41 8b 02), so a fault completes it as a zero read.
-void LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address) {
+// Every guest load is mov eax, [r10] (41 8b 02), so a fault completes it as a zero read, or, when
+// deferred, as no value: the node returns without storing one.
+void LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address, const Xbyak::Label& unknown) {
 	code.lea(code.r10, code.ptr[address]);
 	code.mov(code.eax, code.dword[code.r10]);
+	Xbyak::Label loaded;
+	code.mov(code.r11, reinterpret_cast<uint64_t>(&g_walker_deferred_load));
+	code.cmp(code.byte[code.r11], 0);
+	code.je(loaded, Xbyak::CodeGenerator::T_NEAR);
+	code.mov(code.byte[code.r11], 0);
+	code.jmp(unknown, Xbyak::CodeGenerator::T_NEAR);
+	code.L(loaded);
 }
 
 class RuntimeValidator {
@@ -933,7 +947,7 @@ void WalkerCompiler::EmitRead(const Node& node) {
 			c.mov(c.rcx, c.rax);
 			c.shr(c.rcx, 48);
 			c.jnz(m_ret, Near);
-			LoadGuest(c, c.rax);
+			LoadGuest(c, c.rax, m_ret);
 		} else {
 			Load(c.r11, args[1]);
 			c.shr(c.r11d, 16);
@@ -963,7 +977,7 @@ void WalkerCompiler::EmitRead(const Node& node) {
 			c.lea(c.r11, c.ptr[c.r9 + static_cast<size_t>(immediate) + 4u]);
 			c.cmp(c.r11, c.rcx);
 			c.ja(zero, Near);
-			LoadGuest(c, c.rax + c.r9 + static_cast<size_t>(immediate));
+			LoadGuest(c, c.rax + c.r9 + static_cast<size_t>(immediate), m_ret);
 		}
 		++m_captures;
 		c.mov(c.qword[c.r8], c.r10);
@@ -1428,6 +1442,31 @@ bool ValidateRuntimeValue(const ResourcePlan& program, Value value, RuntimeValue
 
 bool ValidateWaveUniformValue(const ResourcePlan& program, Value value) {
 	return RuntimeValidator(program, RuntimeValueType::Any, true).Run(value);
+}
+
+bool SrtWalkerNoStallEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_WALKER_NO_STALL");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
+}
+
+SrtWalkerNoStallScope::SrtWalkerNoStallScope(): m_previous(t_walker_no_stall) {
+	t_walker_no_stall = true;
+	g_walker_deferred_load.store(0, std::memory_order_relaxed);
+}
+
+SrtWalkerNoStallScope::~SrtWalkerNoStallScope() {
+	t_walker_no_stall = m_previous;
+	g_walker_deferred_load.store(0, std::memory_order_relaxed);
+}
+
+uint32_t SrtWalkerDeferLoad(uint64_t rip) {
+	if (!t_walker_no_stall) return 0;
+	const auto length = SrtWalkerLoadLength(rip);
+	if (length != 0) g_walker_deferred_load.store(1, std::memory_order_relaxed);
+	return length;
 }
 
 uint32_t SrtWalkerLoadLength(uint64_t rip) {
