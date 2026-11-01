@@ -6069,9 +6069,10 @@ void TestScalarDataReadControlFlow() {
     auto plan = ExtractResourcePlan(fixture.program);
     if (GpuScalarLoadsEnabled()) {
       // KYTY_GPU_SCALAR_LOADS keeps scalar data a GPU load instead of a dispatch constant.
-      Check(plan.srt_reads.empty() && fixture.program.info.uses_dma,
-            "scalar data under KYTY_GPU_SCALAR_LOADS was not left a GPU load");
-      continue; // The rest checks the flattened value the CPU reads.
+      // The value keeps its GPU load beside the flattened copy, chosen by a flag slot.
+      Check(plan.srt_reads.size() == 2 && plan.srt_reads[0].gpu_flag == 1u &&
+                fixture.program.info.uses_dma && plan.srt_code,
+            "scalar data under KYTY_GPU_SCALAR_LOADS lost its flag slot or GPU load");
     } else {
       Check(plan.srt_reads.size() == 1 && !fixture.program.info.uses_dma && plan.srt_code,
             "scalar data lost flattening or its walker");
@@ -6094,6 +6095,9 @@ void TestScalarDataReadControlFlow() {
       Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
                 reads == (pointer != 0) && snapshot.flattened_srt[0] == (pointer ? 42u : 0u),
             "scalar data refresh ignored a mixed EXEC/64-bit null-pointer branch");
+      // A value the walker read itself leaves the flag clear: the shader uses the CPU's copy.
+      Check(!GpuScalarLoadsEnabled() || snapshot.flattened_srt[1] == 0u,
+            "scalar data read on the CPU still selected the GPU load");
     }
   }
 }

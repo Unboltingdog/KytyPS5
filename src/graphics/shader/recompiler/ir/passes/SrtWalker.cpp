@@ -1290,14 +1290,36 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 		}
 	}
 	if (resources) {
+		// KYTY_GPU_SCALAR_LOADS: flag slots are written with the value they choose for.
+		std::vector<bool> flag_slots(reads.size(), false);
+		for (const auto& read: m_plan.srt_reads) {
+			if (read.gpu_flag < flag_slots.size()) flag_slots[read.gpu_flag] = true;
+		}
 		const auto flat = [&](uint32_t slot) {
+			if (slot < flag_slots.size() && flag_slots[slot]) return;
 			const auto offset = slot < reads.size() ? m_plan.srt_reads[slot].flat_offset : UINT32_MAX;
 			if (offset >= reads.size()) {
 				c.jmp(fail, Near);
 				return;
 			}
-			Fetch(reads[slot], fail);
+			const auto gpu_flag = m_plan.srt_reads[slot].gpu_flag;
+			const auto flag_offset =
+			    gpu_flag < reads.size() ? m_plan.srt_reads[gpu_flag].flat_offset : UINT32_MAX;
+			if (flag_offset >= reads.size()) {
+				Fetch(reads[slot], fail);
+				c.mov(c.dword[c.rsi + offset * sizeof(uint32_t)], c.eax);
+				return;
+			}
+			// Unknown here: the shader loads the value itself.
+			Xbyak::Label unknown, done;
+			Fetch(reads[slot], unknown);
 			c.mov(c.dword[c.rsi + offset * sizeof(uint32_t)], c.eax);
+			c.mov(c.dword[c.rsi + flag_offset * sizeof(uint32_t)], 0);
+			c.jmp(done, Near);
+			c.L(unknown);
+			c.mov(c.dword[c.rsi + offset * sizeof(uint32_t)], 0);
+			c.mov(c.dword[c.rsi + flag_offset * sizeof(uint32_t)], 1);
+			c.L(done);
 		};
 		if (blocks.empty()) {
 			for (uint32_t slot = 0; slot < reads.size(); ++slot) flat(slot);
