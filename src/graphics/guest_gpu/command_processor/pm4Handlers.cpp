@@ -20,7 +20,11 @@
 #include <atomic>
 #include <bit>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 #define KYTY_HW_CTX_PARSER_ARGS                                                                    \
@@ -1381,6 +1385,31 @@ KYTY_CP_OP_PARSER(CpOpCondExec) {
 	EXIT_NOT_IMPLEMENTED(buffer[2] != 0);
 	EXIT_NOT_IMPLEMENTED(addr == 0);
 	EXIT_NOT_IMPLEMENTED(payload_dw + exec_count >= dw);
+
+	// KYTY_WAIT_STATS: describe each conditional block once (its packet opcodes), to judge
+	// whether the GPU could evaluate the condition itself (conditional rendering).
+	static const bool describe = std::getenv("KYTY_WAIT_STATS") != nullptr;
+	if (describe) {
+		static std::mutex                  mutex;
+		static std::unordered_set<uint64_t> seen;
+		std::scoped_lock                   lock(mutex);
+		if (seen.size() < 64 && seen.insert(addr ^ (uint64_t {exec_count} << 48u)).second) {
+			std::string ops;
+			const uint32_t* packet = buffer + payload_dw;
+			for (uint32_t used = 0; used < exec_count && ops.size() < 400;) {
+				const auto header = packet[used];
+				const auto length = KYTY_PM4_LEN(header);
+				ops += Pm4::OpcodeName((header >> 8u) & 0xffu);
+				ops += ' ';
+				if (length == 0) break;
+				used += length;
+			}
+			char head[96];
+			std::snprintf(head, sizeof(head), "COND_EXEC addr=0x%016llx dwords=%u ops: ",
+			              static_cast<unsigned long long>(addr), exec_count);
+			Log::WriteToConsoleAndLog(std::string(head) + ops + "\n");
+		}
+	}
 
 	if (*reinterpret_cast<const volatile uint32_t*>(addr) == 0) {
 		return payload_dw + exec_count;
