@@ -967,10 +967,9 @@ private:
 				}
 			}
 		}
-		// KYTY_GPU_SCALAR_LOADS=1 (experimental): scalar loads that only feed the shader's own math
-		// and branches stay GPU loads. Flattened into dispatch constants, a value the GPU wrote
-		// earlier in the frame made the GPU thread wait for the GPU before every such dispatch.
-		for (auto* block: GpuScalarLoadsEnabled() ? decltype(m_program.blocks) {} : m_program.blocks) {
+		// Reads collected from here on only feed the shader's own math and branches.
+		const auto descriptor_reads = m_scalar_reads.size();
+		for (auto* block: m_program.blocks) {
 			for (auto& inst: *block) {
 				uint32_t index = 0;
 				if (inst.GetOpcode() == ValueOpcode::LoadAddressU32 &&
@@ -979,7 +978,14 @@ private:
 					CollectScalarRead(Value(&inst), inst.Flags<MemoryFlags>().pc);
 			}
 		}
-		for (auto* read: m_scalar_reads) {
+		for (size_t read_index = 0; read_index < m_scalar_reads.size(); ++read_index) {
+			auto* read = m_scalar_reads[read_index];
+			// KYTY_GPU_SCALAR_LOADS=1 (experimental): a data-only read keeps its GPU load beside the
+			// dispatch constant, and a flag slot picks one per dispatch. The walker sets the flag
+			// when the value is in memory the GPU has written but not read back (see
+			// KYTY_WALKER_NO_STALL), so the shader reads the GPU's current value and the dispatch
+			// doesn't wait; otherwise the CPU's value is used, which is current for CPU writes.
+			const bool hybrid = GpuScalarLoadsEnabled() && read_index >= descriptor_reads;
 			const auto flags = read->Flags<MemoryFlags>();
 			auto& memory = m_program.memory_info[flags.index];
 			const auto* handle = read->Arg(0).Resolve().TryInstruction();
@@ -989,10 +995,11 @@ private:
 			EXIT_IF(resolved == m_resolved_handles.end());
 			uint32_t bad_dword = 0;
 			if (!ValidateSource(resolved->source, bad_dword)) continue;
-			memory.planning_only = true;
+			if (!hybrid) memory.planning_only = true;
 			uint32_t slot = 0;
 			for (; slot < m_program.srt_reads.size(); ++slot) {
 				const auto* other = m_program.srt_reads[slot].value.Resolve().TryInstruction();
+				if (other == nullptr) continue; // A KYTY_GPU_SCALAR_LOADS flag slot.
 				if (other->GetOpcode() != read->GetOpcode() ||
 				    m_program.memory_info[other->Flags<MemoryFlags>().index] != memory) continue;
 				const auto* other_handle = other->Arg(0).Resolve().TryInstruction();
@@ -1005,6 +1012,12 @@ private:
 			}
 			const bool keep = slot == m_program.srt_reads.size();
 			if (keep) m_program.srt_reads.push_back({Value(read), slot});
+			if (hybrid && keep) {
+				const auto flag = static_cast<uint32_t>(m_program.srt_reads.size());
+				m_program.srt_reads.push_back({Value(0u), flag});
+				m_program.srt_reads[slot].gpu_flag = flag;
+			}
+			const auto gpu_flag = m_program.srt_reads[slot].gpu_flag;
 			auto* block = read->Parent();
 			auto& list = block->Instructions();
 			const auto where = std::ranges::find_if(list, [&](const Inst& inst) {
@@ -1013,6 +1026,45 @@ private:
 			const auto resource = Value(&*block->PrependNewInst(where, ValueOpcode::GetSrtResource));
 			const auto flat = Value(&*block->PrependNewInst(where, ValueOpcode::ReadConst,
 			    {resource, Value(slot)}, read->Flags<uint64_t>()));
+			if (hybrid && gpu_flag != UINT32_MAX) {
+				if (keep) {
+					// The walker reads the value through an untouched planning copy, as for a
+					// flattened read; the shader's load below is gated by the flag.
+					if (resolved->planning_handle.IsEmpty()) {
+						bool unchanged = true;
+						for (uint32_t word = 0; word < resolved->source.dword_count; ++word)
+							unchanged &= handle->Arg(word).Resolve() == resolved->source.dwords[word].Resolve();
+						resolved->planning_handle = read->Arg(0);
+						if (!unchanged) {
+							auto& retained = m_program.value_storage.emplace_back(handle->GetOpcode());
+							for (uint32_t word = 0; word < resolved->source.dword_count; ++word)
+								retained.SetArg(word, resolved->source.dwords[word]);
+							resolved->planning_handle = Value(&retained);
+						}
+					}
+					auto& planning =
+					    m_program.value_storage.emplace_back(read->GetOpcode(), read->Flags<uint64_t>());
+					for (size_t arg = 0; arg < read->NumArgs(); ++arg) planning.SetArg(arg, read->Arg(arg));
+					planning.SetArg(0, resolved->planning_handle);
+					m_program.srt_reads[slot].value = Value(&planning);
+				}
+				const auto uses = read->Uses();
+				const auto flag_value = Value(&*block->PrependNewInst(where, ValueOpcode::ReadConst,
+				    {resource, Value(gpu_flag)}, read->Flags<uint64_t>()));
+				const auto use_gpu = Value(&*block->PrependNewInst(where, ValueOpcode::INotEqual32,
+				    {flag_value, Value(0u)}));
+				// The load runs only when the flag selects it.
+				read->SetArg(read->NumArgs() - 1, Value(&*block->PrependNewInst(where,
+				    ValueOpcode::LogicalAnd, {read->Arg(read->NumArgs() - 1), use_gpu})));
+				const auto selected = Value(&*block->PrependNewInst(std::next(where),
+				    ValueOpcode::SelectU32, {use_gpu, Value(read), flat}));
+				for (const auto& use: uses) use.user->SetArg(use.operand, selected);
+				for (auto* other: m_program.blocks) {
+					if (other->condition.Resolve() == Value(read)) other->condition = selected;
+					if (other->indirect_target.Resolve() == Value(read)) other->indirect_target = selected;
+				}
+				continue; // The GPU load stays in the shader.
+			}
 			const auto uses = read->Uses();
 			for (const auto& use: uses) use.user->SetArg(use.operand, flat);
 			for (auto& entry: m_resolved_handles) {
