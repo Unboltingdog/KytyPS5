@@ -164,7 +164,10 @@ bool MaterializeTimed(const ShaderRecompiler::IR::ResourcePlan&     plan,
                       ShaderRecompiler::IR::ResourceSnapshot&       snapshot,
                       ShaderRecompiler::IR::ResourceSpecialization& specialization) {
 	GpuWaitStats::CpuTimer timer("program:materialize");
-	return MaterializeWithoutStall(plan, runtime, snapshot, specialization);
+	(void)ShaderRecompiler::IR::TakeWalkNanoseconds();
+	const bool result = MaterializeWithoutStall(plan, runtime, snapshot, specialization);
+	GpuWaitStats::RecordCpuTime("program:materialize:walker", ShaderRecompiler::IR::TakeWalkNanoseconds());
+	return result;
 }
 
 std::vector<uint64_t> HashList(const char* variable) {

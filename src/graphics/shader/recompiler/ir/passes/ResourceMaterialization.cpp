@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -38,6 +39,16 @@ struct DeferScope {
 	~DeferScope() { t_specialization_read_may_defer = previous; }
 	bool previous;
 };
+// KYTY_WAIT_STATS: time spent running SRT walkers on this thread (see TakeWalkNanoseconds()).
+thread_local uint64_t t_walk_ns = 0;
+struct WalkTimer {
+	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+	~WalkTimer() {
+		t_walk_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                       std::chrono::steady_clock::now() - start)
+		                                       .count());
+	}
+};
 // Above this many keys, binding every candidate costs more than waiting for the GPU.
 constexpr uint32_t MaxDeferredKeyDomain = 256u;
 
@@ -61,6 +72,12 @@ struct SiteScope {
 
 const char* SpecializationReadSite() {
 	return t_specialization_read_site != nullptr ? t_specialization_read_site : "other";
+}
+
+uint64_t TakeWalkNanoseconds() {
+	const auto ns = t_walk_ns;
+	t_walk_ns     = 0;
+	return ns;
 }
 
 bool SpecializationReadMayDefer() {
@@ -1678,7 +1695,10 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	     std::ranges::any_of(program.descriptor_sources, uses_workgroup_count));
 	auto& reads = snapshot.specialization_reads;
 	reads = program.source_reads;
-	if (!WalkSrt(program, runtime, snapshot.flattened_srt, capture_reads ? &reads : nullptr)) {
+	if (![&] {
+		    WalkTimer walk_timer;
+		    return WalkSrt(program, runtime, snapshot.flattened_srt, capture_reads ? &reads : nullptr);
+	    }()) {
 		return SpecializationFail(fmt::format("SRT refresh complete={} reads={} user_data={}",
 		    program.srt_plan_complete, program.srt_reads.size(), runtime.user_data.size()));
 	}

@@ -25,6 +25,9 @@ void               RecordFaultPage(uint64_t page, uint64_t bytes) noexcept;
 
 // Adds the CPU time spent in its lifetime, minus this thread's GPU waits, under a name
 // (KYTY_WAIT_STATS; listed as "CPU time excluding GPU waits").
+// Adds CPU time measured elsewhere under a name, as a CpuTimer would.
+void RecordCpuTime(const char* name, uint64_t nanoseconds) noexcept;
+
 class CpuTimer {
 public:
 	explicit CpuTimer(const char* name) noexcept;
