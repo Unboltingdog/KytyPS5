@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "kytyShaderCacheVersion.h"
 
 #include <algorithm>
@@ -39,7 +40,10 @@ struct Frame {
 // sources that write and read records (generate_shader_cache_version.cmake), so a store outlives
 // emulator builds that leave them alone and is started over by any that change them.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
-	const uint64_t version = KYTY_SHADER_CACHE_VERSION;
+	// KYTY_GPU_SCALAR_LOADS compiles shaders differently, so it starts its own store.
+	const uint64_t version =
+	    KYTY_SHADER_CACHE_VERSION ^
+	    (ShaderRecompiler::IR::GpuScalarLoadsEnabled() ? uint64_t {0x9e3779b97f4a7c15} : 0u);
 	Writer         header;
 	IoAll(header, version, SpirvProfile(graphics),
 	      graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);
