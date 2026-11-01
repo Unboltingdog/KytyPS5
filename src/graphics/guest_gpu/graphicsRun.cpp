@@ -888,7 +888,11 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	// The GPU reads the records if the shaders allow; the VS prolog removes Vulkan's bases
 	// from the index VGPRs and copies them only to the user SGPRs the packet patches.
 	DrawIndirectArgs records {args_addr, draw_count, stride_in_bytes};
-	if (IndirectDrawOffsets(registers, records.offsets) && (!indexed || m_index_buffer_size != 0) &&
+	const bool gpu_offsets = IndirectDrawOffsets(registers, records.offsets);
+	if (GpuWaitStats::Enabled() && !gpu_offsets) {
+		GpuWaitStats::RecordEvent("draw-indirect:cpu-path:offset-registers");
+	}
+	if (gpu_offsets && (!indexed || m_index_buffer_size != 0) &&
 	    (indexed ? executor.DrawIndex(m_submit_id, CurrentBuffer(),
 	                                  {.index_count         = m_index_buffer_size,
 	                                   .index_addr          = IndexAddress(0),
@@ -898,6 +902,11 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		return;
 	}
 
+	if (GpuWaitStats::Enabled()) {
+		GpuWaitStats::RecordEvent(gpu_offsets ? "draw-indirect:cpu-path:no-gpu-emit"
+		                                      : "draw-indirect:cpu-path");
+	}
+	GpuWaitStats::CpuTimer cpu_path_timer("draw-indirect:cpu-path");
 	const uint32_t max_indices = m_index_buffer_size != 0 ? m_index_buffer_size : UINT32_MAX;
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto addr = args_addr + static_cast<uint64_t>(i) * stride_in_bytes;
