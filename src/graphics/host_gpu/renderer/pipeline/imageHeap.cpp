@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/imageHeap.h"
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 
 #include "common/logging/log.h"
 #include "common/alignment.h"
@@ -449,6 +450,7 @@ void ImageHeap::Resize(Memory& memory, uint64_t size) {
 }
 
 void ImageHeap::Rebind(RenderExecutor& executor) {
+	GpuWaitStats::CpuTimer kyty_stage_timer("bind:image-heap-rebind");
 	KYTY_PROFILER_FUNCTION();
 	auto&      textures = m_context.GetTextureCache();
 	const auto epoch    = Image::heap_epoch.load(std::memory_order_relaxed);
