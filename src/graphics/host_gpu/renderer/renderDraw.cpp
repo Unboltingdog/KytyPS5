@@ -1336,7 +1336,7 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 
 bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
                                const DrawIndexArgs& args) {
-	GpuWaitStats::CpuTimer kyty_stage_timer("draw:index");
+	GpuWaitStats::CpuTimer kyty_stage_timer(args.indirect.address != 0 ? "draw:index-indirect" : "draw:index");
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer.IsInvalid());
@@ -1451,7 +1451,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args) {
-	GpuWaitStats::CpuTimer kyty_stage_timer("draw:auto");
+	GpuWaitStats::CpuTimer kyty_stage_timer(args.indirect.address != 0 ? "draw:auto-indirect" : "draw:auto");
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer.IsInvalid());

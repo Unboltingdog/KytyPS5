@@ -134,7 +134,9 @@ public:
 	// contents, tracking, identity or layout.
 	void HeapChanged() const noexcept {
 		if (heap_refs.load(std::memory_order_relaxed) != 0u) {
-			heap_epoch.fetch_add(1u, std::memory_order_relaxed);
+			// In flux until the epoch is published, so a concurrent rebind refreshes it anyway.
+			heap_stamp.store(UINT64_MAX);
+			heap_stamp.store(heap_epoch.fetch_add(1u) + 1u);
 		}
 	}
 
@@ -161,6 +163,8 @@ public:
 	size_t           lru_id             = 0;
 	// Resident image heap elements that select this image.
 	std::atomic<uint32_t> heap_refs {0};
+	// The heap epoch of this image's last change; heaps skip images unchanged since they resolved.
+	mutable std::atomic<uint64_t> heap_stamp {0};
 
 private:
 	friend struct ImageTestAccess;
