@@ -6,7 +6,8 @@
 
 // KYTY_HANG_PROBE=<seconds> (diagnostic, Unboltingdog fork): for a game that stops making progress
 // without crashing. Writes hang-probe.txt next to the emulator:
-// - after <seconds>, and again every <seconds>, where every guest thread is executing: several
+// - once no frame has been presented for <seconds> (also before the first frame), twice, 5 s apart,
+//   and again for each later freeze (up to 6 rounds in all), where every guest thread is executing: several
 //   samples of its instruction pointer (a spinning thread moves, a blocked one does not), the code
 //   bytes around it, and the guest return addresses on its stack (Windows; elsewhere the samples
 //   are skipped);
@@ -20,6 +21,9 @@ namespace Kernel::HangProbe {
 void ThreadStarted(int unique_id, const std::string& name, uint64_t host_thread_id,
                    uint64_t stack_low, uint64_t stack_high);
 void ThreadEnded(int unique_id);
+
+// The game presented a frame.
+void Progress();
 
 // A guest module occupies [base, base + size).
 void ModuleLoaded(const std::string& name, uint64_t base, uint64_t size);
