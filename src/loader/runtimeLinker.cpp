@@ -719,6 +719,17 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 				}
 			}
 		}
+		if (access == GpuAccess::Read &&
+		    !Libs::LibKernel::Memory::CanReadAroundGpuWrites(info->access_violation_vaddr, 1)) {
+			// KYTY_WALKER_NO_STALL: a resource walk on the GPU thread treats this GPU-written value
+			// as unknown instead of waiting for the GPU to finish writing it.
+			if (const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerDeferLoad(
+			        info->exception_address)) {
+				Libs::Graphics::GpuWaitStats::RecordEvent("rb:walker-load-deferred");
+				Loader::X64InstructionEmulator::SkipLoad(info->native_context, length);
+				return true;
+			}
+		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
 			return true;
