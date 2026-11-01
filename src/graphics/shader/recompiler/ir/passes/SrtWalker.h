@@ -87,6 +87,8 @@ uint32_t SrtWalkerLoadLength(uint64_t rip);
 // memory the GPU has written but not read back is treated as an unknown value instead of waiting
 // for the GPU. Branches on it count as both taken; a descriptor that needs it stays unresolved.
 bool SrtWalkerNoStallEnabled();
+// True inside a scope on this thread: a failure there is retried, so it is not reported.
+bool SrtWalkerNoStallActive();
 class SrtWalkerNoStallScope {
 public:
 	SrtWalkerNoStallScope();

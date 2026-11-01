@@ -129,11 +129,15 @@ bool MaterializeWithoutStall(const ShaderRecompiler::IR::ResourcePlan&     plan,
                              const ShaderRecompiler::IR::SrtRuntime&       runtime,
                              ShaderRecompiler::IR::ResourceSnapshot&       snapshot,
                              ShaderRecompiler::IR::ResourceSpecialization& specialization) {
-	if (ShaderRecompiler::IR::SrtWalkerNoStallEnabled()) {
+	// A plan that keeps needing GPU-written values isn't worth walking twice a dispatch.
+	static std::unordered_map<const ShaderRecompiler::IR::ResourcePlan*, uint32_t> failures;
+	if (ShaderRecompiler::IR::SrtWalkerNoStallEnabled() && failures[&plan] < 8) {
 		ShaderRecompiler::IR::SrtWalkerNoStallScope no_stall;
 		if (ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization)) {
+			failures[&plan] = 0;
 			return true;
 		}
+		failures[&plan]++;
 		GpuWaitStats::RecordEvent("rb:walker-no-stall-fallback");
 	}
 	return ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization);
