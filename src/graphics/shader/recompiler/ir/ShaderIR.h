@@ -661,6 +661,8 @@ struct DescriptorSource {
 struct SrtRead {
 	Value    value;
 	uint32_t flat_offset = 0;
+	// KYTY_GPU_SCALAR_LOADS: the slot set to 1 when this value is left to the shader's GPU load.
+	uint32_t gpu_flag = UINT32_MAX;
 
 	bool operator==(const SrtRead& other) const = default;
 };
