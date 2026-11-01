@@ -125,6 +125,14 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 		GpuWaitStats::RecordEvent(site.c_str());
 		GpuWaitStats::RecordEvent((site + ":bytes").c_str(), values.size_bytes());
 	}
+	// KYTY_WALKER_NO_STALL: refuse it where the caller can do without it (small masked selector
+	// domains) instead of waiting for the GPU.
+	if (!values.empty() && ShaderRecompiler::IR::SpecializationReadMayDefer() &&
+	    !Libs::LibKernel::Memory::CanReadAroundGpuWrites(address, values.size_bytes())) {
+		ShaderRecompiler::IR::NoteSpecializationReadDeferred();
+		GpuWaitStats::RecordEvent("rb:spec-read-deferred");
+		return false;
+	}
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
 	return !values.empty() &&
