@@ -149,12 +149,20 @@ bool MaterializeWithoutStall(const ShaderRecompiler::IR::ResourcePlan&     plan,
 	static std::unordered_map<const ShaderRecompiler::IR::ResourcePlan*, uint32_t> failures;
 	if (ShaderRecompiler::IR::SrtWalkerNoStallEnabled() && failures[&plan] < 8) {
 		ShaderRecompiler::IR::SrtWalkerNoStallScope no_stall;
+		(void)ShaderRecompiler::IR::TakeNoStallFailure();
 		if (ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization)) {
 			failures[&plan] = 0;
 			return true;
 		}
 		failures[&plan]++;
 		GpuWaitStats::RecordEvent("rb:walker-no-stall-fallback");
+		if (GpuWaitStats::Enabled()) {
+			auto cause = ShaderRecompiler::IR::TakeNoStallFailure();
+			const char* reason = GpuWaitStats::CurrentReason();
+			const auto event = fmt::format("rb:no-stall-fail:{}:{}", reason != nullptr ? reason : "?",
+			                               cause.empty() ? "unreported" : cause);
+			GpuWaitStats::RecordEvent(event.c_str());
+		}
 	}
 	return ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization);
 }
