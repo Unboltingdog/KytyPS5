@@ -453,12 +453,13 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 	GpuWaitStats::CpuTimer kyty_stage_timer("bind:image-heap-rebind");
 	KYTY_PROFILER_FUNCTION();
 	auto&      textures = m_context.GetTextureCache();
-	const auto epoch    = Image::heap_epoch.load(std::memory_order_relaxed);
+	const auto epoch    = Image::heap_epoch.load();
 	const auto serial   = Image::serials.load(std::memory_order_relaxed);
 	for (auto* view: m_active) {
 		bool       stale = false;
 		const auto mark  = [&](uint32_t index) { m_elements[index].stale = stale = true; };
 		if (view->resolve_epoch != epoch) {
+			const auto resolved = view->resolve_epoch;
 			view->resolve_epoch = epoch;
 			for (const auto& [value, index]: view->elements) {
 				const auto& binding = m_elements[index].binding;
@@ -467,7 +468,7 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 				if (image == nullptr || !image->registered || image->depth_id ||
 				    image->binding.needs_rebind) {
 					mark(index);
-				} else {
+				} else if (image->heap_stamp.load() > resolved) {
 					(void)textures.FindTexture(binding.image_id, binding.desc);
 				}
 			}
