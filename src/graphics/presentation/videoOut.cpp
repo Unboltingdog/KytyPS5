@@ -1,3 +1,4 @@
+#include "kernel/hangProbe.h"
 #include "graphics/presentation/videoOut.h"
 
 #include "common/abi.h"
@@ -1279,6 +1280,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 		}
 		if (requests[0].cfg->bus == 0) {
 			Graphics::PerformanceOverlayRecordFlip(requests[0].cfg->width, requests[0].cfg->height);
+			Kernel::HangProbe::Progress();
 		}
 	}
 
