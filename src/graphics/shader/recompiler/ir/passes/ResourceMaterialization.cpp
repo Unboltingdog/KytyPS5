@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include "common/assert.h"
 #include "graphics/guest_gpu/gpu_format.h"
@@ -22,6 +23,9 @@ namespace {
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
 
 bool SpecializationFail(std::string_view message) {
+	if (SrtWalkerNoStallActive()) {
+		return false; // KYTY_WALKER_NO_STALL retries this the usual way.
+	}
 	std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
 	             static_cast<int>(message.size()), message.data());
 	return false;
