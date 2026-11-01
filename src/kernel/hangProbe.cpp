@@ -232,17 +232,41 @@ void Dump(int round) {
 }
 #endif
 
+std::atomic<int64_t> g_last_progress_ms {0};
+
+int64_t NowMs() {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(
+	           std::chrono::steady_clock::now().time_since_epoch())
+	    .count();
+}
+
 void Watchdog() {
 	const auto seconds = Seconds();
-	for (int round = 1; round <= 3; round++) {
-		std::this_thread::sleep_for(std::chrono::seconds(seconds));
+	g_last_progress_ms.store(NowMs());
+	int     round        = 0;
+	int64_t dumped_stall = -1;
+	while (round < 6) {
+		std::this_thread::sleep_for(std::chrono::seconds(1));
+		const auto last = g_last_progress_ms.load();
+		if (last == dumped_stall || NowMs() - last < int64_t {seconds} * 1000) continue;
+		dumped_stall = last;
+		for (int i = 0; i < 2 && round < 6; i++) {
+			if (i != 0) std::this_thread::sleep_for(std::chrono::seconds(5));
+			++round;
+			{
+				auto&            state = Get();
+				std::scoped_lock lock(state.mutex);
+				Print(state, "\nno frame presented for %d s\n",
+				      static_cast<int>((NowMs() - last) / 1000));
+			}
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		Dump(round);
+			Dump(round);
 #else
-		auto&            state = Get();
-		std::scoped_lock lock(state.mutex);
-		Print(state, "\nround %d: guest thread sampling is Windows only\n", round);
+			auto&            state = Get();
+			std::scoped_lock lock(state.mutex);
+			Print(state, "\nround %d: guest thread sampling is Windows only\n", round);
 #endif
+		}
 	}
 }
 
@@ -250,6 +274,10 @@ void Watchdog() {
 
 bool Enabled() {
 	return Seconds() > 0;
+}
+
+void Progress() {
+	if (Enabled()) g_last_progress_ms.store(NowMs(), std::memory_order_relaxed);
 }
 
 void ThreadStarted(int unique_id, const std::string& name, uint64_t host_thread_id, uint64_t stack_low,
@@ -264,7 +292,7 @@ void ThreadStarted(int unique_id, const std::string& name, uint64_t host_thread_
 		std::thread(Watchdog).detach();
 		auto&            state = Get();
 		std::scoped_lock lock(state.mutex);
-		Print(state, "KYTY_HANG_PROBE=%d: guest threads sampled after %d s, 3 rounds\n", Seconds(), Seconds());
+		Print(state, "KYTY_HANG_PROBE: guest threads sampled once no frame is presented for %d s\n", Seconds());
 		for (const auto& module: state.modules) {
 			Print(state, "module %s: 0x%016" PRIx64 " size 0x%" PRIx64 "\n", module.name.c_str(), module.base,
 			      module.size);
