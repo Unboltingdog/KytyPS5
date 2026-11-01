@@ -17,11 +17,20 @@
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <cstdlib>
 #include <utility>
 #define XXH_INLINE_ALL
 #include <xxhash.h>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+bool GpuScalarLoadsEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_GPU_SCALAR_LOADS");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
+}
 
 namespace {
 thread_local UnsupportedCompute g_unsupported_compute;
@@ -958,7 +967,10 @@ private:
 				}
 			}
 		}
-		for (auto* block: m_program.blocks) {
+		// KYTY_GPU_SCALAR_LOADS=1 (experimental): scalar loads that only feed the shader's own math
+		// and branches stay GPU loads. Flattened into dispatch constants, a value the GPU wrote
+		// earlier in the frame made the GPU thread wait for the GPU before every such dispatch.
+		for (auto* block: GpuScalarLoadsEnabled() ? decltype(m_program.blocks) {} : m_program.blocks) {
 			for (auto& inst: *block) {
 				uint32_t index = 0;
 				if (inst.GetOpcode() == ValueOpcode::LoadAddressU32 &&
