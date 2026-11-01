@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -397,6 +398,17 @@ template <typename InputInfo>
 const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputInfo& input_info,
                                               uint32_t& push_data_cursor) {
 	const auto user_data = std::span(params.user_data).first(params.user_data_count);
+	// KYTY_WAIT_STATS: reads of guest memory while resolving this shader's resources (the SRT
+	// walk and specialization reads) are counted under the shader.
+	thread_local char wait_reason[48];
+	const char*       stage_name = std::is_same_v<InputInfo, ShaderComputeInputInfo>  ? "cs"
+	                               : std::is_same_v<InputInfo, ShaderPixelInputInfo> ? "ps"
+	                                                                                  : "vs";
+	if (GpuWaitStats::Enabled()) {
+		std::snprintf(wait_reason, sizeof(wait_reason), "resources:%s:%016llx", stage_name,
+		              static_cast<unsigned long long>(params.hash));
+	}
+	GpuWaitStats::Scope wait_scope(GpuWaitStats::Enabled() ? wait_reason : GpuWaitStats::CurrentReason());
 	ShaderRecompiler::IR::SrtRuntime runtime {
 	    .user_data                  = user_data,
 	    .shader_base                = params.Base(),
