@@ -12,6 +12,8 @@
 #include <array>
 #include <bit>
 #include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <fmt/format.h>
 #include <functional>
 #include <numeric>
@@ -21,6 +23,25 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
+
+// KYTY_WAIT_STATS with KYTY_WALKER_NO_STALL: names the specialization read in progress, so a
+// read of GPU-written memory can be attributed (see SpecializationReadSite()).
+thread_local const char* t_specialization_read_site = nullptr;
+struct SiteScope {
+	explicit SiteScope(const char* site): previous(t_specialization_read_site) {
+		t_specialization_read_site = site;
+	}
+	~SiteScope() { t_specialization_read_site = previous; }
+	const char* previous;
+};
+
+} // namespace
+
+const char* SpecializationReadSite() {
+	return t_specialization_read_site != nullptr ? t_specialization_read_site : "other";
+}
+
+namespace {
 
 bool SpecializationFail(std::string_view message) {
 	if (SrtWalkerNoStallActive()) {
@@ -303,6 +324,13 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
                          std::vector<uint32_t>& keys) {
 	const auto* selector = &*indirect.selector;
 	keys.clear();
+	SiteScope site(selector->rows ? "selector-rows"
+	               : selector->bitset ? "selector-bitset"
+	               : !selector->byte_ranges.empty() ? "selector-bytes"
+	               : !indirect.selector_first.IsEmpty() ? (selector->ranks ? "selector-ranks" : "selector-range")
+	               : !indirect.selector_mask.IsEmpty() ? "selector-mask"
+	               : selector->stride == 0u ? "selector-indexed"
+	               : "selector-domain");
 	const auto read_selector = [&](uint64_t base, uint64_t size, uint64_t offset,
 	                               std::span<uint32_t> words) {
 		return selector->global ? ReadTable(base, size, offset, runtime, words)
@@ -533,6 +561,21 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		    !read_keys(material.Base48(), material.GetSize(), selector->offset, selector->stride, count)) return false;
 		if (count < domain_count) keys.push_back(0u); // An out-of-bounds scalar read returns zero.
 	}
+	// KYTY_WAIT_STATS: describe each selector once, so its key domain can be sized.
+	static const bool describe = std::getenv("KYTY_WAIT_STATS") != nullptr;
+	if (describe) {
+		static std::mutex                          mutex;
+		static std::unordered_set<const void*>     seen;
+		std::scoped_lock                           lock(mutex);
+		if (seen.insert(selector).second) {
+			std::fprintf(stderr,
+			             "selector %s: stride=%u offset=%u bit_offset=%u bit_mask=0x%x maximum=%u "
+			             "global=%d keys_read=%zu\n",
+			             t_specialization_read_site != nullptr ? t_specialization_read_site : "?",
+			             selector->stride, selector->offset, selector->bit_offset, selector->bit_mask,
+			             selector->maximum, selector->global ? 1 : 0, keys.size());
+		}
+	}
 	if (selector->byte_ranges.empty()) {
 		for (auto& key: keys) {
 			auto field = (key >> selector->bit_offset) & selector->bit_mask;
@@ -555,6 +598,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
                                    std::vector<Specialization>&  specializations,
                                    Normalize&& normalize) {
 	const auto& indirect = *program.descriptor_sources[source_index].indirect_descriptor;
+	SiteScope   site("descriptor-table");
 	const auto  descriptor_bytes = read_dwords * sizeof(uint32_t);
 	const auto& sources = indirect.sources;
 	const auto* selector = indirect.selector ? &*indirect.selector : nullptr;
