@@ -1336,6 +1336,7 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 
 bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
                                const DrawIndexArgs& args) {
+	GpuWaitStats::CpuTimer kyty_stage_timer("draw:index");
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer.IsInvalid());
@@ -1353,9 +1354,12 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		return true;
 	}
 
-	if (ConsumeMetadataColorOperation(buffer, args.render_target_slice_offset) ||
-	    DepthStencilCopy(buffer) ||
-	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
+	if ([&] {
+		    GpuWaitStats::CpuTimer timer("draw:special-ops");
+		    return ConsumeMetadataColorOperation(buffer, args.render_target_slice_offset) ||
+		           DepthStencilCopy(buffer) ||
+		           ResolveColorTargets(buffer, args.render_target_slice_offset);
+	    }()) {
 		ResetBindings();
 		return true;
 	}
@@ -1425,7 +1429,10 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndex, args.index_count,
 	                        args.instance_count, args.first_instance};
-	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+	if (![&] {
+		    GpuWaitStats::CpuTimer timer("draw:prepare-state");
+		    return PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state);
+	    }()) {
 		ResetBindings();
 		return true;
 	}
@@ -1435,6 +1442,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	const auto emit = ResolveDrawEmit(ucfg, state.vertex_info[0], args.offset_source,
 	                                  args.base_vertex, args.first_instance, args.indirect);
 	if (emit) {
+		GpuWaitStats::CpuTimer timer("draw:execute");
 		ExecutePreparedDraw(submit_id, buffer, draw, state, *emit, index_source);
 	}
 	ResetBindings();
@@ -1443,6 +1451,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args) {
+	GpuWaitStats::CpuTimer kyty_stage_timer("draw:auto");
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer.IsInvalid());
@@ -1460,9 +1469,12 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		return true;
 	}
 
-	if (ConsumeMetadataColorOperation(buffer, args.render_target_slice_offset) ||
-	    DepthStencilCopy(buffer) ||
-	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
+	if ([&] {
+		    GpuWaitStats::CpuTimer timer("draw:special-ops");
+		    return ConsumeMetadataColorOperation(buffer, args.render_target_slice_offset) ||
+		           DepthStencilCopy(buffer) ||
+		           ResolveColorTargets(buffer, args.render_target_slice_offset);
+	    }()) {
 		ResetBindings();
 		return true;
 	}
@@ -1497,7 +1509,10 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		ResetBindings();
 		return true;
 	}
-	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+	if (![&] {
+		    GpuWaitStats::CpuTimer timer("draw:prepare-state");
+		    return PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state);
+	    }()) {
 		ResetBindings();
 		return true;
 	}
@@ -1521,6 +1536,7 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	                                  static_cast<int32_t>(args.first_vertex), args.first_instance,
 	                                  args.indirect);
 	if (emit) {
+		GpuWaitStats::CpuTimer timer("draw:execute");
 		ExecutePreparedDraw(submit_id, buffer, draw, state, *emit, {});
 	}
 	ResetBindings();
