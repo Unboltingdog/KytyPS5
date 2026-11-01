@@ -9,6 +9,9 @@
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
 // Resolves native descriptor sources, plans their scalar reads, and assigns dense resource bindings.
+// KYTY_GPU_SCALAR_LOADS=1: keep scalar loads that only feed shader math and branches as GPU
+// loads instead of dispatch constants the CPU reads. Changes compiled shaders.
+bool GpuScalarLoadsEnabled();
 void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg,
                     ShaderStageInputInfo input);
 
