@@ -2,6 +2,7 @@
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_RESOURCEMATERIALIZATION_H_
 
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
+#include <string>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
@@ -63,6 +64,8 @@ bool                 LoadResourcePlan(std::span<const uint8_t> bytes, ResourcePl
 const char* SpecializationReadSite();
 // Nanoseconds spent running SRT walkers on this thread since the last call.
 uint64_t TakeWalkNanoseconds();
+// The first failure a KYTY_WALKER_NO_STALL materialization reported on this thread, then clears it.
+std::string TakeNoStallFailure();
 // KYTY_WALKER_NO_STALL: whether the read in progress may be refused when the GPU has written its
 // memory, because the caller can do without it; the reader then notes the refusal.
 bool SpecializationReadMayDefer();
