@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/gpuWaitStats.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -120,6 +121,22 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
 	return !values.empty() &&
 	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
+}
+
+// KYTY_WALKER_NO_STALL: resolve resources first without waiting for GPU-written values; when
+// that leaves something the shader needs unresolved, resolve again the usual way.
+bool MaterializeWithoutStall(const ShaderRecompiler::IR::ResourcePlan&     plan,
+                             const ShaderRecompiler::IR::SrtRuntime&       runtime,
+                             ShaderRecompiler::IR::ResourceSnapshot&       snapshot,
+                             ShaderRecompiler::IR::ResourceSpecialization& specialization) {
+	if (ShaderRecompiler::IR::SrtWalkerNoStallEnabled()) {
+		ShaderRecompiler::IR::SrtWalkerNoStallScope no_stall;
+		if (ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization)) {
+			return true;
+		}
+		GpuWaitStats::RecordEvent("rb:walker-no-stall-fallback");
+	}
+	return ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization);
 }
 
 std::vector<uint64_t> HashList(const char* variable) {
@@ -318,7 +335,7 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  uint32_t push_data_cursor) {
-	EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+	EXIT_IF(!MaterializeWithoutStall(resource_plan, runtime, resources,
 	                                                    specialization));
 	for (auto& candidate: modules) {
 		const auto& layout = candidate.info.bindings;
@@ -525,7 +542,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 		}).first;
 		auto& program = entry->second;
-		EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
+		EXIT_IF(!MaterializeWithoutStall(
 		    program.resource_plan, runtime, program.resources, program.specialization));
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
