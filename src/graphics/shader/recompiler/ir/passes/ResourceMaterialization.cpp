@@ -1481,7 +1481,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	}
 	plan.srt_reads.reserve(program.srt_reads.size());
 	for (const auto& read: program.srt_reads) {
-		plan.srt_reads.push_back({Clone(read.value), read.flat_offset});
+		plan.srt_reads.push_back({Clone(read.value), read.flat_offset, read.gpu_flag});
 	}
 	// Retain integer control expressions with opaque varying leaves. Their identities
 	// matter when an EXEC factor also guards a selected value; never clone float work.
