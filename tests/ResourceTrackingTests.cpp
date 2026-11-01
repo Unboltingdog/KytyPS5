@@ -6027,8 +6027,15 @@ void TestScalarDataReadControlFlow() {
         {address, Value(0u), Value(0u), Value(true)}, fixture.AddMemory(scalar, 4), use);
     fixture.PlanAndTrack();
     auto plan = ExtractResourcePlan(fixture.program);
-    Check(plan.srt_reads.size() == 1 && !fixture.program.info.uses_dma && plan.srt_code,
-          "scalar data lost flattening or its walker");
+    if (GpuScalarLoadsEnabled()) {
+      // KYTY_GPU_SCALAR_LOADS keeps scalar data a GPU load instead of a dispatch constant.
+      Check(plan.srt_reads.empty() && fixture.program.info.uses_dma,
+            "scalar data under KYTY_GPU_SCALAR_LOADS was not left a GPU load");
+      continue; // The rest checks the flattened value the CPU reads.
+    } else {
+      Check(plan.srt_reads.size() == 1 && !fixture.program.info.uses_dma && plan.srt_code,
+            "scalar data lost flattening or its walker");
+    }
     uint32_t reads = 0;
     std::array<uint32_t, 2> user_data {};
     SrtRuntime runtime {.user_data = user_data};
