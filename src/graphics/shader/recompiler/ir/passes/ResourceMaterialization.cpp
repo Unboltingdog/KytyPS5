@@ -39,6 +39,7 @@ struct DeferScope {
 	~DeferScope() { t_specialization_read_may_defer = previous; }
 	bool previous;
 };
+thread_local std::string t_no_stall_failure;
 // KYTY_WAIT_STATS: time spent running SRT walkers on this thread (see TakeWalkNanoseconds()).
 thread_local uint64_t t_walk_ns = 0;
 struct WalkTimer {
@@ -74,6 +75,10 @@ const char* SpecializationReadSite() {
 	return t_specialization_read_site != nullptr ? t_specialization_read_site : "other";
 }
 
+std::string TakeNoStallFailure() {
+	return std::exchange(t_no_stall_failure, {});
+}
+
 uint64_t TakeWalkNanoseconds() {
 	const auto ns = t_walk_ns;
 	t_walk_ns     = 0;
@@ -92,7 +97,9 @@ namespace {
 
 bool SpecializationFail(std::string_view message) {
 	if (SrtWalkerNoStallActive()) {
-		return false; // KYTY_WALKER_NO_STALL retries this the usual way.
+		// KYTY_WALKER_NO_STALL retries this the usual way; KYTY_WAIT_STATS names the first cause.
+		if (t_no_stall_failure.empty()) t_no_stall_failure = message;
+		return false;
 	}
 	std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
 	             static_cast<int>(message.size()), message.data());

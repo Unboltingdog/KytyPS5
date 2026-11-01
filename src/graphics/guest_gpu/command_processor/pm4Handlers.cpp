@@ -7,6 +7,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
@@ -1407,13 +1408,21 @@ KYTY_CP_OP_PARSER(CpOpCondExec) {
 			char head[96];
 			std::snprintf(head, sizeof(head), "COND_EXEC addr=0x%016llx dwords=%u ops: ",
 			              static_cast<unsigned long long>(addr), exec_count);
+			ops += "raw:";
+			for (uint32_t i = 0; i < payload_dw + exec_count && i < 64u; ++i) {
+				char word[12];
+				std::snprintf(word, sizeof(word), " %08x", buffer[i]);
+				ops += word;
+			}
 			Log::WriteToConsoleAndLog(std::string(head) + ops + "\n");
 		}
 	}
 
 	if (*reinterpret_cast<const volatile uint32_t*>(addr) == 0) {
+		if (describe) GpuWaitStats::RecordEvent("cond-exec:skipped");
 		return payload_dw + exec_count;
 	}
+	if (describe) GpuWaitStats::RecordEvent("cond-exec:executed");
 
 	return payload_dw;
 }
