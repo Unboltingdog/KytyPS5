@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/gpuCrashReport.h"
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
 
 #include "common/assert.h"
@@ -871,7 +872,10 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
 	}
-	m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+	{
+		GpuWaitStats::CpuTimer timer("draw:programs");
+		m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+	}
 	// Vertex programs beyond the host mesh limits or with unsupported call targets are not
 	// compiled.
 	if (state.vertex_info[0].stage.module == nullptr) {
@@ -1164,6 +1168,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");
 	}
+	GpuWaitStats::CpuTimer pipeline_timer("draw:pipeline+bindings");
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state);
 	vk::ImageAspectFlags feedback_aspects;
 	const auto rendering =
@@ -1198,7 +1203,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (state.ps_active && !draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
 	}
-	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+	{
+		GpuWaitStats::CpuTimer timer("draw:commit-bindings");
+		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+	}
 	if (!mesh_active) {
 		CommitIndexBuffer(vk_buffer, index_binding);
 	}
