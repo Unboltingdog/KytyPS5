@@ -84,7 +84,7 @@ void MaybePrint(State& state) {
 		std::sort(cpu.begin(), cpu.end(),
 		          [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
 		text += "  CPU time excluding GPU waits (2 s):";
-		for (size_t i = 0; i < cpu.size() && i < 20; i++) {
+		for (size_t i = 0; i < cpu.size() && i < 32; i++) {
 			char line[128];
 			std::snprintf(line, sizeof(line), " %s %.1fms x%llu;", cpu[i].first.c_str(),
 			              static_cast<double>(cpu[i].second.first) / 1e6,
@@ -192,6 +192,15 @@ void RecordSubmit() noexcept {
 void RecordWait(uint64_t nanoseconds) noexcept {
 	t_wait_ns += nanoseconds;
 	if (Enabled()) Record(0, 1, nanoseconds);
+}
+
+void RecordCpuTime(const char* name, uint64_t nanoseconds) noexcept {
+	if (!Enabled()) return;
+	auto&            state = GetState();
+	std::scoped_lock lock {state.mutex};
+	auto&            entry = state.cpu[name];
+	entry.first += nanoseconds;
+	entry.second++;
 }
 
 CpuTimer::CpuTimer(const char* name) noexcept: m_name(name), m_enabled(Enabled()) {

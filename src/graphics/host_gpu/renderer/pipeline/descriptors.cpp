@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -685,6 +686,7 @@ void RenderExecutor::ResetBindings() {
 
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
+	GpuWaitStats::CpuTimer kyty_stage_timer("bind:prepare");
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(!runtime);
 	const auto& program  = runtime.module->info;
@@ -724,6 +726,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 }
 
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
+	GpuWaitStats::CpuTimer kyty_stage_timer("bind:find-buffers");
 	KYTY_PROFILER_FUNCTION();
 	auto& cache = m_context.GetBufferCache();
 	for (auto* stage: stages) {
@@ -784,6 +787,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 }
 
 void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
+	GpuWaitStats::CpuTimer kyty_stage_timer("bind:rebind-buffers");
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program   = prepared.runtime->module->info;
@@ -820,6 +824,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 }
 
 void RenderExecutor::RebindImages(PreparedBindings& prepared) {
+	GpuWaitStats::CpuTimer kyty_stage_timer("bind:rebind-images");
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program  = prepared.runtime->module->info;
