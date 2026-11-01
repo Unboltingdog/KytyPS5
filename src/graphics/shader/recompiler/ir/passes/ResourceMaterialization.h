@@ -59,6 +59,8 @@ std::vector<uint8_t> SaveResourcePlan(const ResourcePlan& plan);
 bool                 LoadResourcePlan(std::span<const uint8_t> bytes, ResourcePlan& plan);
 
 // Refreshes cached resources and specialization in place. A failed refresh must not be used.
+// The kind of specialization read in progress on this thread, for KYTY_WAIT_STATS.
+const char* SpecializationReadSite();
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
 
