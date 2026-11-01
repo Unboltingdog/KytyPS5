@@ -117,6 +117,14 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 }
 
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
+	// KYTY_WAIT_STATS: name a read of GPU-written memory, which waits for the GPU below.
+	if (!values.empty() && GpuWaitStats::Enabled() &&
+	    !Libs::LibKernel::Memory::CanReadAroundGpuWrites(address, values.size_bytes())) {
+		const std::string site = std::string("rb:spec-read-gpu-written:") +
+		                         ShaderRecompiler::IR::SpecializationReadSite();
+		GpuWaitStats::RecordEvent(site.c_str());
+		GpuWaitStats::RecordEvent((site + ":bytes").c_str(), values.size_bytes());
+	}
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
 	return !values.empty() &&
