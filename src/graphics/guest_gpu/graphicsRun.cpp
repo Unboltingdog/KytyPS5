@@ -681,7 +681,8 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 
 		// Waits and read faults in this packet, unless tagged more precisely inside it, are
 		// counted under its opcode (KYTY_WAIT_STATS).
-		GpuWaitStats::Scope packet_reason(Pm4::OpcodeName(opcode));
+		GpuWaitStats::Scope    packet_reason(Pm4::OpcodeName(opcode));
+		GpuWaitStats::CpuTimer packet_timer(Pm4::OpcodeName(opcode));
 		const auto packet_dw =
 		    handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
 		EXIT_IF(packet_dw > remaining_dw);

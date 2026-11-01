@@ -31,7 +31,17 @@ struct State {
 	uint64_t                                       gpu_busy_ns = 0;
 	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> shaders; // ns, count
 	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> pixel_shaders; // ns, count
+	std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> cpu;          // ns, count
 };
+
+// Nanoseconds this thread has spent in blocking GPU waits, so CPU timers can exclude them.
+thread_local uint64_t t_wait_ns = 0;
+
+uint64_t NowNs() {
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                                 std::chrono::steady_clock::now().time_since_epoch())
+	                                 .count());
+}
 
 State& GetState() {
 	static State state;
@@ -67,6 +77,22 @@ void MaybePrint(State& state) {
 		text += line;
 	}
 	text += "\n";
+	if (!state.cpu.empty()) {
+		std::vector<std::pair<std::string, std::pair<uint64_t, uint64_t>>> cpu(state.cpu.begin(),
+		                                                                       state.cpu.end());
+		state.cpu.clear();
+		std::sort(cpu.begin(), cpu.end(),
+		          [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+		text += "  CPU time excluding GPU waits (2 s):";
+		for (size_t i = 0; i < cpu.size() && i < 20; i++) {
+			char line[128];
+			std::snprintf(line, sizeof(line), " %s %.1fms x%llu;", cpu[i].first.c_str(),
+			              static_cast<double>(cpu[i].second.first) / 1e6,
+			              static_cast<unsigned long long>(cpu[i].second.second));
+			text += line;
+		}
+		text += "\n";
+	}
 	if (!state.pages.empty()) {
 		std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> pages(state.pages.begin(),
 		                                                                     state.pages.end());
@@ -164,7 +190,26 @@ void RecordSubmit() noexcept {
 }
 
 void RecordWait(uint64_t nanoseconds) noexcept {
+	t_wait_ns += nanoseconds;
 	if (Enabled()) Record(0, 1, nanoseconds);
+}
+
+CpuTimer::CpuTimer(const char* name) noexcept: m_name(name), m_enabled(Enabled()) {
+	if (m_enabled) {
+		m_start      = NowNs();
+		m_wait_start = t_wait_ns;
+	}
+}
+
+CpuTimer::~CpuTimer() {
+	if (!m_enabled) return;
+	const auto elapsed = NowNs() - m_start;
+	const auto waited  = t_wait_ns - m_wait_start;
+	auto&            state = GetState();
+	std::scoped_lock lock {state.mutex};
+	auto&            entry = state.cpu[m_name];
+	entry.first += elapsed > waited ? elapsed - waited : 0;
+	entry.second++;
 }
 
 void RecordFaultPage(uint64_t page, uint64_t bytes) noexcept {

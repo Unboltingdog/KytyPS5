@@ -159,6 +159,14 @@ bool MaterializeWithoutStall(const ShaderRecompiler::IR::ResourcePlan&     plan,
 	return ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization);
 }
 
+bool MaterializeTimed(const ShaderRecompiler::IR::ResourcePlan&     plan,
+                      const ShaderRecompiler::IR::SrtRuntime&       runtime,
+                      ShaderRecompiler::IR::ResourceSnapshot&       snapshot,
+                      ShaderRecompiler::IR::ResourceSpecialization& specialization) {
+	GpuWaitStats::CpuTimer timer("program:materialize");
+	return MaterializeWithoutStall(plan, runtime, snapshot, specialization);
+}
+
 std::vector<uint64_t> HashList(const char* variable) {
 	std::vector<uint64_t> list;
 	const char*           value = std::getenv(variable);
@@ -355,7 +363,7 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  uint32_t push_data_cursor) {
-	EXIT_IF(!MaterializeWithoutStall(resource_plan, runtime, resources,
+	EXIT_IF(!MaterializeTimed(resource_plan, runtime, resources,
 	                                                    specialization));
 	for (auto& candidate: modules) {
 		const auto& layout = candidate.info.bindings;
@@ -564,7 +572,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 		}).first;
 		auto& program = entry->second;
-		EXIT_IF(!MaterializeWithoutStall(
+		EXIT_IF(!MaterializeTimed(
 		    program.resource_plan, runtime, program.resources, program.specialization));
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);

@@ -346,7 +346,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 	m_context.GetImageHeap().BeginDraw();
-	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
+	{
+		GpuWaitStats::CpuTimer timer("dispatch:program");
+		if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
+	}
 	if (use_thread_dimensions) {
 		input_info.dispatch_threads_num[0]    = thread_group_x;
 		input_info.dispatch_threads_num[1]    = thread_group_y;
@@ -383,6 +386,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	buffer.EndRendering();
+	GpuWaitStats::CpuTimer pipeline_timer("dispatch:pipeline+bindings");
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
 	PrepareBindings(input_info.stage, bindings);
@@ -403,8 +407,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	RebindBuffers(bindings);
 
 	auto              vk_buffer        = buffer.Handle();
-	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	               std::span {&descriptor_stage, 1u});
+	{
+		GpuWaitStats::CpuTimer timer("dispatch:commit-bindings");
+		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+		               std::span {&descriptor_stage, 1u});
+	}
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage);
 	has_storage_writes =

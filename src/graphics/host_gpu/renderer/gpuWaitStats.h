@@ -23,6 +23,22 @@ void               RecordFaultPage(uint64_t page, uint64_t bytes) noexcept;
 // The reason named by the innermost Scope on this thread, or nullptr.
 [[nodiscard]] const char* CurrentReason() noexcept;
 
+// Adds the CPU time spent in its lifetime, minus this thread's GPU waits, under a name
+// (KYTY_WAIT_STATS; listed as "CPU time excluding GPU waits").
+class CpuTimer {
+public:
+	explicit CpuTimer(const char* name) noexcept;
+	~CpuTimer();
+	CpuTimer(const CpuTimer&)            = delete;
+	CpuTimer& operator=(const CpuTimer&) = delete;
+
+private:
+	const char* m_name;
+	bool        m_enabled;
+	uint64_t    m_start      = 0;
+	uint64_t    m_wait_start = 0;
+};
+
 class Scope {
 public:
 	explicit Scope(const char* reason) noexcept;
