@@ -27,6 +27,28 @@ constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
 // KYTY_WAIT_STATS with KYTY_WALKER_NO_STALL: names the specialization read in progress, so a
 // read of GPU-written memory can be attributed (see SpecializationReadSite()).
 thread_local const char* t_specialization_read_site = nullptr;
+// KYTY_WALKER_NO_STALL: set while a read here may be refused instead of waiting for the GPU, and
+// when one was refused during the current materialization.
+thread_local bool t_specialization_read_may_defer = false;
+thread_local bool t_specialization_read_deferred  = false;
+struct DeferScope {
+	explicit DeferScope(bool allow): previous(t_specialization_read_may_defer) {
+		t_specialization_read_may_defer = allow;
+	}
+	~DeferScope() { t_specialization_read_may_defer = previous; }
+	bool previous;
+};
+// Above this many keys, binding every candidate costs more than waiting for the GPU.
+constexpr uint32_t MaxDeferredKeyDomain = 256u;
+
+// The selector's whole key domain after masking, or 0 when it is unbounded or too large.
+uint32_t MaskedKeyDomain(const DescriptorSource::IndirectDescriptor& indirect) {
+	if (!indirect.selector) return 0u;
+	const auto& selector = *indirect.selector;
+	if (!selector.byte_ranges.empty() || selector.bit_mask == UINT32_MAX) return 0u;
+	const auto top = std::min(selector.bit_mask, selector.maximum);
+	return top < MaxDeferredKeyDomain ? top + 1u : 0u;
+}
 struct SiteScope {
 	explicit SiteScope(const char* site): previous(t_specialization_read_site) {
 		t_specialization_read_site = site;
@@ -39,6 +61,14 @@ struct SiteScope {
 
 const char* SpecializationReadSite() {
 	return t_specialization_read_site != nullptr ? t_specialization_read_site : "other";
+}
+
+bool SpecializationReadMayDefer() {
+	return t_specialization_read_may_defer && SrtWalkerNoStallActive();
+}
+
+void NoteSpecializationReadDeferred() {
+	t_specialization_read_deferred = true;
 }
 
 namespace {
@@ -319,9 +349,30 @@ bool EvaluateIndirectCount(const ResourcePlan& program, const DescriptorSource::
 	return true;
 }
 
+bool ResolveSelectorKeysRead(const ResourcePlan& program, const DescriptorSource::IndirectDescriptor& indirect,
+                             const DescriptorValue& material_value, const SrtRuntime& runtime,
+                             std::vector<uint32_t>& keys);
+
+// KYTY_WALKER_NO_STALL: when the keys (or the workgroup count bounding them) are in GPU-written
+// memory and the masked key domain is small, every key in the domain is a candidate instead.
 bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::IndirectDescriptor& indirect,
                          const DescriptorValue& material_value, const SrtRuntime& runtime,
                          std::vector<uint32_t>& keys) {
+	const auto domain = MaskedKeyDomain(indirect);
+	{
+		DeferScope defer(domain != 0u);
+		if (ResolveSelectorKeysRead(program, indirect, material_value, runtime, keys)) return true;
+	}
+	if (domain == 0u || !t_specialization_read_deferred) return false;
+	keys.clear();
+	for (uint32_t key = 0; key < domain; ++key) keys.push_back(key);
+	if (indirect.selector->excluded) std::erase(keys, *indirect.selector->excluded);
+	return true;
+}
+
+bool ResolveSelectorKeysRead(const ResourcePlan& program, const DescriptorSource::IndirectDescriptor& indirect,
+                             const DescriptorValue& material_value, const SrtRuntime& runtime,
+                             std::vector<uint32_t>& keys) {
 	const auto* selector = &*indirect.selector;
 	keys.clear();
 	SiteScope site(selector->rows ? "selector-rows"
@@ -1621,6 +1672,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+	t_specialization_read_deferred = false;
 	for (auto& keys: program.selector_keys) keys.resolved = false;
 	if (!program.resource_tracking_complete) return false;
 	const auto uses_workgroup_count = [](const DescriptorSource& source) {
@@ -1639,12 +1691,26 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	auto observed = capture_reads ? capture.ObservedRuntime() : runtime;
 	std::array<uint32_t, 3> workgroup_counts {};
 	if (runtime.indirect_args_address != 0u) {
+		// KYTY_WALKER_NO_STALL: GPU-written dispatch arguments only bound selector keys; when
+		// every selector they bound has a small masked domain, its keys need neither.
+		bool masked = true;
+		for (uint32_t source = 0; source < program.descriptor_sources.size(); ++source) {
+			if (uses_workgroup_count(program.descriptor_sources[source]) &&
+			    MaskedKeyDomain(*program.descriptor_sources[source].indirect_descriptor) == 0u)
+				masked = false;
+		}
 		for (uint32_t source = 0; source < program.descriptor_sources.size(); ++source) {
 			if (!WalkedActive(program, source) ||
 			    !uses_workgroup_count(program.descriptor_sources[source])) continue;
-			if ((runtime.indirect_args_address & 3u) != 0u ||
-			    !ReadTable(runtime.indirect_args_address, sizeof(workgroup_counts), 0u,
-			               observed, workgroup_counts)) return false;
+			if ((runtime.indirect_args_address & 3u) != 0u) return false;
+			SiteScope  site("workgroup-counts");
+			DeferScope defer(masked);
+			if (!ReadTable(runtime.indirect_args_address, sizeof(workgroup_counts), 0u, observed,
+			               workgroup_counts)) {
+				if (!t_specialization_read_deferred) return false;
+				observed.workgroup_counts = {}; // Unknown: the masked selectors use their domain.
+				break;
+			}
 			observed.workgroup_counts = workgroup_counts;
 			break;
 		}
