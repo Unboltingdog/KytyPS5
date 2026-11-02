@@ -493,9 +493,14 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	// IMAGE_STORE addresses BASE_LEVEL; only IMAGE_STORE_MIP selects other view mips.
 	const bool single_storage_mip =
 	    storage && resource.mip_mode != ShaderRecompiler::IR::ImageMipMode::Dynamic;
+	// PPSA26344 samples 2048x2048 textures whose LAST_LEVEL (11) passes MAX_MIP (0): the view
+	// stops at the stored mips, which the sampler clamps to like the hardware does.
+	const auto view_last   = !multisampled && base_level <= max_mip && last_level > max_mip
+	                             ? max_mip
+	                             : last_level;
 	const auto view_levels = multisampled || single_storage_mip
 	                             ? 1u
-	                             : static_cast<uint32_t>(last_level - base_level) + 1u;
+	                             : static_cast<uint32_t>(view_last - base_level) + 1u;
 	auto levels =
 	    multisampled ? 1u : std::max(physical_levels, base_level + view_levels);
 	const auto tile       = descriptor.TileMode();
