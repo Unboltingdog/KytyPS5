@@ -37,7 +37,8 @@ private:
 	struct State {
 		std::mutex mutex;
 		std::chrono::steady_clock::time_point next;
-		std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> calls;
+		// Keyed by the name's address: each wrapped function's name is one static string.
+		std::unordered_map<const char*, std::pair<uint64_t, uint64_t>> calls;
 	};
 
 	[[nodiscard]] static uint64_t NowNs() {
@@ -55,7 +56,7 @@ private:
 		const auto now = std::chrono::steady_clock::now();
 		if (now < state.next) return;
 		state.next = now + std::chrono::seconds(2);
-		std::vector<std::pair<std::string, std::pair<uint64_t, uint64_t>>> rows(
+		std::vector<std::pair<const char*, std::pair<uint64_t, uint64_t>>> rows(
 		    state.calls.begin(), state.calls.end());
 		state.calls.clear();
 		std::sort(rows.begin(), rows.end(),
@@ -63,7 +64,7 @@ private:
 		std::string text = "HLE wall time (2 s):";
 		for (size_t i = 0; i < rows.size() && i < 16u; ++i) {
 			char line[160];
-			std::snprintf(line, sizeof(line), " %s %.1fms x%llu;", rows[i].first.c_str(),
+			std::snprintf(line, sizeof(line), " %s %.1fms x%llu;", rows[i].first,
 			              static_cast<double>(rows[i].second.first) / 1e6,
 			              static_cast<unsigned long long>(rows[i].second.second));
 			text += line;

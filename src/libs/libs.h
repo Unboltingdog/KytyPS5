@@ -117,7 +117,7 @@ struct TraceWrap<F, Name> {
 		} else {
 			R result = F(args...);
 			if constexpr (std::is_integral_v<R>) {
-				if (result != 0) {
+				if (result != 0 && TraceAllCalls()) {
 					PrintResult(Name.text, static_cast<int64_t>(result));
 				}
 			}
