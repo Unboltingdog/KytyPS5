@@ -355,6 +355,15 @@ bool IsRuntimeDescriptorTable(const ResourcePlan& program,
 	       table->dword_count == 4u;
 }
 
+bool ImageHeapCapable(const ResourcePlan& program, uint32_t resource_index, const SrtRuntime& runtime,
+                      bool image_resource) {
+	if (!image_resource || runtime.image_heap == nullptr ||
+	    resource_index >= program.info.images.size()) return false;
+	const auto& image = program.info.images[resource_index];
+	return image.resource_class == ImageResourceClass::Sampled &&
+	       image.mip_mode != ImageMipMode::Dynamic;
+}
+
 bool CanReadIndexedSelector(const ShaderBufferResource& material, uint32_t offset) {
 	if (material.Type() != 0u || material.SwizzleEnabled() || material.AddTid() ||
 	    material.OutOfBounds() != 0u) return false;
@@ -683,9 +692,13 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	constexpr bool sampler_resource = std::is_same_v<Specialization, ResourceSpecialization::Sampler>;
 	const bool runtime_table = sampler_resource && runtime.image_heap != nullptr &&
 	                           IsRuntimeDescriptorTable(program, indirect);
+	// A table sized by GPU-written dispatch counts skips reading them only when a resident heap
+	// can take it; enumerating its whole table instead finds incompatible candidates (PPSA26344).
+	const bool heap_table = runtime_table || ImageHeapCapable(program, resource_index, runtime,
+	                                                          image_resource);
 	const bool byte_keys = runtime_table ||
 	                       (IsBoundedDescriptorTable(program, indirect) &&
-	                        (indirect.workgroup_axis == UINT32_MAX || image_resource || sampler_resource));
+	                        (indirect.workgroup_axis == UINT32_MAX || heap_table));
 	auto* selector_keys = selector != nullptr
 	    ? &program.selector_keys[program.selector_groups[source_index]] : nullptr;
 	auto& keys = selector_keys != nullptr ? selector_keys->values : program.material_keys;
@@ -1764,12 +1777,18 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	if (runtime.indirect_args_address != 0u) {
 		const auto needs_count = [&](uint32_t source) {
 			const auto& descriptor = program.descriptor_sources[source];
-			const bool sampler_table = std::ranges::any_of(program.info.samplers,
+			const bool sampler_table = runtime.image_heap != nullptr &&
+			    std::ranges::any_of(program.info.samplers,
 			    [&](const auto& sampler) { return sampler.source == source; }) &&
 			    IsRuntimeDescriptorTable(program, *descriptor.indirect_descriptor);
-			const bool image_table = std::ranges::any_of(program.info.images,
-			    [&](const auto& image) { return image.source == source; }) &&
-			    IsBoundedDescriptorTable(program, *descriptor.indirect_descriptor);
+			bool image_table = IsBoundedDescriptorTable(program, *descriptor.indirect_descriptor);
+			bool any_image = false;
+			for (uint32_t index = 0; index < program.info.images.size() && image_table; ++index) {
+				if (program.info.images[index].source != source) continue;
+				any_image = true;
+				image_table = ImageHeapCapable(program, index, runtime, true);
+			}
+			image_table &= any_image;
 			return uses_workgroup_count(descriptor) && !sampler_table && !image_table;
 		};
 		// KYTY_WALKER_NO_STALL: GPU-written dispatch arguments only bound selector keys; when

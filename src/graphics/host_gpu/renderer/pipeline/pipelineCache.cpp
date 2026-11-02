@@ -38,9 +38,11 @@
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
+#include <mutex>
 #include <ranges>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <xxhash.h>
@@ -166,6 +168,9 @@ bool MaterializeWithoutStall(const ShaderRecompiler::IR::ResourcePlan&     plan,
 	}
 	return ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization);
 }
+
+// FindModule could not resolve the shader's resources for this dispatch or draw.
+thread_local bool t_materialize_failed = false;
 
 bool MaterializeTimed(const ShaderRecompiler::IR::ResourcePlan&     plan,
                       const ShaderRecompiler::IR::SrtRuntime&       runtime,
@@ -374,8 +379,10 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  uint32_t push_data_cursor) {
-	EXIT_IF(!MaterializeTimed(resource_plan, runtime, resources,
-	                                                    specialization));
+	if (!MaterializeTimed(resource_plan, runtime, resources, specialization)) {
+		t_materialize_failed = true;
+		return nullptr;
+	}
 	for (auto& candidate: modules) {
 		const auto& layout = candidate.info.bindings;
 		if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(
@@ -513,11 +520,29 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		module.info.bindings.AdvancePushData(push_data_cursor);
 		return &module;
 	};
+	// A compute dispatch whose resources cannot be resolved is skipped (rendering may miss its
+	// output) instead of ending the game; draws still stop here.
+	const auto materialize_failed = [&]() -> const ShaderModule* {
+		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+			static std::mutex                   mutex;
+			static std::unordered_set<uint64_t> logged;
+			std::scoped_lock                    lock(mutex);
+			if (logged.insert(params.hash).second) {
+				PipelineCacheLog("!!! COMPUTE DISPATCH SKIP !!! shader=0x{:016x}: its resources could not "
+				                 "be resolved (see the specialization failure above)",
+				                 params.hash);
+			}
+			return nullptr;
+		}
+		EXIT("shader 0x%016" PRIx64 ": resource specialization failed\n", params.hash);
+		return nullptr;
+	};
 	bool source_changed = false;
 	if (entry != m_program_cache.end()) {
 		auto& cached = entry->second;
 		if (cached.skip_dispatch) return nullptr;
 		ShaderModule* module = nullptr;
+		t_materialize_failed = false;
 		if (cached.call_source) {
 			source_changed = cached.RefreshCallSource(runtime);
 			if (!source_changed) module = cached.FindModule<true>(runtime, push_data_cursor);
@@ -525,6 +550,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 			module = cached.FindModule<false>(runtime, push_data_cursor);
 		}
 		if (module != nullptr) return bind(*module);
+		if (t_materialize_failed) return materialize_failed();
 	}
 
 	options.shader_hash     = params.hash;
@@ -583,13 +609,17 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 		}).first;
 		auto& program = entry->second;
-		EXIT_IF(!MaterializeTimed(
-		    program.resource_plan, runtime, program.resources, program.specialization));
+		if (!MaterializeTimed(program.resource_plan, runtime, program.resources,
+		                      program.specialization)) {
+			return materialize_failed();
+		}
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+		t_materialize_failed = false;
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data_cursor)) {
 			return bind(*module);
 		}
+		if (t_materialize_failed) return materialize_failed();
 	}
 	return bind(CompileModule(entry->second, entry->first, options, std::move(translated),
 	                          push_data_cursor));
