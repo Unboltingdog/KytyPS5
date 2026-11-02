@@ -850,8 +850,12 @@ static uint64_t FindGuestFreeRange(uint64_t search_addr, uint64_t size, uint64_t
 }
 
 bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
-	return g_guest_address_space != nullptr &&
-	       g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	const bool written = g_guest_address_space != nullptr &&
+	                     g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	if (written) {
+		Graphics::TraceStallCounterWrite(-1, "hle-backing", 0, vaddr, data, size);
+	}
+	return written;
 }
 
 bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
@@ -901,6 +905,7 @@ void InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (size == 0) {
 		return;
 	}
+	Graphics::TraceStallCounterWrite(-1, "memory-invalidate", 0, vaddr, nullptr, size);
 	(void)GetGpuResources().InvalidateMemory(vaddr, size);
 }
 

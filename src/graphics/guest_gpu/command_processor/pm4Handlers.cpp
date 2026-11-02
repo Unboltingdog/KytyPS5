@@ -1572,7 +1572,7 @@ KYTY_CP_OP_PARSER(CpOpCopyData) {
 	}
 
 	cp.DmaData(0, CopyDataDstToDma(dst_sel), dst_cache, dst, dma_src, src_cache, src, num_bytes, 1,
-	           write_confirm, 1);
+	           write_confirm, 1, "COPY_DATA");
 
 	return 5;
 }

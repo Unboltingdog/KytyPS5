@@ -21,6 +21,10 @@ namespace Libs::Graphics {
 
 class RenderContext;
 
+[[nodiscard]] bool StallCounterTraceEnabled();
+void TraceStallCounterWrite(int queue_id, const char* kind, uint64_t submit_id, uint64_t address,
+                            const void* data, uint64_t size);
+
 class GuestGpu final {
 public:
 	explicit GuestGpu(RenderContext& renderer);

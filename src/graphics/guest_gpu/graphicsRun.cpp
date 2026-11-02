@@ -27,7 +27,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -45,6 +47,46 @@ static thread_local GuestGpu*         g_gpu_state         = nullptr;
 static bool GraphicsRunDebugDumpEnabled() {
 	return Config::GraphicsDebugDumpEnabled() &&
 	       Config::GetPrintfDirection() != Config::LogDirection::Silent;
+}
+
+bool StallCounterTraceEnabled() {
+	return GpuWaitStats::Enabled();
+}
+
+void TraceStallCounterWrite(int queue_id, const char* kind, uint64_t submit_id, uint64_t address,
+                            const void* data, uint64_t size) {
+	constexpr uint64_t begin_label = 0x2000008000ull;
+	constexpr uint64_t end_label   = 0x2000008400ull;
+	if (!StallCounterTraceEnabled() || size == 0 || address > UINT64_MAX - size) {
+		return;
+	}
+	const auto begin = std::max(address, begin_label);
+	const auto end   = std::min(address + size, end_label);
+	if (begin >= end) {
+		return;
+	}
+	const auto time_us = static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::microseconds>(
+	        std::chrono::steady_clock::now().time_since_epoch())
+	        .count());
+	if (data == nullptr) {
+		LOGF("cp-counter-write time_us=%" PRIu64 " queue=%d submit=%" PRIu64
+		     " kind=%s dst=0x%016" PRIx64 " size=%" PRIu64 " value=unknown thread=%d\n",
+		     time_us, queue_id, submit_id, kind, begin, end - begin,
+		     Common::Thread::GetThreadIdUnique());
+		return;
+	}
+	for (auto current = begin; current < end;) {
+		const auto bytes = std::min<uint64_t>(sizeof(uint32_t), end - current);
+		uint32_t   value = 0;
+		std::memcpy(&value, static_cast<const uint8_t*>(data) + (current - address), bytes);
+		LOGF("cp-counter-write time_us=%" PRIu64 " queue=%d submit=%" PRIu64
+		     " kind=%s dst=0x%016" PRIx64 " value=0x%08" PRIx32 " size=%" PRIu64
+		     " thread=%d\n",
+		     time_us, queue_id, submit_id, kind, current, value, bytes,
+		     Common::Thread::GetThreadIdUnique());
+		current += bytes;
+	}
 }
 
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
@@ -330,6 +372,8 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	auto* output = static_cast<volatile uint32_t*>(dst);
 	for (uint32_t i = 0; i < dw_num; i++) {
 		*output = src[i];
+		TraceStallCounterWrite(m_interrupt_event_id, "WRITE_DATA", m_submit_id,
+		                       reinterpret_cast<uint64_t>(output), src + i, sizeof(uint32_t));
 		output += !write_one_address;
 	}
 }
@@ -342,6 +386,8 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 	}
 	const auto value = Sync::ReadReferenceClock();
 	std::memcpy(reinterpret_cast<void*>(dst_address), &value, num_bytes);
+	TraceStallCounterWrite(m_interrupt_event_id, "COPY_DATA_CLOCK", m_submit_id, dst_address,
+	                       &value, num_bytes);
 	static std::atomic<uint32_t> clock_log_count {0};
 	if (clock_log_count.fetch_add(1) < 64) {
 		LOGF("\t copy_data reference clock: dst=0x%016" PRIx64 " value=0x%016" PRIx64
@@ -355,7 +401,7 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
                                uint8_t  src_cache_policy,
                                uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes,
                                uint8_t wait_for_previous, uint8_t write_confirm,
-                               uint8_t block_engine) {
+                               uint8_t block_engine, const char* trace_kind) {
 	EXIT_NOT_IMPLEMENTED(engine > 1);
 	if (num_bytes == 0) {
 		return;
@@ -389,9 +435,14 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 	}
 	auto& buffer_cache = m_renderer.GetBufferCache();
 	if (src_sel == 2) {
-		buffer_cache.FillBuffer(
-		    dst_address_or_offset, num_bytes,
-		    static_cast<uint32_t>(src_address_or_offset_or_immediate & 0xffffffffu), dst_gds);
+		const auto value =
+		    static_cast<uint32_t>(src_address_or_offset_or_immediate & 0xffffffffu);
+		buffer_cache.FillBuffer(dst_address_or_offset, num_bytes, value, dst_gds);
+		for (uint64_t offset = 0; offset < num_bytes; offset += sizeof(uint32_t)) {
+			TraceStallCounterWrite(m_interrupt_event_id, trace_kind, m_submit_id,
+			                       dst_address_or_offset + offset, &value,
+			                       std::min<uint64_t>(sizeof(value), num_bytes - offset));
+		}
 		return;
 	}
 	bool src_gds = false;
@@ -403,6 +454,28 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 	}
 	buffer_cache.CopyBuffer(dst_address_or_offset, src_address_or_offset_or_immediate, num_bytes,
 	                        dst_gds, src_gds);
+	constexpr uint64_t label_begin = 0x2000008000ull;
+	constexpr uint64_t label_end   = 0x2000008400ull;
+	if (StallCounterTraceEnabled() && dst_address_or_offset < label_end &&
+	    dst_address_or_offset <= UINT64_MAX - num_bytes &&
+	    dst_address_or_offset + num_bytes > label_begin) {
+		const auto sample_begin = std::max(dst_address_or_offset, label_begin);
+		const auto sample_size =
+		    std::min(dst_address_or_offset + num_bytes, label_end) - sample_begin;
+		buffer_cache.SampleMemoryAsync(
+		    sample_begin, sample_size,
+		    [queue = m_interrupt_event_id, submit = m_submit_id, trace_kind, sample_begin,
+		     sample_size] {
+			    std::vector<uint8_t> values(sample_size);
+			    if (LibKernel::Memory::TryReadBacking(sample_begin, values.data(), values.size())) {
+				    TraceStallCounterWrite(queue, trace_kind, submit, sample_begin, values.data(),
+				                           values.size());
+			    } else {
+				    TraceStallCounterWrite(queue, trace_kind, submit, sample_begin, nullptr,
+				                           sample_size);
+			    }
+		    });
+	}
 }
 
 void GuestGpu::Enqueue(Submission submission) {
@@ -1049,6 +1122,8 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 		    !LibKernel::Memory::TryWriteBacking(vaddr, value, size)) {
 			std::memcpy(address, value, size);
 		}
+		TraceStallCounterWrite(m_interrupt_event_id, "RELEASE_MEM", m_submit_id, vaddr, value,
+		                       size);
 	};
 	// KYTY_DEFERRED_LABELS=1 (experiment, Unboltingdog fork): write kImmediate labels when the GPU
 	// finishes the work before them, as the hardware does, instead of while recording it. A guest
@@ -1059,12 +1134,14 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 		m_renderer.GetBufferCache().IssueProactiveReadbacks();
 		const auto vaddr = reinterpret_cast<uint64_t>(address);
 		const auto size  = data_sel == 1 ? sizeof(uint32_t) : sizeof(uint64_t);
-		GetScheduler().DeferPriorityOperation([vaddr, size, data] {
-			if (!GuestRange {vaddr, size}.Valid() ||
-			    !LibKernel::Memory::TryWriteBacking(vaddr, &data, size)) {
-				std::memcpy(reinterpret_cast<void*>(vaddr), &data, size);
-			}
-		});
+		GetScheduler().DeferPriorityOperation(
+		    [vaddr, size, data, queue = m_interrupt_event_id, submit = m_submit_id] {
+			    if (!GuestRange {vaddr, size}.Valid() ||
+			        !LibKernel::Memory::TryWriteBacking(vaddr, &data, size)) {
+				    std::memcpy(reinterpret_cast<void*>(vaddr), &data, size);
+			    }
+			    TraceStallCounterWrite(queue, "RELEASE_MEM", submit, vaddr, &data, size);
+		    });
 		data_sel = 0;
 	}
 	// EndOfPipeData: kNone, kImmediate32b, kImmediate64b, kRefClk; 5 reads GDS.
@@ -1083,6 +1160,9 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 			const auto gds = static_cast<uint32_t>(data);
 			Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(),
 			              static_cast<uint32_t*>(address), gds & 0xffffu, gds >> 16u);
+			TraceStallCounterWrite(m_interrupt_event_id, "RELEASE_MEM_GDS", m_submit_id,
+			                       reinterpret_cast<uint64_t>(address), address,
+			                       static_cast<uint64_t>(gds >> 16u) * sizeof(uint32_t));
 			break;
 		}
 		default: EXIT("unknown release_mem data selector: %" PRIu32 "\n", data_sel);
@@ -1149,6 +1229,8 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 			}
 			if (auto& queries = m_renderer.GetOcclusionQueries(); queries.Enabled()) {
 				queries.Dump(event_address);
+				TraceStallCounterWrite(m_interrupt_event_id, "EVENT_WRITE_EOP", m_submit_id,
+				                       event_address, nullptr, 16u * 2u * sizeof(uint64_t));
 				break;
 			}
 			static std::once_flag warning_once;
@@ -1166,6 +1248,9 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 			const auto         value        = ready_bit | m_synthetic_occlusion_counter;
 			for (uint32_t db = 0; db < 16u; db++) {
 				results[db * 2u] = value;
+				TraceStallCounterWrite(m_interrupt_event_id, "EVENT_WRITE_EOP", m_submit_id,
+				                       event_address + db * 2u * sizeof(uint64_t), &value,
+				                       sizeof(value));
 			}
 			m_synthetic_occlusion_counter = (m_synthetic_occlusion_counter + 1u) & counter_mask;
 			break;

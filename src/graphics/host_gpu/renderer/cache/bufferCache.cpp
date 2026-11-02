@@ -248,6 +248,18 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	return true;
 }
 
+void BufferCache::SampleMemoryAsync(uint64_t vaddr, uint64_t size,
+                                    Common::UniqueFunction<void>&& completion) {
+	EXIT_IF(!completion);
+	if (size != 0) {
+		const auto id = FindBuffer(vaddr, size);
+		if (!IsBufferInvalid(id)) {
+			(void)DownloadBufferMemory<true>(m_slot_buffers[id], vaddr, size);
+		}
+	}
+	m_scheduler.DeferPriorityOperation(std::move(completion));
+}
+
 BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
                          PageManager& page_manager, TextureCache& texture_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_fault_manager(graphics, scheduler, *this),
