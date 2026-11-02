@@ -520,21 +520,21 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		module.info.bindings.AdvancePushData(push_data_cursor);
 		return &module;
 	};
-	// A compute dispatch whose resources cannot be resolved is skipped (rendering may miss its
-	// output) instead of ending the game; draws still stop here.
+	// A draw or dispatch whose resources cannot be resolved is skipped (rendering may miss its
+	// output) instead of ending the game.
 	const auto materialize_failed = [&]() -> const ShaderModule* {
-		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
-			static std::mutex                   mutex;
-			static std::unordered_set<uint64_t> logged;
-			std::scoped_lock                    lock(mutex);
-			if (logged.insert(params.hash).second) {
+		static std::mutex                   mutex;
+		static std::unordered_set<uint64_t> logged;
+		std::scoped_lock                    lock(mutex);
+		if (logged.insert(params.hash).second) {
+			if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 				PipelineCacheLog("!!! COMPUTE DISPATCH SKIP !!! shader=0x{:016x}: its resources could not "
-				                 "be resolved (see the specialization failure above)",
-				                 params.hash);
+				                 "be resolved (see the specialization failure above)", params.hash);
+			} else {
+				PipelineCacheLog("!!! GRAPHICS DRAW SKIP !!! shader=0x{:016x}: its resources could not "
+				                 "be resolved (see the specialization failure above)", params.hash);
 			}
-			return nullptr;
 		}
-		EXIT("shader 0x%016" PRIx64 ": resource specialization failed\n", params.hash);
 		return nullptr;
 	};
 	bool source_changed = false;
@@ -1020,8 +1020,9 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	uint32_t push_data_cursor = ShaderRecompiler::IR::PushData::GraphicsDrawDwords(
 	    mesh_active, object_primitive_id, last_stage.user_clip_planes);
 	if (pixel_active) {
-		const auto& pixel_module = *GetProgram(pixel_params, pixel_info, push_data_cursor);
-		for (const auto& output: pixel_module.info.info.outputs) {
+		const auto* pixel_module = GetProgram(pixel_params, pixel_info, push_data_cursor);
+		if (pixel_module == nullptr) return;
+		for (const auto& output: pixel_module->info.info.outputs) {
 			if (output.kind == ShaderRecompiler::IR::StageOutputKind::Mrt ||
 			    output.kind == ShaderRecompiler::IR::StageOutputKind::ObjectPrimitiveId) {
 				state.mrt_mask |= 1u << output.location;
@@ -1030,7 +1031,7 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 		state.mrt_mask &= color_output_mask;
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
-		GetProgram(vertex_params[i], vertex_info[i], push_data_cursor);
+		if (GetProgram(vertex_params[i], vertex_info[i], push_data_cursor) == nullptr) return;
 	}
 }
 
