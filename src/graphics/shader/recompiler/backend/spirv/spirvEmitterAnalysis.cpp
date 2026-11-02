@@ -187,9 +187,16 @@ uint32_t LoadSamplerDescriptor(EmitterState& state, uint32_t sampler, uint32_t a
 		ExitDescriptorBindingFailure(state, IR::DescriptorBindingKind::Samplers, sampler,
 		                             "sampler resource index is out of range");
 	}
+	const auto& samplers = state.program.info.samplers;
+	const auto& info = samplers[sampler];
+	const auto variable = info.heap ? state.heap_sampler_variable : state.sampler_variable;
+	const auto local = static_cast<uint32_t>(std::ranges::count_if(
+	    samplers.begin(), samplers.begin() + sampler, [](const auto& candidate) {
+		    return !candidate.heap;
+	    }));
 	const auto pointer = DescriptorElementPointer(
-	    state, state.sampler_pointer_type, state.sampler_variable,
-	    array_index == 0u ? ConstantU32(state, sampler) : array_index,
+	    state, state.sampler_pointer_type, variable,
+	    array_index == 0u ? ConstantU32(state, local) : array_index,
 	    IR::DescriptorBindingKind::Samplers, sampler, "sampler descriptor array was not emitted");
 	const auto sampler_id = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpLoad, state.sampler_type, sampler_id, pointer);

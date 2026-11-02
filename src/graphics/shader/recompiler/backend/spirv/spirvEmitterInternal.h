@@ -136,6 +136,7 @@ struct EmitterState {
 	std::array<ImageDefinition, IR::ImageBindingCount> images {};
 	std::array<ImageDefinition, IR::ImageBindingCount> heap_images {};
 	uint32_t                   sampler_variable                      = 0;
+	uint32_t                   heap_sampler_variable                 = 0;
 	uint32_t                   sampler_type                          = 0;
 	uint32_t                   sampler_pointer_type                  = 0;
 	uint32_t                   main_func                             = 0;

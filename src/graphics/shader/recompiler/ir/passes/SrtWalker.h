@@ -10,16 +10,17 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 
 using SrtMemoryReader = bool (*)(void* userdata, uint64_t address, std::span<uint32_t> values);
 
-// Image descriptors at base + first + k * step, k < count, within size bytes that a sampled
-// root selects by GPU-computed byte offset. The host keeps them resident instead of
+// Image or sampler descriptors at base + first + k * step, k < count, within size bytes that a
+// sampled root selects by GPU-computed byte offset. The host keeps them resident instead of
 // materializing them.
 struct ImageHeapRequest {
-	uint64_t             base  = 0;
-	uint64_t             size  = 0;
-	uint64_t             step  = 0;
-	uint64_t             first = 0;
-	uint64_t             count = 0;
-	const ImageResource* root  = nullptr;
+	uint64_t              base  = 0;
+	uint64_t              size  = 0;
+	uint64_t              step  = 0;
+	uint64_t              first = 0;
+	uint64_t              count = 0;
+	const ImageResource*  root  = nullptr;
+	const SamplerResource* sampler_root = nullptr;
 };
 
 struct ImageHeapView {

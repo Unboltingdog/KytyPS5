@@ -857,17 +857,36 @@ std::array<ImageSampler, 2> LoadImageSamplers(ValueEmitContext& ctx, const IR::I
 			index = static_cast<uint32_t>(found - samplers.begin());
 		}
 		uint32_t array_index = 0;
-		const auto& candidates = samplers[index].indirect_resources;
-		if (!candidates.empty()) {
+		if (samplers[index].heap) {
 			const auto* handle = inst.Arg(1).ResolveInstruction();
-			if (handle == nullptr || handle->GetOpcode() != IR::ValueOpcode::GetSamplerResource)
-				ctx.Fail(inst, "has invalid finite sampler key provenance");
-			auto selected = ctx.Def(handle->Arg(0));
-			if (samplers[index].indirect_root != IR::SamplerResource::NoIndirectSampler)
-				selected = EmitIndirectResourceIndex(state, selected,
-				    samplers[index].indirect_mapping_offset,
-				    samplers[index].indirect_search_iterations, 0u);
-			array_index = SamplerArrayIndex(state, selected, candidates);
+			if (handle == nullptr || handle->GetOpcode() != IR::ValueOpcode::GetSamplerResource ||
+			    handle->NumArgs() == 0u)
+				ctx.Fail(inst, "has invalid sampler heap key provenance");
+			const auto entry = EmitImageHeapEntry(
+			    state, ctx.Def(handle->Arg(0)), samplers[index].indirect_mapping_offset);
+			array_index = Binary(state, spv::OpIAdd, TypeU32(state), entry,
+			                     ConstantU32(state, integer ? 1u : 0u));
+		} else {
+			const auto& candidates = samplers[index].indirect_resources;
+			if (!candidates.empty()) {
+				const auto* handle = inst.Arg(1).ResolveInstruction();
+				if (handle == nullptr || handle->GetOpcode() != IR::ValueOpcode::GetSamplerResource)
+					ctx.Fail(inst, "has invalid finite sampler key provenance");
+				auto selected = ctx.Def(handle->Arg(0));
+				if (samplers[index].indirect_root != IR::SamplerResource::NoIndirectSampler)
+					selected = EmitIndirectResourceIndex(state, selected,
+					    samplers[index].indirect_mapping_offset,
+					    samplers[index].indirect_search_iterations, 0u);
+				std::vector<uint32_t> bindings;
+				bindings.reserve(candidates.size());
+				for (const auto candidate: candidates) {
+					bindings.push_back(static_cast<uint32_t>(std::ranges::count_if(
+					    samplers.begin(), samplers.begin() + candidate, [](const auto& sampler) {
+						    return !sampler.heap;
+					    })));
+				}
+				array_index = SamplerArrayIndex(state, selected, bindings);
+			}
 		}
 		sampler = {LoadSamplerDescriptor(state, index, array_index), array_index != 0u};
 	};
@@ -914,14 +933,16 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 	}
 	if (op == IR::ValueOpcode::ImageQueryLod) {
 		state.builder.RequireCapability(spv::CapabilityImageQuery);
-		const auto sampler = LoadSamplerDescriptor(state, mem.sampler);
+		const auto samplers = LoadImageSamplers(ctx, inst);
 		const auto lod = EmitImageAccess(ctx, inst, TypeF32Vector(state, 2),
 		    [&](uint32_t resource, uint32_t array_index) {
 			    const auto& candidate = state.program.info.images[resource];
+			    const auto& sampler = samplers[candidate.numeric_class !=
+			                                   Prospero::TextureNumericClass::Float];
 			    const auto query = state.builder.AllocateId();
 			    state.builder.AddFunction(
 			        spv::OpImageQueryLod, TypeF32Vector(state, 2), query,
-			        MakeSampledImage(state, resource, sampler, 0u, array_index),
+			        MakeSampledImage(state, resource, sampler.id, 0u, array_index, sampler.dynamic),
 			        CoordF32(ctx, mem, *address, 0,
 			                 ImageDimensionInfoFor(candidate.dimension).spatial_components,
 			                 candidate.cube));

@@ -225,6 +225,7 @@ struct SamplerResource {
 	bool     depth_compare         = false;
 	bool     integer_border        = false;
 	bool     gather_lod            = false;
+	bool     heap                  = false; // Resident sampler heap root.
 
 	bool operator==(const SamplerResource& other) const = default;
 };
@@ -362,12 +363,15 @@ inline constexpr uint32_t FirstImageBinding           = 1u;
 inline constexpr uint32_t FirstComparisonImageBinding = 22u;
 inline constexpr uint32_t FirstStorageImageBinding    = 29u;
 inline constexpr uint32_t ImageBindingCount           = 50u;
-// Resident image heaps share one sampled-image array at binding 0 of this set. A heap slot
-// word is kind << ImageHeapKindShift | element; element 0 is the null descriptor.
+// Resident image and sampler heaps share bindings 0 and 1 of this set. An image heap slot word
+// is kind << ImageHeapKindShift | element; element 0 is the null descriptor. Sampler elements
+// reserve adjacent float and integer variants after SamplerHeapBase.
 inline constexpr uint32_t ImageHeapSet                = 1u;
 // PPSA26344 keeps more than 65536 images resident while loading its world.
 inline constexpr uint32_t ImageHeapCapacity           = 262144u;
 inline constexpr uint32_t ImageHeapKindShift          = 20u;
+inline constexpr uint32_t SamplerHeapBase             = ImageHeapCapacity;
+inline constexpr uint32_t SamplerHeapCapacity         = 1024u;
 
 enum class DescriptorBindingKind : uint32_t {
 	Buffers  = 0u,

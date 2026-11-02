@@ -712,6 +712,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	}
 	prepared.samplers.reserve(program.info.samplers.size());
 	for (uint32_t i = 0; i < program.info.samplers.size(); i++) {
+		if (program.info.samplers[i].heap) continue;
 		prepared.samplers.push_back(NativeSampler(
 		    m_context, program, i, snapshot.samplers[program.info.samplers[i].snapshot_index]));
 	}

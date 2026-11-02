@@ -451,18 +451,21 @@ void TestInvariantIndirectImageMaterialization(bool nested) {
              "a descriptor read sharing its memory index entered the table plan");
 }
 
+struct FakeImageHeap final : ImageHeapSource {
+  bool accept = true;
+  std::vector<DescriptorValue> kinds;
+  std::vector<ImageHeapRequest> requests;
+  std::vector<SamplerResource> sampler_roots;
+  bool Acquire(const ImageHeapRequest &request, ImageHeapView &view) override {
+    requests.push_back(request);
+    if (request.sampler_root != nullptr) sampler_roots.push_back(*request.sampler_root);
+    if (!accept) return false;
+    view = {.slots = 0x123456789abcull, .slot_count = 36u, .kinds = kinds};
+    return true;
+  }
+};
+
 void TestResidentImageHeap() {
-  struct FakeImageHeap final : ImageHeapSource {
-    bool accept = true;
-    std::vector<DescriptorValue> kinds;
-    std::vector<ImageHeapRequest> requests;
-    bool Acquire(const ImageHeapRequest &request, ImageHeapView &view) override {
-      requests.push_back(request);
-      if (!accept) return false;
-      view = {.slots = 0x123456789abcull, .slot_count = 36u, .kinds = kinds};
-      return true;
-    }
-  };
   auto fixture = MakeIndirectImageFixture(false, 48u, 0u, 16u);
   fixture->PlanAndTrack();
   const auto plan = ExtractResourcePlan(fixture->program);
@@ -528,6 +531,130 @@ void TestResidentImageHeap() {
             snapshot.images.size() == 2u && !specialization.images[0].heap &&
             snapshot.images[1].dwords == descriptor,
         "a declined heap was not materialized entry by entry");
+}
+
+void TestResidentSamplerHeap() {
+  auto fixture = MakeIndirectImageFixture(false, 48u, 0u, 16u);
+  Inst *image_handle = nullptr;
+  Inst *sampler_handle = nullptr;
+  for (auto &inst : *fixture->block) {
+    if (inst.GetOpcode() == ValueOpcode::GetImageResource) image_handle = &inst;
+    if (inst.GetOpcode() == ValueOpcode::GetSamplerResource) sampler_handle = &inst;
+  }
+  Check(image_handle != nullptr && sampler_handle != nullptr,
+        "indirect sampler fixture lost its resource handles");
+  for (uint32_t word = 0; word < 4u; ++word)
+    sampler_handle->SetArg(word, image_handle->Arg(word));
+  for (uint32_t word = 0; word < 8u; ++word) image_handle->SetArg(word, Value(0u));
+  std::array<Value, 8> integer_words{
+      Value(0x20u),
+      Value(static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32UInt) << 20u),
+      Value(3u | (3u << 14u)),
+      Value(Libs::Graphics::DstSel(4, 5, 6, 7) |
+            (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u)),
+      Value(0u), Value(0u), Value(0u), Value(0u)};
+  const auto integer_image = fixture->Image(integer_words, 0x10f0);
+  MemoryInfo integer_sample;
+  integer_sample.kind = ResourceKind::Image;
+  integer_sample.image_dimension = Decoder::ImageDimension::Dim2D;
+  fixture->Emit(ValueOpcode::ImageSampleRaw,
+                {integer_image, Value(sampler_handle), fixture->ImageAddress(), Value(true)},
+                fixture->AddMemory(integer_sample, 0x10f0));
+  fixture->PlanAndTrack();
+  const auto plan = ExtractResourcePlan(fixture->program);
+  Check(plan.resource_tracking_complete,
+        fmt::format("resident sampler fixture lost its plan: tracked={} address_writes={} sources={}",
+                    fixture->program.resource_tracking_complete,
+                    fixture->program.has_address_writes, plan.descriptor_sources.size())
+            .c_str());
+  std::array<uint32_t, 8> descriptor{};
+  descriptor[0] = 0x20u;
+  descriptor[1] = static_cast<uint32_t>(
+      Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+  descriptor[2] = 3u | (3u << 14u);
+  descriptor[3] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+      (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  auto integer = descriptor;
+  integer[1] = static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32UInt) << 20u;
+  std::array<uint32_t, 16> data{0x3000u, 4u << 16u, 0x100000u, 0u,
+                                0x2000u, 48u << 16u, 3u, 0u};
+  std::copy_n(data.begin(), 4u, data.begin() + 12u);
+  LinearTestMemory memory;
+  memory.fail_address = 0x3000u;
+  FakeImageHeap heap;
+  heap.kinds = {{descriptor, 8u}, {integer, 8u}};
+  SrtRuntime runtime{.user_data = data, .userdata = &memory,
+                     .read_specialization_memory = ReadLinearTestMemory, .image_heap = &heap};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  const bool materialized = MaterializeResources(plan, runtime, snapshot, specialization);
+  Check(heap.requests.size() == 1u && heap.requests[0].root == nullptr &&
+            heap.sampler_roots.size() == 1u &&
+            heap.sampler_roots[0] == plan.info.samplers[0],
+        fmt::format("resident sampler table did not acquire its sampler root: requests={} roots={} "
+                    "materialized={}", heap.requests.size(), heap.sampler_roots.size(), materialized)
+            .c_str());
+  Check(materialized, "resident sampler table failed to materialize");
+  Check(snapshot.samplers.size() == 1u && specialization.samplers[0].heap &&
+            specialization.samplers[0].indirect_root == 0u,
+        "resident sampler table fell back to finite descriptors");
+  Check(memory.reads == 0u, "resident sampler table read its GPU key");
+  const auto mapping = specialization.samplers[0].indirect_mapping_offset;
+  Check(snapshot.flattened_srt.size() == mapping + 3u &&
+            snapshot.flattened_srt[mapping] == 36u &&
+            snapshot.flattened_srt[mapping + 1u] == 0x56789abcu &&
+            snapshot.flattened_srt[mapping + 2u] == 0x1234u,
+        "resident sampler table lost its device slot mapping");
+  heap.accept = false;
+  memory.fail_address = UINT64_MAX;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization) &&
+            !specialization.samplers[0].heap,
+        "declined sampler table retained a stale heap binding");
+  heap.accept = true;
+  memory.fail_address = 0x3000u;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            specialization.samplers[0].heap,
+        "reacquired sampler table did not restore its heap binding");
+  ApplyResourceSpecialization(fixture->program, specialization);
+  ShaderComputeInputInfo compute{};
+  CollectShaderInfo(fixture->program, {.compute = &compute});
+  const auto &samplers = fixture->program.info.samplers;
+  Check(samplers.size() == 2u && samplers[0].heap && samplers[1].heap &&
+            samplers[0].snapshot_index == 0u && samplers[1].snapshot_index == 0u &&
+            !samplers[0].integer_border && samplers[1].integer_border &&
+            samplers[1].force_point_filtering && fixture->program.info.uses_image_heap &&
+            fixture->program.info.uses_flattened_srt,
+        "runtime sampler variants lost their heap identity or numeric-class filtering");
+}
+
+void TestWorkgroupImageHeapSkipsCounts() {
+  auto fixture = MakeIndirectImageFixture(false, 48u, 0u, 16u);
+  fixture->PlanAndTrack();
+  auto plan = ExtractResourcePlan(fixture->program);
+  auto &indirect = *plan.descriptor_sources[plan.info.images[0].source].indirect_descriptor;
+  indirect.workgroup_axis = 0u;
+  std::array<uint32_t, 8> descriptor{};
+  descriptor[0] = 0x20u;
+  descriptor[1] = static_cast<uint32_t>(
+      Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+  descriptor[2] = 3u | (3u << 14u);
+  descriptor[3] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+      (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  std::array<uint32_t, 16> data{0x3000u, 4u << 16u, 0x100000u, 0u,
+                                0x2000u, 48u << 16u, 3u, 0u};
+  std::copy_n(data.begin(), 4u, data.begin() + 12u);
+  LinearTestMemory memory;
+  memory.fail_address = memory.base;
+  FakeImageHeap heap;
+  heap.kinds = {{descriptor, 8u}};
+  SrtRuntime runtime{.user_data = data, .userdata = &memory,
+                     .read_specialization_memory = ReadLinearTestMemory,
+                     .indirect_args_address = memory.base, .image_heap = &heap};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            specialization.images[0].heap && memory.reads == 0u,
+        "workgroup-sized runtime image table read indirect dispatch counts");
 }
 
 void TestImageHeapKinds() {
@@ -9035,6 +9162,8 @@ int main() {
     Run("invariant indirect images", [] { TestInvariantIndirectImageMaterialization(true); });
     Run("unbounded material image keys", [] { TestInvariantIndirectImageMaterialization(false); });
     Run("resident image heap", TestResidentImageHeap);
+    Run("resident sampler heap", TestResidentSamplerHeap);
+    Run("workgroup image heap counts", TestWorkgroupImageHeapSkipsCounts);
     Run("image heap kinds", TestImageHeapKinds);
     Run("bounded image view eligibility", TestBoundedImageViewEligibility);
     Run("exact unfiltered image candidates", TestExactUnfilteredImageCandidates);

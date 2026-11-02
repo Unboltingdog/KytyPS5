@@ -246,7 +246,24 @@ void DefineDescriptors(EmitterState& state) {
 		if (count == 0) image_types[IR::ImageBindingIndex(*kind)] = &image;
 		count += image.mip_count;
 	}
-	counts[static_cast<size_t>(Kind::Samplers)] = static_cast<uint32_t>(info.samplers.size());
+	const bool uses_sampler_heap = std::ranges::any_of(info.samplers, &IR::SamplerResource::heap);
+	counts[static_cast<size_t>(Kind::Samplers)] = static_cast<uint32_t>(
+	    std::ranges::count_if(info.samplers, [](const auto& sampler) { return !sampler.heap; }));
+	if (uses_sampler_heap) {
+		state.sampler_type = state.builder.Type(spv::OpTypeSampler);
+		state.sampler_pointer_type = TypePointer(
+		    state, spv::StorageClassUniformConstant, state.sampler_type);
+		const auto array = state.builder.Type(
+		    spv::OpTypeArray, state.sampler_type, ConstantU32(state, IR::SamplerHeapCapacity));
+		state.heap_sampler_variable = state.builder.DefineGlobalVariable(
+		    TypePointer(state, spv::StorageClassUniformConstant, array),
+		    spv::StorageClassUniformConstant);
+		state.builder.AddName(state.heap_sampler_variable, "sampler_heap");
+		state.builder.AddAnnotation(spv::OpDecorate, state.heap_sampler_variable,
+		                            spv::DecorationDescriptorSet, IR::ImageHeapSet);
+		state.builder.AddAnnotation(spv::OpDecorate, state.heap_sampler_variable,
+		                            spv::DecorationBinding, 1u);
+	}
 	counts[static_cast<size_t>(Kind::Gds)] = info.uses_gds;
 	counts[static_cast<size_t>(Kind::SharedMemory)] =
 	    info.uses_lds && state.lds_storage_class == spv::StorageClassStorageBuffer;

@@ -85,31 +85,40 @@ ImageHeap::ImageHeap(RenderContext& context, PageManager& page_manager)
 	                               limits.maxPerStageDescriptorUpdateAfterBindSampledImages,
 	                               limits.maxPerStageUpdateAfterBindResources}) <
 	                     IR::ImageHeapCapacity);
+	EXIT_NOT_IMPLEMENTED(std::min({limits.maxDescriptorSetUpdateAfterBindSamplers,
+	                               limits.maxPerStageDescriptorUpdateAfterBindSamplers}) <
+	                     IR::SamplerHeapCapacity);
 
-	const vk::DescriptorBindingFlags binding_flags =
+	const std::array binding_flags {
 	    vk::DescriptorBindingFlagBits::ePartiallyBound |
-	    vk::DescriptorBindingFlagBits::eUpdateAfterBind |
-	    vk::DescriptorBindingFlagBits::eUpdateUnusedWhilePending;
+	        vk::DescriptorBindingFlagBits::eUpdateAfterBind |
+	        vk::DescriptorBindingFlagBits::eUpdateUnusedWhilePending,
+	    vk::DescriptorBindingFlagBits::ePartiallyBound |
+	        vk::DescriptorBindingFlagBits::eUpdateAfterBind |
+	        vk::DescriptorBindingFlagBits::eUpdateUnusedWhilePending};
 	vk::DescriptorSetLayoutBindingFlagsCreateInfo flags_info {};
-	flags_info.bindingCount  = 1;
-	flags_info.pBindingFlags = &binding_flags;
-	const vk::DescriptorSetLayoutBinding binding {0, vk::DescriptorType::eSampledImage,
-	                                              IR::ImageHeapCapacity,
-	                                              vk::ShaderStageFlagBits::eAll, nullptr};
+	flags_info.bindingCount  = static_cast<uint32_t>(binding_flags.size());
+	flags_info.pBindingFlags = binding_flags.data();
+	const std::array bindings {
+	    vk::DescriptorSetLayoutBinding {0, vk::DescriptorType::eSampledImage,
+	                                    IR::ImageHeapCapacity, vk::ShaderStageFlagBits::eAll, nullptr},
+	    vk::DescriptorSetLayoutBinding {1, vk::DescriptorType::eSampler,
+	                                    IR::SamplerHeapCapacity, vk::ShaderStageFlagBits::eAll, nullptr}};
 	vk::DescriptorSetLayoutCreateInfo layout_info {};
 	layout_info.pNext        = &flags_info;
 	layout_info.flags        = vk::DescriptorSetLayoutCreateFlagBits::eUpdateAfterBindPool;
-	layout_info.bindingCount = 1;
-	layout_info.pBindings    = &binding;
+	layout_info.bindingCount = static_cast<uint32_t>(bindings.size());
+	layout_info.pBindings    = bindings.data();
 	EXIT_IF(graphics.device.createDescriptorSetLayout(&layout_info, nullptr, &m_layout) !=
 	        vk::Result::eSuccess);
-	const vk::DescriptorPoolSize pool_size {vk::DescriptorType::eSampledImage,
-	                                        IR::ImageHeapCapacity};
+	const std::array pool_sizes {
+	    vk::DescriptorPoolSize {vk::DescriptorType::eSampledImage, IR::ImageHeapCapacity},
+	    vk::DescriptorPoolSize {vk::DescriptorType::eSampler, IR::SamplerHeapCapacity}};
 	vk::DescriptorPoolCreateInfo pool_info {};
 	pool_info.flags         = vk::DescriptorPoolCreateFlagBits::eUpdateAfterBind;
 	pool_info.maxSets       = 1;
-	pool_info.poolSizeCount = 1;
-	pool_info.pPoolSizes    = &pool_size;
+	pool_info.poolSizeCount = static_cast<uint32_t>(pool_sizes.size());
+	pool_info.pPoolSizes    = pool_sizes.data();
 	EXIT_IF(graphics.device.createDescriptorPool(&pool_info, nullptr, &m_pool) !=
 	        vk::Result::eSuccess);
 	vk::DescriptorSetAllocateInfo allocate {};
@@ -135,7 +144,8 @@ ImageHeap::~ImageHeap() {
 bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& result) {
 	KYTY_PROFILER_FUNCTION();
 	const auto size = request.size & ~uint64_t {3};
-	if (request.count == 0u || request.step == 0u ||
+	const bool sampler = request.sampler_root != nullptr;
+	if (request.count == 0u || request.step == 0u || sampler == (request.root != nullptr) ||
 	    ((request.base | request.first | request.step) & 3u) != 0u) {
 		return false;
 	}
@@ -163,12 +173,14 @@ bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& 
 	}
 	auto&      views   = (*memory)->views;
 	const auto bytes   = (*memory)->size;
-	const auto profile = IR::ImageHeapResource(*request.root, 0u);
+	const auto profile = sampler ? IR::ImageResource {} : IR::ImageHeapResource(*request.root, 0u);
+	const auto sampler_profile = sampler ? std::optional(*request.sampler_root) : std::nullopt;
 	const auto probes  = Probes(size, request.first, request.step);
 	const auto limit   = request.count < probes ? request.count : UINT64_MAX;
 	auto       view    = std::ranges::find_if(views, [&](const auto& candidate) {
 		return candidate->step == request.step && candidate->first == request.first &&
-		       candidate->limit == limit && candidate->profile == profile;
+		       candidate->limit == limit && candidate->profile == profile &&
+		       candidate->sampler_profile == sampler_profile;
 	});
 	if (view == views.end()) {
 		const auto epoch   = Image::heap_epoch.load(std::memory_order_relaxed);
@@ -179,6 +191,7 @@ bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& 
 		                                                  .count         = count,
 		                                                  .limit         = limit,
 		                                                  .profile       = profile,
+		                                                  .sampler_profile = sampler_profile,
 		                                                  .resolve_epoch = epoch,
 		                                                  .layout_epoch  = epoch});
 		created->slots.resize(bytes / 4u + 1u);
@@ -284,7 +297,7 @@ void ImageHeap::InvalidateMemory(uint64_t address, uint64_t size) {
 
 void ImageHeap::UpdateProbes(View& view, uint64_t begin, uint64_t end) {
 	// A probe reads its descriptor from first + probe * step.
-	const uint64_t bytes = view.profile.r128 ? 16u : 32u;
+	const uint64_t bytes = view.sampler_profile ? 16u : view.profile.r128 ? 16u : 32u;
 	auto probe = begin < view.first + bytes ? 0u : (begin - view.first - bytes) / view.step + 1u;
 	for (; probe < view.count && view.first + probe * view.step < end; ++probe) {
 		UpdateProbe(view, probe);
@@ -294,14 +307,27 @@ void ImageHeap::UpdateProbes(View& view, uint64_t begin, uint64_t end) {
 void ImageHeap::UpdateProbe(View& view, uint64_t probe) {
 	const auto&     words  = view.memory.words;
 	const auto      offset = (view.first + probe * view.step) / 4u;
-	DescriptorValue value {.dword_count = 8u};
+	const bool      sampler = view.sampler_profile.has_value();
+	const uint32_t  dword_count = sampler ? 4u : view.profile.r128 ? 4u : 8u;
+	DescriptorValue value {.dword_count = dword_count};
 	std::copy_n(words.begin() + offset,
-	            std::min<size_t>(view.profile.r128 ? 4u : 8u, words.size() - offset),
-	            value.dwords.begin());
-	// A buried word stays null in every view until its descriptor changes.
-	auto& dead = view.memory.dead[offset];
-	if (dead != 0u && dead != DescriptorHash {}(value)) dead = 0u;
-	const auto kind = dead != 0u ? 0u : IR::ImageHeapKind(view.profile, value);
+	            std::min<size_t>(dword_count, words.size() - offset), value.dwords.begin());
+	uint32_t kind = 0;
+	if (sampler) {
+		const auto& root = *view.sampler_profile;
+		const auto descriptor = DecodeNativeDescriptor<ShaderSamplerResource>(value);
+		const auto control = descriptor.fields[2];
+		const auto filter = (control >> 26u) & 3u;
+		const auto perf_mip = (descriptor.fields[1] >> 24u) & 15u;
+		kind = !root.gather_lod ||
+		       (filter <= 2u && (filter == 0u || (control & 0xfffffu) == 0u) &&
+		        (filter != 2u || perf_mip == 0u));
+	} else {
+		// A buried word stays null in every view until its descriptor changes.
+		auto& dead = view.memory.dead[offset];
+		if (dead != 0u && dead != DescriptorHash {}(value)) dead = 0u;
+		kind = dead != 0u ? 0u : IR::ImageHeapKind(view.profile, value);
+	}
 	Assign(view, offset, kind == 0u ? 0u : Intern(view, kind, value));
 }
 
@@ -315,6 +341,7 @@ void ImageHeap::Bury() {
 	if (m_unmapped.empty()) return;
 	for (const auto& memory: m_memories) {
 		for (const auto& view: memory->views) {
+			if (view->sampler_profile) continue;
 			bool buried = false;
 			for (const auto& [value, index]: view->elements) {
 				const auto& binding = m_elements[index].binding;
@@ -338,27 +365,33 @@ void ImageHeap::Bury() {
 }
 
 uint32_t ImageHeap::Intern(View& view, uint32_t kind, const DescriptorValue& value) {
-	const auto arm = static_cast<uint32_t>(std::ranges::find(view.kind_keys, kind) -
-	                                       view.kind_keys.begin());
-	if (arm == view.kind_keys.size()) {
-		view.kind_keys.push_back(kind);
-		view.kinds.push_back(value);
+	const bool sampler = view.sampler_profile.has_value();
+	uint32_t arm = 0;
+	if (!sampler) {
+		arm = static_cast<uint32_t>(std::ranges::find(view.kind_keys, kind) - view.kind_keys.begin());
+		if (arm == view.kind_keys.size()) {
+			view.kind_keys.push_back(kind);
+			view.kinds.push_back(value);
+		}
 	}
 	auto [found, inserted] = view.elements.try_emplace(value, 0u);
 	if (inserted) {
-		found->second    = Allocate();
+		found->second    = Allocate(sampler);
 		auto& element    = m_elements[found->second];
 		element.value    = value;
 		element.kind     = kind;
 		view.pending.push_back(found->second);
 	}
 	++m_elements[found->second].refs;
-	return arm << IR::ImageHeapKindShift | found->second;
+	return sampler ? found->second - IR::SamplerHeapBase
+	               : arm << IR::ImageHeapKindShift | found->second;
 }
 
 void ImageHeap::Release(View& view, uint32_t entry) {
-	const auto index = entry & ElementMask;
-	if (index == 0u || --m_elements[index].refs != 0u) return;
+	auto index = entry & ElementMask;
+	if (index == 0u) return;
+	if (view.sampler_profile) index += IR::SamplerHeapBase;
+	if (--m_elements[index].refs != 0u) return;
 	auto& element = m_elements[index];
 	if (const auto found = view.elements.find(element.value);
 	    found != view.elements.end() && found->second == index) {
@@ -380,25 +413,39 @@ Image* ImageHeap::ImageOf(const Element& element) const {
 	return image != nullptr && image->serial == element.serial ? image : nullptr;
 }
 
-uint32_t ImageHeap::Allocate() {
+uint32_t ImageHeap::Allocate(bool sampler) {
 	auto& scheduler = m_context.GetCommandScheduler();
 	while (!m_retired.empty() && scheduler.IsFree(m_retired.front().first)) {
-		m_free.push_back(m_retired.front().second);
+		const auto index = m_retired.front().second;
+		(index >= IR::SamplerHeapBase ? m_sampler_free : m_free).push_back(index);
 		m_retired.pop_front();
 	}
-	if (m_free.empty()) {
-		if (m_elements.size() == IR::ImageHeapCapacity) {
+	auto& free = sampler ? m_sampler_free : m_free;
+	if (free.empty()) {
+		if (sampler) {
+			if (m_elements.size() < IR::SamplerHeapBase + 2u) {
+				m_elements.resize(IR::SamplerHeapBase + 2u);
+			}
+			if (m_elements.size() - IR::SamplerHeapBase >= IR::SamplerHeapCapacity) {
+				EXIT("sampler heaps exceed %u resident samplers\n", IR::SamplerHeapCapacity);
+			}
+			const auto index = static_cast<uint32_t>(m_elements.size());
+			m_elements.resize(m_elements.size() + 2u);
+			return index;
+		}
+		if (m_image_next == IR::ImageHeapCapacity) {
 			EXIT("image heaps exceed %u resident images\n", IR::ImageHeapCapacity);
 		}
-		m_elements.emplace_back();
-		if (const auto size = m_elements.size(); size >= 16384u && (size & (size - 1u)) == 0u) {
-			LOGF("ImageHeap: %zu resident images (%zu retired awaiting the GPU)\n", size,
+		const auto index = m_image_next++;
+		if (m_elements.size() <= index) m_elements.resize(index + 1u);
+		if (index + 1u >= 16384u && ((index + 1u) & index) == 0u) {
+			LOGF("ImageHeap: %u resident images (%zu retired awaiting the GPU)\n", index + 1u,
 			     m_retired.size());
 		}
-		return static_cast<uint32_t>(m_elements.size() - 1u);
+		return index;
 	}
-	const auto index = m_free.back();
-	m_free.pop_back();
+	const auto index = free.back();
+	free.pop_back();
 	m_elements[index] = {};
 	return index;
 }
@@ -456,6 +503,23 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 	const auto epoch    = Image::heap_epoch.load();
 	const auto serial   = Image::serials.load(std::memory_order_relaxed);
 	for (auto* view: m_active) {
+		if (view->sampler_profile) {
+			for (const auto index: view->pending) {
+				auto& element = m_elements[index];
+				if (element.refs == 0u) continue;
+				auto descriptor = DecodeNativeDescriptor<ShaderSamplerResource>(element.value);
+				if (!view->sampler_profile->depth_compare) {
+					descriptor.fields[0] &= ~(0x7u << 12u);
+				}
+				auto integer = descriptor;
+				integer.SetPointFiltering();
+				element.samplers[0] = m_context.GetSamplerCache().GetSampler(descriptor, false);
+				element.samplers[1] = m_context.GetSamplerCache().GetSampler(integer, true);
+				m_writes.push_back(index);
+			}
+			view->pending.clear();
+			continue;
+		}
 		bool       stale = false;
 		const auto mark  = [&](uint32_t index) { m_elements[index].stale = stale = true; };
 		if (view->resolve_epoch != epoch) {
@@ -539,16 +603,44 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 void ImageHeap::WriteDescriptors() {
 	if (m_writes.empty()) return;
 	std::vector<vk::DescriptorImageInfo> infos;
-	std::vector<vk::WriteDescriptorSet>  writes(m_writes.size());
-	infos.reserve(m_writes.size());
-	for (size_t write = 0; write < m_writes.size(); ++write) {
-		const auto& binding = m_elements[m_writes[write]].binding;
+	std::vector<vk::WriteDescriptorSet>  writes;
+	infos.reserve(m_writes.size() * 3u);
+	writes.reserve(m_writes.size() * 3u);
+	const auto image = [&](uint32_t index, const TextureBinding& binding) {
 		infos.push_back({nullptr, binding.image_view, binding.layout});
-		writes[write].dstSet          = m_set;
-		writes[write].dstArrayElement = m_writes[write];
-		writes[write].descriptorCount = 1;
-		writes[write].descriptorType  = vk::DescriptorType::eSampledImage;
-		writes[write].pImageInfo      = &infos.back();
+		auto& write = writes.emplace_back();
+		write.dstSet          = m_set;
+		write.dstBinding      = 0;
+		write.dstArrayElement = index;
+		write.descriptorCount = 1;
+		write.descriptorType  = vk::DescriptorType::eSampledImage;
+		write.pImageInfo      = &infos.back();
+	};
+	const auto sampler = [&](uint32_t index, vk::Sampler value) {
+		infos.push_back({value, nullptr, vk::ImageLayout::eUndefined});
+		auto& write = writes.emplace_back();
+		write.dstSet          = m_set;
+		write.dstBinding      = 1;
+		write.dstArrayElement = index;
+		write.descriptorCount = 1;
+		write.descriptorType  = vk::DescriptorType::eSampler;
+		write.pImageInfo      = &infos.back();
+	};
+	for (const auto index: m_writes) {
+		auto& element = m_elements[index];
+		if (index < IR::SamplerHeapBase) image(index, element.binding);
+		if (index != 0u && index < IR::SamplerHeapBase) continue;
+		if (index == 0u && element.samplers[0] == nullptr) {
+			ShaderSamplerResource descriptor {};
+			auto integer = descriptor;
+			integer.SetPointFiltering();
+			element.samplers[0] = m_context.GetSamplerCache().GetSampler(descriptor, false);
+			element.samplers[1] = m_context.GetSamplerCache().GetSampler(integer, true);
+		}
+		const auto first = index == 0u ? 0u : index - IR::SamplerHeapBase;
+		for (uint32_t variant = 0; variant < 2u; ++variant) {
+			sampler(first + variant, element.samplers[variant]);
+		}
 	}
 	m_context.GetGraphics().device.updateDescriptorSets(static_cast<uint32_t>(writes.size()),
 	                                                    writes.data(), 0, nullptr);
@@ -570,7 +662,7 @@ void ImageHeap::Commit(CommandBuffer& buffer, vk::PipelineBindPoint bind_point,
 			view->dirty_begin = view->dirty_end = 0;
 		}
 		Retire(*view);
-		if (view->layout_epoch != epoch) {
+		if (!view->sampler_profile && view->layout_epoch != epoch) {
 			view->layout_epoch = epoch;
 			view->away.clear();
 			for (const auto& [value, index]: view->elements) view->away.push_back(index);
