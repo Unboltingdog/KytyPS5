@@ -371,7 +371,7 @@ inline constexpr uint32_t ImageHeapSet                = 1u;
 inline constexpr uint32_t ImageHeapCapacity           = 262144u;
 inline constexpr uint32_t ImageHeapKindShift          = 20u;
 inline constexpr uint32_t SamplerHeapBase             = ImageHeapCapacity;
-inline constexpr uint32_t SamplerHeapCapacity         = 1024u;
+inline constexpr uint32_t SamplerHeapCapacity         = 4096u; // Two variants per sampler.
 
 enum class DescriptorBindingKind : uint32_t {
 	Buffers  = 0u,
