@@ -40,10 +40,11 @@ struct Frame {
 // sources that write and read records (generate_shader_cache_version.cmake), so a store outlives
 // emulator builds that leave them alone and is started over by any that change them.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
-	// KYTY_GPU_SCALAR_LOADS compiles shaders differently, so it starts its own store.
+	// Codegen switches start their own stores.
 	const uint64_t version =
 	    KYTY_SHADER_CACHE_VERSION ^
-	    (ShaderRecompiler::IR::GpuScalarLoadsEnabled() ? uint64_t {0x9e3779b97f4a7c15} : 0u);
+	    (ShaderRecompiler::IR::GpuScalarLoadsEnabled() ? uint64_t {0x9e3779b97f4a7c15} : 0u) ^
+	    (ShaderRecompiler::IR::GpuBufferTablesEnabled() ? uint64_t {0x3c6ef372fe94f82b} : 0u);
 	Writer         header;
 	IoAll(header, version, SpirvProfile(graphics),
 	      graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);

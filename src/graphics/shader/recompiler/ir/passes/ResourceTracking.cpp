@@ -24,14 +24,6 @@
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
-bool GpuScalarLoadsEnabled() {
-	static const bool enabled = [] {
-		const char* value = std::getenv("KYTY_GPU_SCALAR_LOADS");
-		return value != nullptr && value[0] != '\0' && value[0] != '0';
-	}();
-	return enabled;
-}
-
 namespace {
 thread_local UnsupportedCompute g_unsupported_compute;
 thread_local bool               g_allow_unsupported_compute = false;
@@ -440,6 +432,10 @@ public:
 		}
 		std::vector<std::pair<const IndirectDescriptorPlan*, Value>> buffer_selections;
 		for (const auto& plan: m_indirect_descriptors) {
+			if (plan.handle->GetOpcode() == ValueOpcode::GetBufferResource &&
+			    GpuBufferTableEnabled(*m_sources[plan.source].indirect_descriptor)) {
+				continue;
+			}
 			auto key = plan.key;
 			if (m_sources[plan.source].indirect_descriptor->table_maximum &&
 			    plan.handle->GetOpcode() != ValueOpcode::GetBufferResource) {

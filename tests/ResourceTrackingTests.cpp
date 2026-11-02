@@ -7051,6 +7051,34 @@ void TestWorkgroupSelectedBufferRecords() {
         "a plan without workgroup counts read the indirect argument pointer");
 }
 
+void TestGpuBufferTableSkipsCounts() {
+  Check(setenv("KYTY_GPU_BUFFER_TABLES", "1", 1) == 0,
+        "could not enable GPU buffer tables");
+  auto fixture = MakeBufferRecordFixture(1u, false, true, 0u, false, true);
+  auto plan = ExtractResourcePlan(fixture->program);
+  for (const auto *block : fixture->program.blocks)
+    for (const auto &inst : *block)
+      Check(inst.GetOpcode() != ValueOpcode::GetBufferResourceIndex,
+            "GPU buffer table retained a CPU candidate-map selection");
+
+  LinearTestMemory memory;
+  memory.fail_address = memory.base;
+  memory.watched_address = memory.base;
+  std::array<uint32_t, 8> user_data{uint32_t(memory.base) + 256u, 192u << 16u,
+      2u, 0x5204u, uint32_t(memory.base) + 0x1000u, 12u << 16u,
+      MaxIndirectDescriptorProbes, 0x5204u};
+  const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+      .read_specialization_memory = ReadLinearTestMemory,
+      .indirect_args_address = memory.base};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            memory.reads == 0u && memory.watched_reads == 0u &&
+            snapshot.buffers.size() == plan.info.buffers.size(),
+        "GPU buffer table read indirect dispatch counts or descriptor keys");
+  unsetenv("KYTY_GPU_BUFFER_TABLES");
+}
+
 void TestGpuSelectedFormattedRecordStore() {
   namespace Prospero = Libs::Graphics::Prospero;
   enum class Prefix { None, Forward, Reversed, Lane, TwoAxes };
@@ -9194,6 +9222,7 @@ int main() {
     });
     Run("GPU-selected buffer records", TestGpuSelectedBufferRecords);
     Run("workgroup-selected buffer records", TestWorkgroupSelectedBufferRecords);
+    Run("GPU buffer table skips counts", TestGpuBufferTableSkipsCounts);
     Run("GPU-selected formatted record store", TestGpuSelectedFormattedRecordStore);
     Run("finite buffer selection", TestFiniteBufferSelection);
     Run("packed scalar buffer selection", TestPackedScalarBufferSelection);

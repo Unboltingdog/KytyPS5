@@ -4,6 +4,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -11,7 +12,24 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 // Resolves native descriptor sources, plans their scalar reads, and assigns dense resource bindings.
 // KYTY_GPU_SCALAR_LOADS=1: keep scalar loads that only feed shader math and branches as GPU
 // loads instead of dispatch constants the CPU reads. Changes compiled shaders.
-bool GpuScalarLoadsEnabled();
+inline bool GpuScalarLoadsEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_GPU_SCALAR_LOADS");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
+}
+// KYTY_GPU_BUFFER_TABLES=1: leave count-sized and unmasked buffer-table selection to the shader.
+inline bool GpuBufferTablesEnabled() {
+	const char* value = std::getenv("KYTY_GPU_BUFFER_TABLES");
+	return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+inline bool GpuBufferTableEnabled(const DescriptorSource::IndirectDescriptor& indirect) {
+	const bool unmasked_selector = indirect.selector &&
+	    indirect.selector->bit_mask == UINT32_MAX && indirect.selector->maximum == UINT32_MAX;
+	return GpuBufferTablesEnabled() &&
+	       (indirect.workgroup_axis != UINT32_MAX || unmasked_selector);
+}
 void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg,
                     ShaderStageInputInfo input);
 

@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include "common/assert.h"
@@ -1757,7 +1758,8 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	for (auto& keys: program.selector_keys) keys.resolved = false;
 	if (!program.resource_tracking_complete) return false;
 	const auto uses_workgroup_count = [](const DescriptorSource& source) {
-		return source.indirect_descriptor && source.indirect_descriptor->workgroup_axis != UINT32_MAX;
+		return source.indirect_descriptor && source.indirect_descriptor->workgroup_axis != UINT32_MAX &&
+		       !GpuBufferTableEnabled(*source.indirect_descriptor);
 	};
 	const bool capture_reads = program.capture_specialization_reads || !program.source_reads.empty() ||
 	    (runtime.indirect_args_address != 0u &&
@@ -1861,7 +1863,8 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			if (source == nullptr) return false;
 			if (source->indirect_descriptor.has_value()) {
 				snapshot.buffers[i] = {.dword_count = 4u};
-				if (WalkedActive(program, base.source)) {
+				if (WalkedActive(program, base.source) &&
+				    !GpuBufferTableEnabled(*source->indirect_descriptor)) {
 					if (!MaterializeIndirectDescriptor(
 					        program, base.source, i, 4u, 4u, observed, snapshot,
 					        snapshot.buffers, specialization.buffers,
