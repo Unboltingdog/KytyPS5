@@ -22,6 +22,7 @@
 #include <array>
 #include <bit>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -39,6 +40,14 @@ namespace {
 constexpr uint64_t NumFramesBeforeRemoval = 32;
 // Largest GPU-written tiled image (in texels) that is written back to guest memory on submit.
 constexpr uint64_t SmallTiledReadbackTexels = 64 * 64;
+
+bool DepthAliasEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_DEPTH_ALIAS");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
+}
 
 void LogDepthAlias(const char* kind, const ImageInfo& requested, const ImageInfo& depth,
                    TextureCache::BindingType binding) {
@@ -655,10 +664,20 @@ void TextureCache::CopyImageMip(ImageId destination_id, ImageId source_id, uint3
 }
 
 ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingType binding,
-                                          ImageId cached_id) {
+                                          ImageId cached_id, const ImageViewInfo& view) {
 	auto& cached = m_slot_images[cached_id];
+	const bool shared_depth_view =
+	    DepthAliasEnabled() && binding == BindingType::Texture && cached.info.IsDepth() &&
+	    !requested.IsVolume() && requested.data.address == cached.info.data.address &&
+	    requested.extent == cached.info.extent && requested.samples == 1 &&
+	    cached.backing.samples == 1 && requested.resources.levels == 1 &&
+	    requested.resources.layers <= cached.info.resources.layers && view.base_level == 0 &&
+	    view.level_count == 1 && view.layer_count == 1 &&
+	    view.base_layer < cached.info.resources.layers &&
+	    (view.type == vk::ImageViewType::e2D || view.type == vk::ImageViewType::e2DArray) &&
+	    IsSupportedSampledDepthFormat(cached.info.pixel_format, requested.pixel_format);
 	if ((!cached.info.IsDepth() && !requested.IsDepth()) ||
-	    cached.info.tile_mode != requested.tile_mode) {
+	    (cached.info.tile_mode != requested.tile_mode && !shared_depth_view)) {
 		return {};
 	}
 	const bool stencil_match = requested.HasStencil() == cached.info.HasStencil();
@@ -815,7 +834,8 @@ void Resolve(TextureCache& cache, ImageId cached_id, ImageId merged_id) {
 
 TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& requested,
                                                          BindingType binding, ImageId cached_id,
-                                                         ImageId merged_id) {
+                                                         ImageId merged_id,
+                                                         const ImageViewInfo& view) {
 	auto& cached = m_slot_images[cached_id];
 	if (!cached.registered) {
 		return {merged_id};
@@ -841,7 +861,7 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 	const uint32_t cached_block    = cached.info.bytes_per_block * cached.info.samples;
 	if (requested.data.address == cached.info.data.address &&
 	    requested.BlockExtent() == cached.info.BlockExtent() && requested_block == cached_block) {
-		if (const auto depth_id = ResolveDepthOverlap(requested, binding, cached_id)) {
+		if (const auto depth_id = ResolveDepthOverlap(requested, binding, cached_id, view)) {
 			return {depth_id};
 		}
 		// Equal pitch does not imply equal mip placement: a changed extent can move
@@ -1362,7 +1382,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 				view_mip                = -1;
 				view_layer              = -1;
 				const auto& merged_info = result ? m_slot_images[result].info : desc.info;
-				const auto  overlap     = ResolveOverlap(merged_info, desc.type, candidate, result);
+				const auto  overlap =
+				    ResolveOverlap(merged_info, desc.type, candidate, result, desc.view_info);
 				if (overlap.image) {
 					result     = overlap.image;
 					view_mip   = overlap.mip;
