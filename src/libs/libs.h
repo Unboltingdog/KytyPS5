@@ -5,6 +5,7 @@
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "libs/hleStats.h"
 #include "loader/timer.h" // IWYU pragma: keep
 
 #include <cinttypes>
@@ -54,8 +55,9 @@
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_FUNC(n, f)                                                                             \
 	LIB_ADD_ADDRESS(n,                                                                             \
-	                (Libs::TraceAllCalls() ? Libs::TraceWrap<f, #f>::Address()                    \
-	                                       : reinterpret_cast<uint64_t>(f)),                      \
+	                ((Libs::TraceAllCalls() || Libs::HleStats::Enabled())                             \
+	                     ? Libs::TraceWrap<f, #f>::Address()                                        \
+	                     : reinterpret_cast<uint64_t>(f)),                                          \
 	                f, Loader::SymbolType::Func)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
@@ -97,9 +99,9 @@ struct TraceName {
 	}
 };
 
-// KYTY_TRACE_CALLS: a library function registered through a thunk that logs what it returned (an
-// integer other than 0). Functions it does not forward (variadic ones, other calling conventions,
-// structures by value) are registered as they are.
+// KYTY_TRACE_CALLS and KYTY_WAIT_STATS: a library function registered through a thunk that logs
+// nonzero integer results and times the call, respectively. Functions it does not forward (variadic
+// ones, other calling conventions, structures by value) are registered as they are.
 template <auto F, TraceName Name>
 struct TraceWrap {
 	static uint64_t Address() { return reinterpret_cast<uint64_t>(F); }
@@ -109,6 +111,7 @@ template <typename R, typename... A, R(KYTY_SYSV_ABI* F)(A...), TraceName Name>
              ((std::is_scalar_v<A> || std::is_reference_v<A>) && ...))
 struct TraceWrap<F, Name> {
 	static R KYTY_SYSV_ABI Call(A... args) {
+		HleStats::Timer hle_timer(Name.text);
 		if constexpr (std::is_void_v<R>) {
 			F(args...);
 		} else {
