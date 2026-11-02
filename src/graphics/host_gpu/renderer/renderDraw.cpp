@@ -96,6 +96,50 @@ private:
 	bool m_submitted = false;
 };
 
+void SampleIndirectArgs(CommandBuffer& command, const Buffer& source, uint64_t source_offset,
+                        uint64_t size, uint32_t stride, uint32_t count, bool indexed) {
+	if (!GpuWaitStats::Enabled()) {
+		return;
+	}
+	auto& scheduler = command.GetContext().GetCommandScheduler();
+	auto& download =
+	    command.GetContext().GetBufferCache().GetUtilityBuffer(MemoryUsage::Download);
+	auto [mapped, offset] = download.Map(size, 64, false);
+	if (mapped == nullptr) {
+		GpuWaitStats::RecordEvent("draw:indirect-sample-unavailable");
+		return;
+	}
+	download.Commit();
+	command.EndRendering();
+	download.CopyFrom(command, source, source_offset, offset, size);
+	scheduler.DeferPriorityOperation([&download, mapped, offset, stride, count, indexed] {
+		download.Invalidate(offset, static_cast<uint64_t>(count - 1) * stride +
+		                                (indexed ? sizeof(vk::DrawIndexedIndirectCommand)
+		                                         : sizeof(vk::DrawIndirectCommand)));
+		uint32_t zero_indices   = 0;
+		uint32_t zero_instances = 0;
+		for (uint32_t index = 0; index < count; ++index) {
+			const auto* record = mapped + static_cast<uint64_t>(index) * stride;
+			if (indexed) {
+				vk::DrawIndexedIndirectCommand args {};
+				std::memcpy(&args, record, sizeof(args));
+				zero_indices += args.indexCount == 0;
+				zero_instances += args.instanceCount == 0;
+			} else {
+				vk::DrawIndirectCommand args {};
+				std::memcpy(&args, record, sizeof(args));
+				zero_indices += args.vertexCount == 0;
+				zero_instances += args.instanceCount == 0;
+			}
+		}
+		GpuWaitStats::RecordEvent("draw:indirect-sampled", count);
+		GpuWaitStats::RecordEvent(indexed ? "draw:indirect-zero-index-count"
+		                                  : "draw:indirect-zero-vertex-count",
+		                          zero_indices);
+		GpuWaitStats::RecordEvent("draw:indirect-zero-instance-count", zero_instances);
+	});
+}
+
 static std::atomic<uint32_t> g_draw_state_log_count   = 0;
 static std::atomic<uint32_t> g_draw_input_log_count   = 0;
 static std::atomic<uint32_t> g_mrt_state_log_count    = 0;
@@ -1192,6 +1236,10 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                                    : sizeof(vk::DrawIndirectCommand));
 		args_buffer = m_context.GetBufferCache().ObtainBuffer(emit.indirect.address, size, false);
 		EXIT_IF((args_buffer.second & 3u) != 0);
+		if (emit.indirect.count != 0) {
+			SampleIndirectArgs(buffer, *args_buffer.first, args_buffer.second, size,
+			                   emit.indirect.stride, emit.indirect.count, draw.IsIndexed());
+		}
 	}
 	vk::ImageAspectFlags feedback_aspects;
 	const auto rendering =
@@ -1309,6 +1357,9 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	occlusion_queries.End(vk_buffer, occlusion_query);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
+	if (state.depth_info.image_id && state.depth_info.depth_write_enable) {
+		GpuWaitStats::RecordEvent("draw:depth-write");
+	}
 
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u);
