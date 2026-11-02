@@ -200,10 +200,18 @@ public:
 	                                      ShaderComputeInputInfo&      input_info);
 
 	Pipeline& GetGraphicsPipeline(const CommandBuffer& command, const DrawRenderState& state);
+	// Null means an asynchronous pipeline build is pending; skip this draw and retry the next one.
+	Pipeline* GetGraphicsPipelineAsync(const CommandBuffer& command, const DrawRenderState& state);
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info);
 
 private:
 	friend struct PipelineCacheTestAccess;
+
+	struct AsyncGraphicsPipeline {
+		GraphicsPipelineKey          key;
+		std::array<ShaderModule, 4>  stages;
+		Pipeline                     pipeline;
+	};
 
 	struct Program {
 		std::unique_ptr<ShaderRecompiler::ShaderSource> call_source;
@@ -268,6 +276,12 @@ private:
 	std::unordered_map<uint64_t, ShaderTessellationInputInfo>                  m_tess_layouts;
 	// Records everything first created; closed without a shader store.
 	ShaderStoreWriter m_store;
+	std::mutex m_async_mutex;
+	std::condition_variable m_async_ready;
+	std::queue<std::unique_ptr<AsyncGraphicsPipeline>> m_async_jobs;
+	std::queue<std::unique_ptr<AsyncGraphicsPipeline>> m_async_done;
+	// Declared last, so pipeline creation stops before device objects are destroyed.
+	std::jthread m_async_thread;
 
 	template <typename InputInfo>
 	const ShaderModule* GetProgram(const ShaderParams& params, InputInfo& input_info,
@@ -278,6 +292,11 @@ private:
 	                            uint32_t                          push_data_cursor);
 	void InitializeDriverCache();
 	void CheckpointDriverCache();
+	Pipeline* FindGraphicsPipeline(const CommandBuffer& command, const DrawRenderState& state,
+	                               bool allow_async);
+	void QueueGraphicsPipeline(const GraphicsPipelineKey&                 key,
+	                           const std::array<const ShaderModule*, 4>& stages);
+	void ReapGraphicsPipelines();
 
 	// pipelineSerialization.cpp
 	void WarmUp(const std::filesystem::path& path);

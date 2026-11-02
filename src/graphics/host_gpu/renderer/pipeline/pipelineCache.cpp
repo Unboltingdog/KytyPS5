@@ -701,12 +701,80 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	                          push_data_cursor));
 }
 
+bool AsyncGraphicsPipelinesEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_ASYNC_PIPELINES");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
+}
+
+void PipelineCache::QueueGraphicsPipeline(const GraphicsPipelineKey&                 key,
+                                          const std::array<const ShaderModule*, 4>& stages) {
+	auto job = std::make_unique<AsyncGraphicsPipeline>();
+	job->key = key;
+	for (size_t i = 0; i < stages.size(); ++i) {
+		if (stages[i] != nullptr) job->stages[i] = *stages[i];
+	}
+	{
+		std::scoped_lock lock(m_async_mutex);
+		m_async_jobs.push(std::move(job));
+	}
+	m_async_ready.notify_one();
+	GpuWaitStats::RecordEvent("pipeline-async:queued");
+}
+
+void PipelineCache::ReapGraphicsPipelines() {
+	decltype(m_async_done) completed;
+	{
+		std::scoped_lock lock(m_async_mutex);
+		if (m_async_done.empty()) return;
+		std::swap(completed, m_async_done);
+	}
+	while (!completed.empty()) {
+		auto job = std::move(completed.front());
+		completed.pop();
+		auto iter = m_graphics_pipelines.find(job->key);
+		EXIT_IF(iter == m_graphics_pipelines.end() || iter->second.pipeline != nullptr);
+		iter->second = std::move(job->pipeline);
+		StorePipeline(job->key);
+		CheckpointDriverCache();
+		GpuWaitStats::RecordEvent("pipeline-async:ready");
+	}
+}
+
 PipelineCache::PipelineCache(GraphicContext&                         graphics,
                              ShaderRecompiler::IR::ImageHeapSource* image_heap,
                              const std::filesystem::path&           shader_store)
     : m_graphics(graphics), m_image_heap(image_heap),
       m_next_driver_cache_save(std::chrono::steady_clock::now() + DriverCacheSaveInterval) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	if (AsyncGraphicsPipelinesEnabled()) {
+		m_async_thread = std::jthread([this](std::stop_token stop) {
+			std::unique_lock lock(m_async_mutex);
+			for (;;) {
+				m_async_ready.wait(lock, [&] { return stop.stop_requested() || !m_async_jobs.empty(); });
+				if (m_async_jobs.empty()) return;
+				auto job = std::move(m_async_jobs.front());
+				m_async_jobs.pop();
+				lock.unlock();
+				std::array<const ShaderModule*, 4> stages {};
+				for (size_t i = 0; i < stages.size(); ++i) {
+					if (job->key.stage_ids[i] != 0) stages[i] = &job->stages[i];
+				}
+				{
+					Common::DebugCounters::ScopedTimer timer(
+					    Common::DebugCounters::Counter::PipelinesCreated,
+					    Common::DebugCounters::Counter::PipelineCreateNs,
+					    Common::DebugCounters::Peak::PipelineCreateNs);
+					GpuWaitStats::CpuTimer wait_timer("pipeline:async-create");
+					CreatePipelineInternal(m_graphics, job->pipeline, job->key, stages, m_driver_cache);
+				}
+				lock.lock();
+				m_async_done.push(std::move(job));
+			}
+		});
+	}
 	InitializeDriverCache();
 	m_warm_up_store = shader_store;
 }
@@ -719,6 +787,12 @@ void PipelineCache::WarmUpStore() {
 }
 
 PipelineCache::~PipelineCache() {
+	if (m_async_thread.joinable()) {
+		m_async_thread.request_stop();
+		m_async_ready.notify_one();
+		m_async_thread.join();
+		ReapGraphicsPipelines();
+	}
 	Save();
 	auto destroy = [this](const auto& pipelines) {
 		for (const auto& pipeline: pipelines | std::views::values) {
@@ -1121,8 +1195,9 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	return GetProgram(params, input_info, push_data_cursor);
 }
 
-PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&   command,
-                                                            const DrawRenderState& state) {
+PipelineCache::Pipeline* PipelineCache::FindGraphicsPipeline(const CommandBuffer&   command,
+                                                             const DrawRenderState& state,
+                                                             bool allow_async) {
 	const auto* colors        = state.color_info;
 	const auto& depth         = state.depth_info;
 	const auto  vertex_info   = state.VertexStages();
@@ -1304,7 +1379,11 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 	auto [iter, inserted] = m_graphics_pipelines.try_emplace(key);
 	auto& pipeline        = iter->second;
 	if (!inserted) {
-		return pipeline;
+		return pipeline.pipeline != nullptr ? &pipeline : nullptr;
+	}
+	if (allow_async) {
+		QueueGraphicsPipeline(key, stages);
+		return nullptr;
 	}
 
 	if (graphics_debug_dump_enabled()) {
@@ -1326,7 +1405,19 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 	StorePipeline(key);
 	CheckpointDriverCache();
 
-	return pipeline;
+	return &pipeline;
+}
+
+PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&   command,
+                                                            const DrawRenderState& state) {
+	return *FindGraphicsPipeline(command, state, false);
+}
+
+PipelineCache::Pipeline* PipelineCache::GetGraphicsPipelineAsync(const CommandBuffer&   command,
+                                                                 const DrawRenderState& state) {
+	if (!AsyncGraphicsPipelinesEnabled()) return FindGraphicsPipeline(command, state, false);
+	ReapGraphicsPipelines();
+	return FindGraphicsPipeline(command, state, true);
 }
 
 PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info) {

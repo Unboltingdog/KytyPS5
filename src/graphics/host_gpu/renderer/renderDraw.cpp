@@ -1153,6 +1153,16 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		    index_source.address, static_cast<uint64_t>(draw.index_count) *
 		                              index_source.guest_element_size);
 	}
+	if (draw.IsIndexed()) {
+		LogDrawPhase(draw.Name(), "CreatePipeline");
+	}
+	GpuWaitStats::CpuTimer pipeline_timer("draw:pipeline+bindings");
+	auto* pipeline_ptr = m_context.GetPipelineCache().GetGraphicsPipelineAsync(buffer, state);
+	if (pipeline_ptr == nullptr) {
+		GpuWaitStats::RecordEvent("draw:skip:pipeline-pending");
+		return false;
+	}
+	auto& pipeline = *pipeline_ptr;
 	LogDrawPhase(draw.Name(), "PrepareBindings");
 	auto&                            bindings = m_graphics_bindings;
 	std::array<PreparedBindings*, 4> descriptor_stages {};
@@ -1183,11 +1193,6 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		args_buffer = m_context.GetBufferCache().ObtainBuffer(emit.indirect.address, size, false);
 		EXIT_IF((args_buffer.second & 3u) != 0);
 	}
-	if (draw.IsIndexed()) {
-		LogDrawPhase(draw.Name(), "CreatePipeline");
-	}
-	GpuWaitStats::CpuTimer pipeline_timer("draw:pipeline+bindings");
-	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state);
 	vk::ImageAspectFlags feedback_aspects;
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
