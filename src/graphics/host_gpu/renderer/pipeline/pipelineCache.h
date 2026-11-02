@@ -25,6 +25,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -213,6 +214,12 @@ private:
 		Pipeline                     pipeline;
 	};
 
+	struct AsyncComputePipeline {
+		uint64_t     id = 0;
+		ShaderModule module;
+		Pipeline     pipeline;
+	};
+
 	struct Program {
 		std::unique_ptr<ShaderRecompiler::ShaderSource> call_source;
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
@@ -280,8 +287,12 @@ private:
 	std::condition_variable m_async_ready;
 	std::queue<std::unique_ptr<AsyncGraphicsPipeline>> m_async_jobs;
 	std::queue<std::unique_ptr<AsyncGraphicsPipeline>> m_async_done;
+	std::queue<std::unique_ptr<AsyncComputePipeline>> m_compute_async_jobs;
+	std::queue<std::unique_ptr<AsyncComputePipeline>> m_compute_async_done;
+	std::unordered_set<uint64_t> m_compute_async_pending;
 	// Declared last, so pipeline creation stops before device objects are destroyed.
 	std::jthread m_async_thread;
+	std::jthread m_compute_async_thread;
 
 	template <typename InputInfo>
 	const ShaderModule* GetProgram(const ShaderParams& params, InputInfo& input_info,
@@ -296,6 +307,7 @@ private:
 	                               bool allow_async);
 	void QueueGraphicsPipeline(const GraphicsPipelineKey&                 key,
 	                           const std::array<const ShaderModule*, 4>& stages);
+	void QueueComputePipeline(const ShaderModule& module);
 	void ReapGraphicsPipelines();
 
 	// pipelineSerialization.cpp

@@ -506,6 +506,10 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	});
 	EXIT_IF(module.module == nullptr);
 	m_compiled[static_cast<size_t>(key.stage)]++;
+	if (key.stage == ShaderType::Compute && GpuWaitStats::Enabled()) {
+		PipelineCacheLog("pipeline:compute-variants hash=0x{:016x} variants={}", key.hash,
+		                 program.modules.size());
+	}
 	// Guest geometry shaders are compiled through the host mesh stage.
 	std::printf("Shaders: VS %u | PS %u | CS %u | GS %u | LS %u | HS %u | TES %u\n",
 	            m_compiled[static_cast<size_t>(ShaderType::Vertex)],
@@ -590,6 +594,9 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	auto entry = m_program_cache.find(m_lookup_key);
 	const auto bind = [&](const ShaderModule& module) {
 		GpuCrashReport::NoteShader(params.hash, options.stage);
+		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+			QueueComputePipeline(module);
+		}
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};
 		module.info.bindings.AdvancePushData(push_data_cursor);
 		return &module;
@@ -720,16 +727,40 @@ void PipelineCache::QueueGraphicsPipeline(const GraphicsPipelineKey&            
 		std::scoped_lock lock(m_async_mutex);
 		m_async_jobs.push(std::move(job));
 	}
-	m_async_ready.notify_one();
+	m_async_ready.notify_all();
 	GpuWaitStats::RecordEvent("pipeline-async:queued");
 }
 
-void PipelineCache::ReapGraphicsPipelines() {
-	decltype(m_async_done) completed;
+void PipelineCache::QueueComputePipeline(const ShaderModule& module) {
+	if (!AsyncGraphicsPipelinesEnabled()) {
+		return;
+	}
+	auto [iter, inserted] = m_compute_pipelines.try_emplace(module.id);
+	if (!inserted && iter->second.pipeline != nullptr) {
+		return;
+	}
+	auto job     = std::make_unique<AsyncComputePipeline>();
+	job->id      = module.id;
+	job->module  = module;
 	{
 		std::scoped_lock lock(m_async_mutex);
-		if (m_async_done.empty()) return;
+		if (!m_compute_async_pending.insert(module.id).second) {
+			return;
+		}
+		m_compute_async_jobs.push(std::move(job));
+	}
+	m_async_ready.notify_all();
+	GpuWaitStats::RecordEvent("pipeline-async:compute-queued");
+}
+
+void PipelineCache::ReapGraphicsPipelines() {
+	decltype(m_async_done)         completed;
+	decltype(m_compute_async_done) compute_completed;
+	{
+		std::scoped_lock lock(m_async_mutex);
+		if (m_async_done.empty() && m_compute_async_done.empty()) return;
 		std::swap(completed, m_async_done);
+		std::swap(compute_completed, m_compute_async_done);
 	}
 	while (!completed.empty()) {
 		auto job = std::move(completed.front());
@@ -740,6 +771,19 @@ void PipelineCache::ReapGraphicsPipelines() {
 		StorePipeline(job->key);
 		CheckpointDriverCache();
 		GpuWaitStats::RecordEvent("pipeline-async:ready");
+	}
+	while (!compute_completed.empty()) {
+		auto job = std::move(compute_completed.front());
+		compute_completed.pop();
+		auto iter = m_compute_pipelines.find(job->id);
+		EXIT_IF(iter == m_compute_pipelines.end() || iter->second.pipeline != nullptr);
+		iter->second = std::move(job->pipeline);
+		CheckpointDriverCache();
+		{
+			std::scoped_lock lock(m_async_mutex);
+			m_compute_async_pending.erase(job->id);
+		}
+		GpuWaitStats::RecordEvent("pipeline-async:compute-ready");
 	}
 }
 
@@ -772,6 +816,30 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 				}
 				lock.lock();
 				m_async_done.push(std::move(job));
+				m_async_ready.notify_all();
+			}
+		});
+		m_compute_async_thread = std::jthread([this](std::stop_token stop) {
+			std::unique_lock lock(m_async_mutex);
+			for (;;) {
+				m_async_ready.wait(lock, [&] {
+					return stop.stop_requested() || !m_compute_async_jobs.empty();
+				});
+				if (m_compute_async_jobs.empty()) return;
+				auto job = std::move(m_compute_async_jobs.front());
+				m_compute_async_jobs.pop();
+				lock.unlock();
+				{
+					Common::DebugCounters::ScopedTimer timer(
+					    Common::DebugCounters::Counter::PipelinesCreated,
+					    Common::DebugCounters::Counter::PipelineCreateNs,
+					    Common::DebugCounters::Peak::PipelineCreateNs);
+					GpuWaitStats::CpuTimer wait_timer("pipeline:compute-async-create");
+					CreatePipelineInternal(m_graphics, job->pipeline, job->module, m_driver_cache);
+				}
+				lock.lock();
+				m_compute_async_done.push(std::move(job));
+				m_async_ready.notify_all();
 			}
 		});
 	}
@@ -789,10 +857,18 @@ void PipelineCache::WarmUpStore() {
 PipelineCache::~PipelineCache() {
 	if (m_async_thread.joinable()) {
 		m_async_thread.request_stop();
-		m_async_ready.notify_one();
-		m_async_thread.join();
-		ReapGraphicsPipelines();
 	}
+	if (m_compute_async_thread.joinable()) {
+		m_compute_async_thread.request_stop();
+	}
+	m_async_ready.notify_all();
+	if (m_async_thread.joinable()) {
+		m_async_thread.join();
+	}
+	if (m_compute_async_thread.joinable()) {
+		m_compute_async_thread.join();
+	}
+	ReapGraphicsPipelines();
 	Save();
 	auto destroy = [this](const auto& pipelines) {
 		for (const auto& pipeline: pipelines | std::views::values) {
@@ -1425,6 +1501,27 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 
 	EXIT_IF(input_info.stage.module == nullptr);
 	const auto& module = *input_info.stage.module;
+
+	if (AsyncGraphicsPipelinesEnabled()) {
+		ReapGraphicsPipelines();
+		QueueComputePipeline(module);
+		auto  iter = m_compute_pipelines.find(module.id);
+		bool  waited = false;
+		{
+			GpuWaitStats::CpuTimer wait_timer("pipeline:compute-wait");
+			while (iter->second.pipeline == nullptr) {
+				waited = true;
+				std::unique_lock lock(m_async_mutex);
+				m_async_ready.wait(lock, [&] { return !m_compute_async_done.empty(); });
+				lock.unlock();
+				ReapGraphicsPipelines();
+			}
+		}
+		if (waited) {
+			GpuWaitStats::RecordEvent("pipeline:compute-wait");
+		}
+		return iter->second;
+	}
 
 	auto [iter, inserted] = m_compute_pipelines.try_emplace(module.id);
 	auto& pipeline        = iter->second;
