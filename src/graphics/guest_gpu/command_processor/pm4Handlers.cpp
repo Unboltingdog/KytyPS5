@@ -1418,6 +1418,44 @@ KYTY_CP_OP_PARSER(CpOpCondExec) {
 		}
 	}
 
+	static const bool no_stall = [] {
+		const char* value = std::getenv("KYTY_COND_EXEC_NO_STALL");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	if (no_stall && !Libs::LibKernel::Memory::CanReadAroundGpuWrites(addr, sizeof(uint32_t))) {
+		bool        ordered = true;
+		const auto* packet  = buffer + payload_dw;
+		for (uint32_t used = 0; used < exec_count && ordered;) {
+			const auto header = packet[used];
+			const auto length = KYTY_PM4_LEN(header);
+			const auto opcode = (header >> 8u) & 0xffu;
+			if (length == 0u || used + length > exec_count) {
+				ordered = false;
+				break;
+			}
+			if (opcode == Pm4::IT_WAIT_REG_MEM) {
+				if (length != 7u) {
+					ordered = false;
+					break;
+				}
+				const auto* wait = packet + used + 1u;
+				const auto wait_addr = (wait[1] & ~uint32_t {3}) |
+				    (static_cast<uint64_t>(wait[2] & 0x3ffffu) << 32u);
+				ordered = Libs::LibKernel::Memory::CanReadAroundGpuWrites(wait_addr, sizeof(uint32_t)) &&
+				    TestWaitRegMemValue(*reinterpret_cast<const volatile uint32_t*>(wait_addr),
+				                        wait[3], wait[4], wait[0] & 0x7u);
+			} else if (opcode != Pm4::IT_NOP && opcode != Pm4::IT_SET_UCONFIG_REG) {
+				ordered = false;
+			}
+			used += length;
+		}
+		if (ordered) {
+			if (describe) GpuWaitStats::RecordEvent("cond-exec:no-stall");
+			return payload_dw;
+		}
+		if (describe) GpuWaitStats::RecordEvent("cond-exec:no-stall-fallback");
+	}
+
 	if (*reinterpret_cast<const volatile uint32_t*>(addr) == 0) {
 		if (describe) GpuWaitStats::RecordEvent("cond-exec:skipped");
 		return payload_dw + exec_count;
