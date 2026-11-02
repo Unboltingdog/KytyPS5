@@ -25,7 +25,9 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <set>
 #include <span>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vulkan/vulkan_format_traits.hpp>
@@ -37,6 +39,37 @@ namespace {
 constexpr uint64_t NumFramesBeforeRemoval = 32;
 // Largest GPU-written tiled image (in texels) that is written back to guest memory on submit.
 constexpr uint64_t SmallTiledReadbackTexels = 64 * 64;
+
+void LogDepthAlias(const char* kind, const ImageInfo& requested, const ImageInfo& depth,
+                   TextureCache::BindingType binding) {
+	if (!GpuWaitStats::Enabled()) {
+		return;
+	}
+	static std::mutex                                          mutex;
+	static std::set<std::tuple<uint64_t, uint32_t, std::string>> logged;
+	const auto key = std::make_tuple(requested.data.address,
+	                                 static_cast<uint32_t>(requested.pixel_format), std::string(kind));
+	{
+		std::scoped_lock lock {mutex};
+		if (!logged.insert(key).second) {
+			return;
+		}
+	}
+	const char* binding_name = binding == TextureCache::BindingType::Texture    ? "texture"
+	                           : binding == TextureCache::BindingType::Storage ? "storage"
+	                                                                          : "depth-target";
+	LOGF("depth-alias:%s address=0x%016" PRIx64 " binding=%s "
+	     "requested={format=%u tile=%u extent=%ux%ux%u pitch=%u metadata=%u} "
+	     "depth={address=0x%016" PRIx64
+	     " format=%u tile=%u extent=%ux%ux%u pitch=%u metadata=%u}\n",
+	     kind, requested.data.address, binding_name,
+	     static_cast<uint32_t>(requested.pixel_format), static_cast<uint32_t>(requested.tile_mode),
+	     requested.extent.width, requested.extent.height, requested.extent.depth, requested.pitch,
+	     static_cast<uint32_t>(requested.metadata.kind), depth.data.address,
+	     static_cast<uint32_t>(depth.pixel_format), static_cast<uint32_t>(depth.tile_mode),
+	     depth.extent.width, depth.extent.height, depth.extent.depth, depth.pitch,
+	     static_cast<uint32_t>(depth.metadata.kind));
+}
 
 [[nodiscard]] bool DecodeColorClear(const TextureCache::ImageDesc& desc, uint8_t code,
                                   vk::ClearColorValue& clear) {
@@ -677,6 +710,9 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 		case BindingType::VideoOut: recreate |= cached.info.IsDepth(); break;
 	}
 	if (!recreate) {
+		if (cached.info.IsDepth()) {
+			LogDepthAlias("shared", requested, cached.info, binding);
+		}
 		return cached_id;
 	}
 	RefreshImage(cached_id);
@@ -693,6 +729,9 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 	info.htile_initial_clear  = false;
 	const auto replacement_id = InsertImage(info);
 	auto&      replacement    = m_slot_images[replacement_id];
+	if (raw_depth_texture) {
+		LogDepthAlias("copy", requested, cached.info, binding);
+	}
 	replacement.usage         = cached.usage;
 	if (cached.binding.is_bound || cached.binding.is_target) {
 		cached.binding.needs_rebind = true;
@@ -1365,6 +1404,13 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		if (!result) {
 			result         = InsertImage(desc.info);
 			auto& inserted = m_slot_images[result];
+			for (const auto candidate: candidates) {
+				const auto* depth = m_slot_images.try_get(candidate);
+				if (depth != nullptr && depth->registered && depth->info.IsDepth()) {
+					LogDepthAlias("separate", desc.info, depth->info, desc.type);
+					break;
+				}
+			}
 			if (m_buffer_cache.HasGpuDirtyBytes(inserted.info.data.address,
 			                                    inserted.info.data.size)) {
 				inserted.MarkBufferModified();
@@ -1525,6 +1571,9 @@ vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 	}
 	RefreshImage(id);
 	CommitGpuWrite(image);
+	if (image.info.metadata.kind == ImageMetadataKind::Htile && !m_download_images.contains(id)) {
+		LogDepthAlias("host-only", desc.info, image.info, BindingType::DepthTarget);
+	}
 	if (desc.info.HasStencil()) {
 		RefreshImage(AssociateStencil(id, desc.info.stencil));
 	}
