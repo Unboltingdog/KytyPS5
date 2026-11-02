@@ -9,6 +9,7 @@
 
 #include <array>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -47,6 +48,15 @@ void CheckFatal(F &&function, std::string_view expected, const char *message) {
     return;
   }
   Check(false, message);
+}
+
+bool SetGpuBufferTables(bool enabled) {
+#if defined(_WIN32)
+  return _putenv(enabled ? "KYTY_GPU_BUFFER_TABLES=1" : "KYTY_GPU_BUFFER_TABLES=") == 0;
+#else
+  return enabled ? setenv("KYTY_GPU_BUFFER_TABLES", "1", 1) == 0
+                 : unsetenv("KYTY_GPU_BUFFER_TABLES") == 0;
+#endif
 }
 
 struct Fixture {
@@ -7052,7 +7062,7 @@ void TestWorkgroupSelectedBufferRecords() {
 }
 
 void TestGpuBufferTableSkipsCounts() {
-  Check(setenv("KYTY_GPU_BUFFER_TABLES", "1", 1) == 0,
+  Check(SetGpuBufferTables(true),
         "could not enable GPU buffer tables");
   auto fixture = MakeBufferRecordFixture(1u, false, true, 0u, false, true);
   auto plan = ExtractResourcePlan(fixture->program);
@@ -7076,7 +7086,67 @@ void TestGpuBufferTableSkipsCounts() {
             memory.reads == 0u && memory.watched_reads == 0u &&
             snapshot.buffers.size() == plan.info.buffers.size(),
         "GPU buffer table read indirect dispatch counts or descriptor keys");
-  unsetenv("KYTY_GPU_BUFFER_TABLES");
+  SetGpuBufferTables(false);
+}
+
+void TestGpuBufferTableSkipsUnmaskedSelector() {
+  Check(SetGpuBufferTables(true),
+        "could not enable GPU buffer tables");
+  auto fixture = MakeBufferRecordFixture(1u, false, true, 0u, false, true);
+  auto plan = ExtractResourcePlan(fixture->program);
+  for (const auto &buffer : plan.info.buffers) {
+    auto &source = plan.descriptor_sources[buffer.source];
+    if (source.indirect_descriptor)
+      source.indirect_descriptor->workgroup_axis = UINT32_MAX;
+  }
+  LinearTestMemory memory;
+  memory.fail_address = memory.base + 0x1000u;
+  memory.watched_address = memory.fail_address;
+  std::array<uint32_t, 8> user_data{uint32_t(memory.base) + 256u, 192u << 16u,
+      2u, 0x5204u, uint32_t(memory.base) + 0x1000u, 12u << 16u,
+      MaxIndirectDescriptorProbes, 0x5204u};
+  const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+      .read_specialization_memory = ReadLinearTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            memory.reads == 0u && memory.watched_reads == 0u,
+        "GPU buffer table read an unmasked stride-12 selector");
+  SetGpuBufferTables(false);
+}
+
+void TestGpuTableSkipsUnmaskedImageSelector() {
+  Check(SetGpuBufferTables(true),
+        "could not enable GPU buffer tables");
+  auto fixture = MakeIndirectImageFixture(false, 48u, 0u, 16u);
+  fixture->PlanAndTrack();
+  auto plan = ExtractResourcePlan(fixture->program);
+  auto &indirect = *plan.descriptor_sources[plan.info.images[0].source].indirect_descriptor;
+  indirect.selector.emplace(DescriptorSource::IndirectDescriptor::SelectorRead{
+      .source = 0u, .stride = 12u});
+  indirect.table_scalar = true;
+  std::array<uint32_t, 8> descriptor{};
+  descriptor[0] = 0x20u;
+  descriptor[1] = static_cast<uint32_t>(
+      Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+  descriptor[2] = 3u | (3u << 14u);
+  descriptor[3] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+      (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  std::array<uint32_t, 16> data{0x3000u, 4u << 16u, 0x100000u, 0u,
+                                0x2000u, 48u << 16u, 3u, 0u};
+  std::copy_n(data.begin(), 4u, data.begin() + 12u);
+  LinearTestMemory memory;
+  memory.fail_address = 0x3000u;
+  FakeImageHeap heap;
+  heap.kinds = {{descriptor, 8u}};
+  const SrtRuntime runtime{.user_data = data, .userdata = &memory,
+      .read_specialization_memory = ReadLinearTestMemory, .image_heap = &heap};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            specialization.images[0].heap && memory.reads == 0u,
+        "GPU image table read an unmasked selector instead of using its heap");
+  SetGpuBufferTables(false);
 }
 
 void TestGpuSelectedFormattedRecordStore() {
@@ -9223,6 +9293,8 @@ int main() {
     Run("GPU-selected buffer records", TestGpuSelectedBufferRecords);
     Run("workgroup-selected buffer records", TestWorkgroupSelectedBufferRecords);
     Run("GPU buffer table skips counts", TestGpuBufferTableSkipsCounts);
+    Run("GPU buffer table skips unmasked selector", TestGpuBufferTableSkipsUnmaskedSelector);
+    Run("GPU image table skips unmasked selector", TestGpuTableSkipsUnmaskedImageSelector);
     Run("GPU-selected formatted record store", TestGpuSelectedFormattedRecordStore);
     Run("finite buffer selection", TestFiniteBufferSelection);
     Run("packed scalar buffer selection", TestPackedScalarBufferSelection);

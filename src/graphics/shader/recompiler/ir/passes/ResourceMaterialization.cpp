@@ -774,7 +774,8 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 		if (byte_keys && selector != nullptr && !runtime_table) {
 			ShaderBufferResource material;
 			if (!DecodeBufferDescriptor(material_value, material)) return false;
-			use_selector = CanReadIndexedSelector(material, selector->offset);
+			use_selector = CanReadIndexedSelector(material, selector->offset) &&
+			               !GpuBufferTableEnabled(indirect);
 			if (use_selector && material.Format() != Prospero::BufferFormat::kInvalid &&
 			    material.NumRecords() != 0u && selector->offset < material.Stride()) {
 				const auto begin = material.Base48() + selector->offset;
