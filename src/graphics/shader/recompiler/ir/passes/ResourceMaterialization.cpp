@@ -1762,8 +1762,12 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		return source.indirect_descriptor && source.indirect_descriptor->workgroup_axis != UINT32_MAX &&
 		       !GpuBufferTableEnabled(*source.indirect_descriptor);
 	};
-	const bool capture_reads = program.capture_specialization_reads || !program.source_reads.empty() ||
-	    (runtime.indirect_args_address != 0u &&
+	static const bool dispatch_cache = [] {
+		const char* value = std::getenv("KYTY_DISPATCH_CACHE");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	const bool capture_reads = dispatch_cache || program.capture_specialization_reads ||
+	    !program.source_reads.empty() || (runtime.indirect_args_address != 0u &&
 	     std::ranges::any_of(program.descriptor_sources, uses_workgroup_count));
 	auto& reads = snapshot.specialization_reads;
 	reads = program.source_reads;

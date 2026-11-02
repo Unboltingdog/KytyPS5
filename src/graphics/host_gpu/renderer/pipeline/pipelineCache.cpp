@@ -369,17 +369,91 @@ std::span<const uint32_t> PipelineCache::Program::FunctionCode() const {
 	    : std::span<const uint32_t>{};
 }
 
+bool DispatchCacheEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_DISPATCH_CACHE");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
+}
+
 bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime) {
 	const auto revision = call_source->revision;
 	ShaderRecompiler::RefreshShaderSource(*call_source, runtime);
 	resource_plan.source_reads = call_source->reads;
-	return revision != call_source->revision;
+	const bool changed = revision != call_source->revision;
+	dispatch_cache_valid &= !changed;
+	return changed;
+}
+
+bool PipelineCache::Program::DispatchCacheMatches(
+    const ShaderRecompiler::IR::SrtRuntime& runtime) const {
+	if (!dispatch_cache_valid || runtime.shader_base != dispatch_cache_shader_base ||
+	    runtime.indirect_args_address != dispatch_cache_indirect_args ||
+	    !std::ranges::equal(runtime.user_data, dispatch_cache_user_data) ||
+	    !std::ranges::equal(runtime.workgroup_counts, dispatch_cache_workgroup_counts)) {
+		return false;
+	}
+	for (const auto& captured: dispatch_cache_reads) {
+		const auto bytes = captured.words.size() * sizeof(uint32_t);
+		if (!Libs::LibKernel::Memory::CanReadAroundGpuWrites(captured.address, bytes)) return false;
+		const auto* current = reinterpret_cast<const volatile uint32_t*>(captured.address);
+		for (size_t word = 0; word < captured.words.size(); ++word) {
+			if (current[word] != captured.words[word]) return false;
+		}
+	}
+	return true;
+}
+
+void PipelineCache::Program::CaptureDispatchCache(
+    const ShaderRecompiler::IR::SrtRuntime& runtime) {
+	dispatch_cache_valid = false;
+	dispatch_cache_reads.clear();
+	if (!DispatchCacheEnabled() ||
+	    std::ranges::any_of(resource_plan.srt_reads, [](const auto& read) {
+		    return read.gpu_flag != UINT32_MAX;
+	    }) ||
+	    std::ranges::any_of(specialization.images, [](const auto& image) { return image.heap; }) ||
+	    std::ranges::any_of(specialization.samplers, [](const auto& sampler) { return sampler.heap; })) {
+		return;
+	}
+	dispatch_cache_user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
+	dispatch_cache_workgroup_counts.assign(runtime.workgroup_counts.begin(),
+	                                       runtime.workgroup_counts.end());
+	dispatch_cache_shader_base = runtime.shader_base;
+	dispatch_cache_indirect_args = runtime.indirect_args_address;
+	for (const auto& [address, size]: resources.specialization_reads) {
+		if ((size & 3u) != 0u ||
+		    !Libs::LibKernel::Memory::CanReadAroundGpuWrites(address, size)) {
+			dispatch_cache_reads.clear();
+			return;
+		}
+		auto& captured = dispatch_cache_reads.emplace_back();
+		captured.address = address;
+		captured.words.resize(size / sizeof(uint32_t));
+		const auto* current = reinterpret_cast<const volatile uint32_t*>(address);
+		for (auto& word: captured.words) word = *current++;
+	}
+	dispatch_cache_valid = true;
+}
+
+bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime) {
+	if (DispatchCacheEnabled() && DispatchCacheMatches(runtime)) {
+		GpuWaitStats::RecordEvent("dispatch-cache:hit");
+		return true;
+	}
+	if (!MaterializeTimed(resource_plan, runtime, resources, specialization)) {
+		dispatch_cache_valid = false;
+		return false;
+	}
+	CaptureDispatchCache(runtime);
+	return true;
 }
 
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  uint32_t push_data_cursor) {
-	if (!MaterializeTimed(resource_plan, runtime, resources, specialization)) {
+	if (!Materialize(runtime)) {
 		t_materialize_failed = true;
 		return nullptr;
 	}
@@ -609,8 +683,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 		}).first;
 		auto& program = entry->second;
-		if (!MaterializeTimed(program.resource_plan, runtime, program.resources,
-		                      program.specialization)) {
+		if (!program.Materialize(runtime)) {
 			return materialize_failed();
 		}
 	} else if (source_changed) {

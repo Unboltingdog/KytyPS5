@@ -212,9 +212,22 @@ private:
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::vector<ShaderModule>                    modules;
 		bool                                         skip_dispatch = false;
+		struct DispatchCacheRead {
+			uint64_t              address = 0;
+			std::vector<uint32_t> words;
+		};
+		std::vector<uint32_t>       dispatch_cache_user_data;
+		std::vector<uint32_t>       dispatch_cache_workgroup_counts;
+		std::vector<DispatchCacheRead> dispatch_cache_reads;
+		uint64_t                    dispatch_cache_shader_base = 0;
+		uint64_t                    dispatch_cache_indirect_args = 0;
+		bool                        dispatch_cache_valid = false;
 
 		[[nodiscard]] std::span<const uint32_t> FunctionCode() const;
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime);
+		bool Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime);
+		bool DispatchCacheMatches(const ShaderRecompiler::IR::SrtRuntime& runtime) const;
+		void CaptureDispatchCache(const ShaderRecompiler::IR::SrtRuntime& runtime);
 		template <bool HasCalls>
 		ShaderModule* FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                         uint32_t                                push_data_cursor);
