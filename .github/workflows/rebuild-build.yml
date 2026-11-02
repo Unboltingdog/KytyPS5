@@ -1,0 +1,87 @@
+# Test builds of the `rebuild` branch (the GPU-driven binding rework), released like the custom
+# builds but as pre-releases named rebuild-<date>-<sha>, so they never become "Latest". No
+# upstream rebase: `rebuild` is rebased onto `custom` by hand when needed.
+name: Rebuild build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ rebuild ]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rebuild-build
+  cancel-in-progress: true
+
+env:
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  meta:
+    name: Name the release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        run: echo "tag=rebuild-$(date -u +%Y-%m-%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build
+    needs: meta
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: write
+
+  release:
+    name: Release
+    needs: [meta, build]
+    # The Windows build is what is released; a cancelled macOS job does not hold it back.
+    if: ${{ !cancelled() && needs.meta.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.meta.outputs.tag }}
+    steps:
+      - name: Download the Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: KytyPS5-Windows-x64
+          path: windows
+
+      - name: Download the Linux build
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: KytyPS5-Linux-x86_64
+          path: linux
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          (cd windows && zip -qr "$GITHUB_WORKSPACE/$TAG-Windows-x64.zip" .)
+          if [ -d linux ]; then
+            chmod a+x linux/kyty_launcher linux/kyty_emulator linux/kyty_updater 2>/dev/null || true
+            tar -C linux -czf "$TAG-Linux-x86_64.tar.gz" .
+          fi
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          notes=$(printf 'Test build of the `rebuild` branch (GPU-driven resource binding).\n\nCommit: %s/%s/commit/%s' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_SHA")
+          assets=(./*.zip)
+          if compgen -G "./*.tar.gz" > /dev/null; then assets+=(./*.tar.gz); fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --notes "$notes" --prerelease --latest=false "${assets[@]}"
+
+      - name: Keep the 10 newest rebuild releases
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("rebuild-"))] | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' |
+          while read -r tag; do
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          done
