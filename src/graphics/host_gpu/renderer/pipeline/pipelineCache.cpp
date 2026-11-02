@@ -597,6 +597,9 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	// A draw or dispatch whose resources cannot be resolved is skipped (rendering may miss its
 	// output) instead of ending the game.
 	const auto materialize_failed = [&]() -> const ShaderModule* {
+		if constexpr (!std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+			GpuWaitStats::RecordEvent("draw:skip:resources");
+		}
 		static std::mutex                   mutex;
 		static std::unordered_set<uint64_t> logged;
 		std::scoped_lock                    lock(mutex);

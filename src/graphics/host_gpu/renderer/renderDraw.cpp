@@ -80,6 +80,22 @@ std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t index_offset,
 	return {vertex_offset, instance_offset};
 }
 
+class DrawSubmissionStats {
+public:
+	DrawSubmissionStats() { GpuWaitStats::RecordEvent("draw:requested"); }
+	~DrawSubmissionStats() {
+		if (!m_submitted) GpuWaitStats::RecordEvent("draw:not-submitted");
+	}
+
+	void Submitted() {
+		m_submitted = true;
+		GpuWaitStats::RecordEvent("draw:submitted");
+	}
+
+private:
+	bool m_submitted = false;
+};
+
 static std::atomic<uint32_t> g_draw_state_log_count   = 0;
 static std::atomic<uint32_t> g_draw_input_log_count   = 0;
 static std::atomic<uint32_t> g_mrt_state_log_count    = 0;
@@ -1082,14 +1098,15 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 	return true;
 }
 
-void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
+bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          const DrawEmitInfo&          emit,
                                          const DrawIndexBufferSource& index_source) {
 	auto&      ucfg                     = buffer.GetUserConfig();
 	const bool primitive_restart_enable = state.primitive_restart_enable;
 	if (CopyDepthToColor(buffer, draw, emit, state)) {
-		return;
+		GpuWaitStats::RecordEvent("draw:skip:depth-copy");
+		return false;
 	}
 	const auto  vertex_stages = state.VertexStages();
 	const bool  mesh_active   = state.vertex_info[0].stage.module->info.stage == ShaderType::Mesh;
@@ -1116,7 +1133,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	} else if (mesh_active) {
 		const auto primitives = mesh.InputPrimitiveCount(draw.index_count);
 		if (primitives == 0 || draw.instance_count == 0) {
-			return;
+			GpuWaitStats::RecordEvent("draw:skip:empty-mesh");
+			return false;
 		}
 		mesh_groups = (primitives - 1u) / mesh.primitives_per_group + 1u;
 		if (mesh_groups > limits.maxMeshWorkGroupCount[0] ||
@@ -1298,6 +1316,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
 	}
+	return true;
 }
 
 // Vulkan offsets for a prepared draw, or nullopt when its indirect records need the CPU:
@@ -1364,7 +1383,9 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		return true;
 	}
 
+	DrawSubmissionStats submission_stats;
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		GpuWaitStats::RecordEvent("draw:skip:no-vertex-shader");
 		return true;
 	}
 
@@ -1392,6 +1413,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
 	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
+		GpuWaitStats::RecordEvent("draw:skip:topology");
 		return true;
 	}
 
@@ -1433,6 +1455,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		    GpuWaitStats::CpuTimer timer("draw:prepare-state");
 		    return PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state);
 	    }()) {
+		GpuWaitStats::RecordEvent("draw:skip:prepare-state");
 		ResetBindings();
 		return true;
 	}
@@ -1443,7 +1466,11 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	                                  args.base_vertex, args.first_instance, args.indirect);
 	if (emit) {
 		GpuWaitStats::CpuTimer timer("draw:execute");
-		ExecutePreparedDraw(submit_id, buffer, draw, state, *emit, index_source);
+		if (ExecutePreparedDraw(submit_id, buffer, draw, state, *emit, index_source)) {
+			submission_stats.Submitted();
+		}
+	} else {
+		GpuWaitStats::RecordEvent("draw:skip:cpu-indirect-fallback");
 	}
 	ResetBindings();
 	return emit.has_value();
@@ -1479,7 +1506,9 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		return true;
 	}
 
+	DrawSubmissionStats submission_stats;
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		GpuWaitStats::RecordEvent("draw:skip:no-vertex-shader");
 		return true;
 	}
 
@@ -1506,6 +1535,7 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
 	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
+		GpuWaitStats::RecordEvent("draw:skip:topology");
 		ResetBindings();
 		return true;
 	}
@@ -1513,6 +1543,7 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		    GpuWaitStats::CpuTimer timer("draw:prepare-state");
 		    return PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state);
 	    }()) {
+		GpuWaitStats::RecordEvent("draw:skip:prepare-state");
 		ResetBindings();
 		return true;
 	}
@@ -1527,6 +1558,7 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 			     state.ps_input_info.input_num, sh_ctx.GetPs().ps_regs.data_addr,
 			     sh_ctx.GetVs().es_regs.data_addr, sh_ctx.GetVs().gs_regs.data_addr);
 		}
+		GpuWaitStats::RecordEvent("draw:skip:rect-list-inputs");
 		ResetBindings();
 		return true;
 	}
@@ -1537,7 +1569,11 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	                                  args.indirect);
 	if (emit) {
 		GpuWaitStats::CpuTimer timer("draw:execute");
-		ExecutePreparedDraw(submit_id, buffer, draw, state, *emit, {});
+		if (ExecutePreparedDraw(submit_id, buffer, draw, state, *emit, {})) {
+			submission_stats.Submitted();
+		}
+	} else {
+		GpuWaitStats::RecordEvent("draw:skip:cpu-indirect-fallback");
 	}
 	ResetBindings();
 	return emit.has_value();
