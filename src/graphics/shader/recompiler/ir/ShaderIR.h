@@ -739,6 +739,7 @@ struct ResourcePlan {
 	UniformFillPlan                     uniform_fill;
 	// x86 walker over the retained SRT, descriptor and condition values.
 	std::unique_ptr<Xbyak::CodeGenerator> srt_code;
+	std::unordered_map<uint32_t, const Inst*> srt_loads; // JIT offset to source load, for diagnostics.
 	uint32_t                              srt_user_data = 0; // User-data DWORDs the walker reads.
 	uint32_t                              srt_captures  = 0; // Scratch offset of loaded addresses.
 	// GPU-thread scratch for walker results and material keys.

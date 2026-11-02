@@ -1859,13 +1859,14 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		    i < program.info.buffers.size() ? i : specialization.buffers[i].indirect_root;
 		if (base_index >= program.info.buffers.size()) return false;
 		const auto& base = program.info.buffers[base_index];
+		bool gpu_descriptor = false;
 		if (i < program.info.buffers.size()) {
 			const auto* source = Source(program, base.source);
 			if (source == nullptr) return false;
 			if (source->indirect_descriptor.has_value()) {
+				gpu_descriptor = GpuBufferTableEnabled(*source->indirect_descriptor);
 				snapshot.buffers[i] = {.dword_count = 4u};
-				if (WalkedActive(program, base.source) &&
-				    !GpuBufferTableEnabled(*source->indirect_descriptor)) {
+				if (WalkedActive(program, base.source) && !gpu_descriptor) {
 					if (!MaterializeIndirectDescriptor(
 					        program, base.source, i, 4u, 4u, observed, snapshot,
 					        snapshot.buffers, specialization.buffers,
@@ -1875,8 +1876,13 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 					        }))
 						return resource_failed("buffer", i, base.source, snapshot.buffers.size());
 				}
-			} else if (!evaluate(base.source, snapshot.buffers[i])) {
-				return false;
+			} else {
+				gpu_descriptor = GpuScalarLoadsEnabled() &&
+				    std::ranges::any_of(program.memory_info, [&](const MemoryInfo& memory) {
+					    return memory.kind == ResourceKind::IndirectBuffer && memory.resource == i;
+				    });
+				if (gpu_descriptor) snapshot.buffers[i] = {.dword_count = 4u};
+				else if (!evaluate(base.source, snapshot.buffers[i])) return false;
 			}
 		}
 		auto&                descriptor_value = snapshot.buffers[i];
@@ -1902,7 +1908,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		    base.formatted ? descriptor.Format() : Prospero::BufferFormat::kInvalid;
 		buffer.descriptor_swizzle = base.formatted ? descriptor.DstSelXYZW() : DstSel(4, 5, 6, 7);
 		buffer.zero_stride_oob    = descriptor.OutOfBounds() == 0u && stride == 0u;
-		buffer.scalar_empty       = base.scalar && descriptor.GetSize() == 0u;
+		buffer.scalar_empty       = base.scalar && descriptor.GetSize() == 0u && !gpu_descriptor;
 	}
 	snapshot.images.resize(program.info.images.size());
 	specialization.images.resize(program.info.images.size());
@@ -2344,7 +2350,7 @@ template <class S, class P> void IoPlan(S& io, P& plan) {
 	       selector_groups, control_flow, control_phis, srt_reads, source_reads, capture_specialization_reads,
 	       srt_plan_complete, resource_tracking_complete, info, uniform_fill,
 	       // Derived on load.
-	       srt_code, srt_user_data, srt_captures, srt_scratch, material_keys, selector_keys] = plan;
+	       srt_code, srt_loads, srt_user_data, srt_captures, srt_scratch, material_keys, selector_keys] = plan;
 	IoValues(io, values, control_phis);
 	IoAll(io, stage, shader_hash, user_data_base, user_data_count, memory_info, descriptor_sources,
 	      selector_groups, control_flow, srt_reads, source_reads, capture_specialization_reads,

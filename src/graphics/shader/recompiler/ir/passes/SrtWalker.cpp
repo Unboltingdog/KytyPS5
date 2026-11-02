@@ -10,9 +10,11 @@
 #include <atomic>
 #include <cstdlib>
 #include <bit>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <map>
+#include <mutex>
 #include <unordered_set>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -168,6 +170,7 @@ const uint8_t* Scratch(const ResourcePlan& plan) {
 }
 
 thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
+thread_local const ResourcePlan*         t_running_plan   = nullptr;
 // KYTY_WALKER_NO_STALL: set by the fault handler when a walker load hits memory the GPU has
 // written but not yet read back. The load's node then has no value, as an unknown operand.
 std::atomic<uint8_t>                     g_walker_deferred_load {0};
@@ -175,8 +178,10 @@ thread_local bool                        t_walker_no_stall = false;
 
 // Every guest load is mov eax, [r10] (41 8b 02), so a fault completes it as a zero read, or, when
 // deferred, as no value: the node returns without storing one.
-void LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address, const Xbyak::Label& unknown) {
+void LoadGuest(ResourcePlan& plan, const Inst& inst, Xbyak::CodeGenerator& code,
+               const Xbyak::RegExp& address, const Xbyak::Label& unknown) {
 	code.lea(code.r10, code.ptr[address]);
+	plan.srt_loads.emplace(static_cast<uint32_t>(code.getCurr() - code.getCode()), &inst);
 	code.mov(code.eax, code.dword[code.r10]);
 	Xbyak::Label loaded;
 	code.mov(code.r11, reinterpret_cast<uint64_t>(&g_walker_deferred_load));
@@ -946,7 +951,7 @@ void WalkerCompiler::EmitRead(const Node& node) {
 			c.mov(c.rcx, c.rax);
 			c.shr(c.rcx, 48);
 			c.jnz(m_ret, Near);
-			LoadGuest(c, c.rax, m_ret);
+			LoadGuest(m_plan, inst, c, c.rax, m_ret);
 		} else {
 			Load(c.r11, args[1]);
 			c.shr(c.r11d, 16);
@@ -976,7 +981,7 @@ void WalkerCompiler::EmitRead(const Node& node) {
 			c.lea(c.r11, c.ptr[c.r9 + static_cast<size_t>(immediate) + 4u]);
 			c.cmp(c.r11, c.rcx);
 			c.ja(zero, Near);
-			LoadGuest(c, c.rax + c.r9 + static_cast<size_t>(immediate), m_ret);
+			LoadGuest(m_plan, inst, c, c.rax + c.r9 + static_cast<size_t>(immediate), m_ret);
 		}
 		++m_captures;
 		c.mov(c.qword[c.r8], c.r10);
@@ -1397,6 +1402,7 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 } // namespace
 
 void CompileSrtWalker(ResourcePlan& plan, std::span<const Value> values) {
+	plan.srt_loads.clear();
 	plan.srt_code = std::make_unique<Xbyak::CodeGenerator>(4096, Xbyak::AutoGrow);
 	WalkerCompiler(plan, *plan.srt_code).Compile(values);
 }
@@ -1407,9 +1413,11 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
 	flat.assign(plan.srt_reads.size(), 0u);
 	using Walker = const uint64_t* KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*, uint64_t*, uint64_t);
 	t_running_walker = plan.srt_code.get();
+	t_running_plan = &plan;
 	const auto* end = plan.srt_code->getCode<Walker>()(runtime.user_data.data(), flat.data(),
 	                                                     plan.srt_scratch.data(), runtime.shader_base);
 	t_running_walker = nullptr;
+	t_running_plan = nullptr;
 	if (end == nullptr) return false;
 	if (reads != nullptr) {
 		for (auto* read = plan.srt_scratch.data() + plan.srt_captures / 8u; read != end; ++read)
@@ -1483,10 +1491,45 @@ SrtWalkerNoStallScope::~SrtWalkerNoStallScope() {
 	g_walker_deferred_load.store(0, std::memory_order_relaxed);
 }
 
-uint32_t SrtWalkerDeferLoad(uint64_t rip) {
+uint32_t SrtWalkerDeferLoad(uint64_t rip, uint64_t address) {
 	if (!t_walker_no_stall) return 0;
 	const auto length = SrtWalkerLoadLength(rip);
-	if (length != 0) g_walker_deferred_load.store(1, std::memory_order_relaxed);
+	if (length == 0) return 0;
+	g_walker_deferred_load.store(1, std::memory_order_relaxed);
+	const char* stats = std::getenv("KYTY_WAIT_STATS");
+	if (t_running_plan != nullptr && stats != nullptr && stats[0] != '\0' && stats[0] != '0') {
+		static std::mutex mutex;
+		static std::unordered_set<uint64_t> logged;
+		std::lock_guard lock(mutex);
+		if (logged.insert(t_running_plan->shader_hash).second) {
+			const auto offset = static_cast<uint32_t>(rip - reinterpret_cast<uint64_t>(t_running_walker->getCode()));
+			const auto found = t_running_plan->srt_loads.find(offset);
+			const Inst* load = found != t_running_plan->srt_loads.end() ? found->second : nullptr;
+			bool descriptor = false, branch = false, key = false;
+			if (load != nullptr) {
+				std::vector<const Inst*> pending {load};
+				std::unordered_set<const Inst*> visited;
+				while (!pending.empty() && visited.size() < 256u) {
+					const auto* current = pending.back();
+					pending.pop_back();
+					if (!visited.insert(current).second) continue;
+					const auto op = current->GetOpcode();
+					descriptor |= IsDescriptorHandle(op);
+					branch |= op == ValueOpcode::ConditionRef;
+					key |= op == ValueOpcode::GetBufferResourceIndex;
+					for (const auto& use: current->Uses()) pending.push_back(use.user);
+				}
+			}
+			char depends[64];
+			std::snprintf(depends, sizeof(depends), "%s%s%s%s%s",
+			    descriptor ? "descriptor" : "", descriptor && (branch || key) ? "+" : "",
+			    branch ? "branch" : "", branch && key ? "+" : "", key ? "key" : "");
+			std::fprintf(stderr, "srt:no-stall-load:%016llx:addr=0x%llx pc=0x%x depends=%s\n",
+			    static_cast<unsigned long long>(t_running_plan->shader_hash),
+			    static_cast<unsigned long long>(address), load != nullptr ? load->Flags<MemoryFlags>().pc : 0u,
+			    depends[0] != '\0' ? depends : "unknown");
+		}
+	}
 	return length;
 }
 

@@ -102,7 +102,7 @@ private:
 };
 // Called by the fault handler for a load that would wait for the GPU. Returns the walker load's
 // length to skip when the load can be treated as unknown, else 0.
-uint32_t SrtWalkerDeferLoad(uint64_t rip);
+uint32_t SrtWalkerDeferLoad(uint64_t rip, uint64_t address);
 
 // Nonnegative affine coefficients: element zero is constant, remaining elements are
 // caller-selected leaves. Runtime range proofs must additionally exclude U32 wrap.

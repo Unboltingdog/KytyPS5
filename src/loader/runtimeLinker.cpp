@@ -724,7 +724,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			// KYTY_WALKER_NO_STALL: a resource walk on the GPU thread treats this GPU-written value
 			// as unknown instead of waiting for the GPU to finish writing it.
 			if (const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerDeferLoad(
-			        info->exception_address)) {
+			        info->exception_address, info->access_violation_vaddr)) {
 				Libs::Graphics::GpuWaitStats::RecordEvent("rb:walker-load-deferred");
 				Loader::X64InstructionEmulator::SkipLoad(info->native_context, length);
 				return true;
