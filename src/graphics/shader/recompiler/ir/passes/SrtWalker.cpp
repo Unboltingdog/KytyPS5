@@ -1481,6 +1481,10 @@ bool SrtWalkerNoStallActive() {
 	return t_walker_no_stall;
 }
 
+bool SrtWalkerNoStallLoadDeferred() {
+	return t_walker_no_stall && g_walker_deferred_load.load(std::memory_order_relaxed) != 0;
+}
+
 SrtWalkerNoStallScope::SrtWalkerNoStallScope(): m_previous(t_walker_no_stall) {
 	t_walker_no_stall = true;
 	g_walker_deferred_load.store(0, std::memory_order_relaxed);

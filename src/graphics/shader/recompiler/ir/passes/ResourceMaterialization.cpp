@@ -1999,7 +1999,29 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		}
 	}
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
-	return BuildResourceSpecialization(program, snapshot, specialization);
+	if (!BuildResourceSpecialization(program, snapshot, specialization)) return false;
+	if (SrtWalkerNoStallLoadDeferred()) {
+		bool cpu_descriptors = !program.info.images.empty() || !program.info.samplers.empty();
+		for (uint32_t i = 0; i < program.info.buffers.size() && !cpu_descriptors; ++i) {
+			const auto& source = program.descriptor_sources[program.info.buffers[i].source];
+			if (source.indirect_descriptor) {
+				cpu_descriptors = !GpuBufferTableEnabled(*source.indirect_descriptor);
+				continue;
+			}
+			const bool gpu_descriptor = GpuScalarLoadsEnabled() &&
+			    std::ranges::any_of(program.memory_info, [&](const MemoryInfo& memory) {
+				    return memory.kind == ResourceKind::IndirectBuffer && memory.resource == i;
+			    });
+			cpu_descriptors = !gpu_descriptor;
+		}
+		// Both sides of an unknown branch may have contributed candidates or descriptor words.
+		// Keep only results made entirely from GPU-loaded descriptors; retry everything else.
+		if (cpu_descriptors) {
+			return SpecializationFail(
+			    "deferred SRT load could affect CPU descriptor words or indirect candidates");
+		}
+	}
+	return true;
 }
 
 uint32_t ImageHeapKind(const ImageResource& root, DescriptorValue& value) {

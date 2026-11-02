@@ -90,6 +90,9 @@ uint32_t SrtWalkerLoadLength(uint64_t rip);
 bool SrtWalkerNoStallEnabled();
 // True inside a scope on this thread: a failure there is retried, so it is not reported.
 bool SrtWalkerNoStallActive();
+// True when the current no-stall walk skipped a GPU-written load; candidate and descriptor results
+// derived from CPU materialization must then be discarded.
+bool SrtWalkerNoStallLoadDeferred();
 class SrtWalkerNoStallScope {
 public:
 	SrtWalkerNoStallScope();
