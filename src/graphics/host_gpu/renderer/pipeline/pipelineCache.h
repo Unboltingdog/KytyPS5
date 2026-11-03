@@ -212,6 +212,7 @@ private:
 		GraphicsPipelineKey          key;
 		std::array<ShaderModule, 4>  stages;
 		Pipeline                     pipeline;
+		bool                         warmup = false;
 	};
 
 	struct AsyncComputePipeline {
@@ -290,9 +291,12 @@ private:
 	std::queue<std::unique_ptr<AsyncComputePipeline>> m_compute_async_jobs;
 	std::queue<std::unique_ptr<AsyncComputePipeline>> m_compute_async_done;
 	std::unordered_set<uint64_t> m_compute_async_pending;
+	std::vector<vk::PipelineCache> m_worker_caches;
+	uint32_t m_warmup_pending = 0;
+	uint32_t m_warmup_queued = 0;
 	// Declared last, so pipeline creation stops before device objects are destroyed.
-	std::jthread m_async_thread;
-	std::jthread m_compute_async_thread;
+	std::vector<std::jthread> m_async_threads;
+	std::vector<std::jthread> m_compute_async_threads;
 
 	template <typename InputInfo>
 	const ShaderModule* GetProgram(const ShaderParams& params, InputInfo& input_info,
@@ -306,9 +310,11 @@ private:
 	Pipeline* FindGraphicsPipeline(const CommandBuffer& command, const DrawRenderState& state,
 	                               bool allow_async);
 	void QueueGraphicsPipeline(const GraphicsPipelineKey&                 key,
-	                           const std::array<const ShaderModule*, 4>& stages);
+	                           const std::array<const ShaderModule*, 4>& stages,
+	                           bool warmup = false);
 	void QueueComputePipeline(const ShaderModule& module);
 	void ReapGraphicsPipelines();
+	void WaitForWarmup();
 
 	// pipelineSerialization.cpp
 	void WarmUp(const std::filesystem::path& path);

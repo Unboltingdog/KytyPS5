@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
 #include "common/logging/log.h"
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
 #include "common/parallelFor.h"
 #include "common/stringUtils.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -20,6 +21,8 @@
 // The shader store: a header, then zstd-compressed records of everything a run created first.
 // Records are only appended, so a store cut short by a crash keeps every complete record.
 namespace Libs::Graphics {
+
+bool AsyncGraphicsPipelinesEnabled();
 
 namespace {
 
@@ -147,22 +150,47 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	m_store.Open(path, header, reusable ? bytes.size() - records.size() : 0);
 
 	const auto modules = MapModules();
-	std::vector<Common::UniqueFunction<void>> jobs;
-	jobs.reserve(m_graphics_pipelines.size() + modules.size());
+	const bool async = AsyncGraphicsPipelinesEnabled();
 	for (auto& node: m_graphics_pipelines) {
-		jobs.emplace_back([this, &modules, &node] {
+		std::array<const ShaderModule*, 4> stages {};
+		bool valid = true;
+		for (size_t i = 0; i < stages.size(); ++i) {
+			if (node.first.stage_ids[i] == 0) continue;
+			const auto found = modules.find(node.first.stage_ids[i]);
+			if (found == modules.end()) {
+				valid = false;
+				break;
+			}
+			stages[i] = found->second;
+		}
+		if (!valid) continue;
+		if (async) {
+			QueueGraphicsPipeline(node.first, stages, true);
+			std::scoped_lock lock(m_async_mutex);
+			++m_warmup_pending;
+		} else {
 			CreateGraphicsPipeline(node.second, node.first, modules);
-		});
+		}
 	}
 	// A compute pipeline depends only on its module.
 	for (const auto* module: modules | std::views::values) {
-		if (module != nullptr && module->info.stage == ShaderType::Compute) {
-			jobs.emplace_back([this, module, &pipeline = m_compute_pipelines[module->id]] {
-				CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache);
-			});
+		if (module == nullptr || module->info.stage != ShaderType::Compute) continue;
+		if (async) {
+			QueueComputePipeline(*module);
+			std::scoped_lock lock(m_async_mutex);
+			++m_warmup_pending;
+		} else {
+			CreatePipelineInternal(m_graphics, m_compute_pipelines[module->id], *module,
+			                       m_driver_cache);
 		}
 	}
-	Common::ParallelFor(jobs.size(), [&](size_t i) { jobs[i](); });
+	if (async) {
+		{
+			std::scoped_lock lock(m_async_mutex);
+			m_warmup_queued = m_warmup_pending;
+		}
+		WaitForWarmup();
+	}
 	// A key with a stage missing from the store keeps no pipeline.
 	std::erase_if(m_graphics_pipelines,
 	              [](const auto& entry) { return entry.second.pipeline == nullptr; });
