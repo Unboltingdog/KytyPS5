@@ -27,8 +27,13 @@ inline bool GpuBufferTablesEnabled() {
 inline bool GpuBufferTableEnabled(const DescriptorSource::IndirectDescriptor& indirect) {
 	const bool unmasked_selector = indirect.selector &&
 	    indirect.selector->bit_mask == UINT32_MAX && indirect.selector->maximum == UINT32_MAX;
-	return GpuBufferTablesEnabled() &&
-	       (indirect.workgroup_axis != UINT32_MAX || unmasked_selector);
+	return GpuBufferTablesEnabled() && indirect.sources.empty() &&
+	       (indirect.workgroup_axis != UINT32_MAX || unmasked_selector || indirect.selector.has_value());
+}
+// KYTY_STABLE_SRT_LAYOUT=1: use fixed indirect-map headers and a separate variable-length tail.
+inline bool StableSrtLayoutEnabled() {
+	const char* value = std::getenv("KYTY_STABLE_SRT_LAYOUT");
+	return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg,
                     ShaderStageInputInfo input);

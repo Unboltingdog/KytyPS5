@@ -742,6 +742,34 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 		}).first;
 		auto& program = entry->second;
+		if (GpuWaitStats::Enabled()) {
+			for (uint32_t source_index = 0; source_index < program.resource_plan.descriptor_sources.size();
+			     ++source_index) {
+				const auto& source = program.resource_plan.descriptor_sources[source_index];
+				if (!source.indirect_descriptor) continue;
+				const auto& indirect = *source.indirect_descriptor;
+				const auto& selector = indirect.selector;
+				const auto selector_text = !selector ? std::string("none")
+				    : fmt::format("mask={:#x} maximum={:#x} stride={} offset={}", selector->bit_mask,
+				                  selector->maximum, selector->stride, selector->offset);
+				const auto count_text = indirect.key_count.IsEmpty() ? std::string("empty")
+				    : indirect.key_count.IsImmediate()
+				        ? fmt::format("{}", indirect.key_count.U32())
+				        : std::string("dynamic");
+				const auto pointer_text = indirect.pointer_table
+				    ? fmt::format("count={} stride={} offset={} indexed={}", indirect.pointer_table->count,
+				                  indirect.pointer_table->stride, indirect.pointer_table->offset,
+				                  indirect.pointer_table->indexed)
+				    : std::string("none");
+				GpuWaitStats::WriteDiag(fmt::format(
+				    "indirect-descriptor hash=0x{:016x} source={} selector={} table_maximum={} "
+				    "key_count={} pointer_table={} sources={} gpu={}\n",
+				    params.hash, source_index, selector_text,
+				    indirect.table_maximum ? fmt::format("{}", *indirect.table_maximum) : "none",
+				    count_text, pointer_text, indirect.sources.size(),
+				    ShaderRecompiler::IR::GpuBufferTableEnabled(indirect)).c_str());
+			}
+		}
 		if (!program.Materialize(runtime)) {
 			return materialize_failed();
 		}

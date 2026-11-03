@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
@@ -71,21 +72,23 @@ uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t m
                                    uint32_t search_iterations, uint32_t default_resource) {
 	const auto mapping = ConstantU32(state, mapping_offset);
 	const auto count = LoadFlattenedSrt(state, mapping);
+	const auto entries = IR::StableSrtLayoutEnabled()
+	                         ? LoadFlattenedSrt(state, Binary(state, spv::OpIAdd, TypeU32(state),
+	                                                          mapping, ConstantU32(state, 1u)))
+	                         : ConstantU32(state, mapping_offset + 1u);
 	if (search_iterations == 0u) {
 		const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), key,
 		                          ConstantU32(state, 2u));
 		const auto valid = Binary(state, spv::OpULessThan, TypeBool(state), index, count);
 		const auto safe = Select(state, TypeU32(state), valid, index, ConstantU32(state, 0u));
-		const auto entry = Binary(state, spv::OpIAdd, TypeU32(state), safe,
-		                          ConstantU32(state, mapping_offset + 1u));
+		const auto entry = Binary(state, spv::OpIAdd, TypeU32(state), safe, entries);
 		return Select(state, TypeU32(state), valid, LoadFlattenedSrt(state, entry),
 		              ConstantU32(state, default_resource));
 	}
 	const auto entry_at = [&](uint32_t index) {
-		return Binary(state, spv::OpIAdd, TypeU32(state), mapping,
-		              Binary(state, spv::OpIAdd, TypeU32(state),
-		                     Binary(state, spv::OpShiftLeftLogical, TypeU32(state), index,
-		                            ConstantU32(state, 1u)), ConstantU32(state, 1u)));
+		return Binary(state, spv::OpIAdd, TypeU32(state), entries,
+		              Binary(state, spv::OpShiftLeftLogical, TypeU32(state), index,
+		                     ConstantU32(state, 1u)));
 	};
 	auto low = ConstantU32(state, 0u);
 	auto high = count;

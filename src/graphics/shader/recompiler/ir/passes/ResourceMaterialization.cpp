@@ -1044,6 +1044,66 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	return true;
 }
 
+struct StableMappingTail {
+	uint32_t header = 0;
+	uint32_t source = 0;
+	uint32_t words  = 0;
+};
+
+template <typename Specialization>
+bool AppendStableMappingHeaders(std::vector<Specialization>& specializations,
+                                uint32_t declared_count, const std::vector<uint32_t>& flattened,
+                                std::vector<uint32_t>& normalized,
+                                std::vector<StableMappingTail>& tails, uint32_t& cursor) {
+	normalized.resize(cursor + declared_count * 3u);
+	for (uint32_t index = 0; index < declared_count; ++index) {
+		const auto header = cursor;
+		cursor += 3u;
+		auto& root = specializations[index];
+		if (root.indirect_root != index) continue;
+		const auto source = root.indirect_mapping_offset;
+		if (source >= flattened.size()) return false;
+		root.indirect_mapping_offset = header;
+		if constexpr (!std::is_same_v<Specialization, ResourceSpecialization::Buffer>) {
+			if (root.heap) {
+				if (flattened.size() - source < 3u) return false;
+				std::copy_n(flattened.begin() + source, 3u, normalized.begin() + header);
+				continue;
+			}
+		}
+		const auto count = flattened[source];
+		const auto words = count * (root.indirect_search_iterations == 0u ? 1u : 2u);
+		if (words > flattened.size() - source - 1u) return false;
+		normalized[header] = count;
+		tails.push_back({header, source + 1u, words});
+	}
+	return true;
+}
+
+bool NormalizeStableSrtLayout(const ResourcePlan& program, ResourceSnapshot& snapshot,
+                              ResourceSpecialization& specialization, uint32_t prefix_words) {
+	if (prefix_words > snapshot.flattened_srt.size()) return false;
+	const auto& flattened = snapshot.flattened_srt;
+	std::vector<uint32_t> normalized(flattened.begin(), flattened.begin() + prefix_words);
+	std::vector<StableMappingTail> tails;
+	auto cursor = prefix_words;
+	if (!AppendStableMappingHeaders(specialization.buffers, program.info.buffers.size(), flattened,
+	                                normalized, tails, cursor) ||
+	    !AppendStableMappingHeaders(specialization.images, program.info.images.size(), flattened,
+	                                normalized, tails, cursor) ||
+	    !AppendStableMappingHeaders(specialization.samplers, program.info.samplers.size(), flattened,
+	                                normalized, tails, cursor)) {
+		return false;
+	}
+	for (const auto& tail: tails) {
+		normalized[tail.header + 1u] = static_cast<uint32_t>(normalized.size());
+		normalized.insert(normalized.end(), flattened.begin() + tail.source,
+		                  flattened.begin() + tail.source + tail.words);
+	}
+	snapshot.flattened_srt = std::move(normalized);
+	return true;
+}
+
 } // namespace
 
 struct SamplerPlan {
@@ -1113,7 +1173,7 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		if (NullImageDescriptor(descriptor)) {
 			image.numeric_class = base.atomic ? Prospero::TextureNumericClass::Uint
 			                                  : Prospero::TextureNumericClass::Float;
-			image.dimension     = Decoder::ImageDimension::Dim2D;
+			image.dimension     = base.dimension;
 			image.cube          = false;
 			continue;
 		}
@@ -1207,8 +1267,10 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 						ordinal += specialization.images[child].indirect_root == base_index;
 					uint32_t matches = 0;
 					uint64_t first_offset = 0;
+					const auto entries = StableSrtLayoutEnabled() ? flat[mapping + 1u]
+					                                               : mapping + 1u;
 					for (uint32_t probe = 0; probe < flat[mapping]; ++probe) {
-						if (flat[mapping + 1u + probe] != ordinal) continue;
+						if (flat[entries + probe] != ordinal) continue;
 						if (matches++ == 0u) first_offset = uint64_t {probe} * 4u;
 					}
 					message += fmt::format(" table_source={} ordinal={} dense_matches={} "
@@ -1229,7 +1291,7 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		                           : 0u;
 		// A heap maps its slot count and slot address; tables map each key.
 		size_t mapping_words = 3u;
-		if (!root.heap)
+		if (!root.heap && !StableSrtLayoutEnabled())
 			mapping_words = 1u + size_t {key_count} * (root.indirect_search_iterations == 0u ? 1u : 2u);
 		if (key_count == 0u ||
 		    root.indirect_mapping_offset + mapping_words > snapshot.flattened_srt.size()) {
@@ -1778,6 +1840,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		return SpecializationFail(fmt::format("SRT refresh complete={} reads={} user_data={}",
 		    program.srt_plan_complete, program.srt_reads.size(), runtime.user_data.size()));
 	}
+	const auto srt_prefix_words = static_cast<uint32_t>(snapshot.flattened_srt.size());
 	SrtReadCapture capture {runtime, reads};
 	auto observed = capture_reads ? capture.ObservedRuntime() : runtime;
 	std::array<uint32_t, 3> workgroup_counts {};
@@ -1999,6 +2062,10 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		}
 	}
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
+	if (StableSrtLayoutEnabled() &&
+	    !NormalizeStableSrtLayout(program, snapshot, specialization, srt_prefix_words)) {
+		return SpecializationFail("stable indirect mapping layout is invalid");
+	}
 	if (!BuildResourceSpecialization(program, snapshot, specialization)) return false;
 	if (SrtWalkerNoStallLoadDeferred()) {
 		bool cpu_descriptors = !program.info.images.empty() || !program.info.samplers.empty();

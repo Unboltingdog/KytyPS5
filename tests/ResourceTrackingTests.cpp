@@ -59,6 +59,15 @@ bool SetGpuBufferTables(bool enabled) {
 #endif
 }
 
+bool SetStableSrtLayout(bool enabled) {
+#if defined(_WIN32)
+  return _putenv(enabled ? "KYTY_STABLE_SRT_LAYOUT=1" : "KYTY_STABLE_SRT_LAYOUT=") == 0;
+#else
+  return enabled ? setenv("KYTY_STABLE_SRT_LAYOUT", "1", 1) == 0
+                 : unsetenv("KYTY_STABLE_SRT_LAYOUT") == 0;
+#endif
+}
+
 struct Fixture {
   Program program;
   Block *block = nullptr;
@@ -6873,12 +6882,21 @@ void TestGpuSelectedBufferRecords() {
     ResourceSnapshot snapshot;
     ResourceSpecialization specialization;
     const auto materialize = [&] { return MaterializeResources(plan, runtime, snapshot, specialization); };
+    std::array<uint32_t, 2> stable_offsets{UINT32_MAX, UINT32_MAX};
     for (const uint32_t size : {0u, 384u + aligned_bias, 0u, 384u + aligned_bias}) {
       user_data[2] = size;
       memory.reads = 0u;
       Check(materialize() && memory.reads == (size == 0u ? 0u : 8u) &&
                 snapshot.buffers.size() == plan.info.buffers.size() + (size == 0u ? 0u : 8u),
             "affine table refresh read GPU selector bytes, unrelated fields or stale candidates");
+      if (StableSrtLayoutEnabled() && size != 0u) {
+        for (uint32_t member = 0; member < 2u; ++member) {
+          const auto offset = specialization.buffers[roots[member]].indirect_mapping_offset;
+          Check(stable_offsets[member] == UINT32_MAX || stable_offsets[member] == offset,
+                "candidate count moved a later indirect mapping header");
+          stable_offsets[member] = offset;
+        }
+      }
     }
     for (uint32_t member = 0; member < 2u; ++member) {
       const auto root = roots[member];
@@ -6886,11 +6904,13 @@ void TestGpuSelectedBufferRecords() {
       Check(specialization.buffers[root].indirect_search_iterations == 0u &&
                 snapshot.flattened_srt[mapping] == 4u,
             "affine descriptor table lost its compact dense mapping");
+      const auto entries = StableSrtLayoutEnabled()
+          ? snapshot.flattened_srt[mapping + 1u] : mapping + 1u;
       // These keys land at byte offsets 0,64,128,192 after U32 multiplication by192.
       for (const auto [key, slot] : {std::pair{0u, 0u}, std::pair{44739243u, 1u},
                                     std::pair{22369622u, 2u}, std::pair{1u, 3u}}) {
         const auto index = evaluate_key(evaluate_key, selections[root]->Arg(0), key) >> 2u;
-        Check(index == slot && snapshot.flattened_srt[mapping + 1u + index] == slot + 1u,
+        Check(index == slot && snapshot.flattened_srt[entries + index] == slot + 1u,
               "wrapped GPU record key selected the wrong physical descriptor");
         const auto candidate = plan.info.buffers.size() + member * 4u + slot;
         Check(snapshot.buffers[candidate].dwords[0] == 0x100000u + member * 0x10000u + slot * 0x1000u,
@@ -6922,6 +6942,12 @@ void TestGpuSelectedBufferRecords() {
   }
   CheckFatal([] { MakeBufferRecordFixture(1u, false, true, 0u, true); },
              "not a valid runtime value", "split dynamic descriptor offsets lost independent U32 wrapping");
+}
+
+void TestStableSrtLayout() {
+  Check(SetStableSrtLayout(true), "could not enable stable SRT layout");
+  TestGpuSelectedBufferRecords();
+  SetStableSrtLayout(false);
 }
 
 void TestWorkgroupSelectedBufferRecords() {
@@ -7112,6 +7138,35 @@ void TestGpuBufferTableSkipsUnmaskedSelector() {
   Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
             memory.reads == 0u && memory.watched_reads == 0u,
         "GPU buffer table read an unmasked stride-12 selector");
+  SetGpuBufferTables(false);
+}
+
+void TestGpuBufferTableSkipsMaskedSelector() {
+  Check(SetGpuBufferTables(true),
+        "could not enable GPU buffer tables");
+  auto fixture = MakeBufferRecordFixture(1u, false, true, 0u, false, true);
+  auto plan = ExtractResourcePlan(fixture->program);
+  for (const auto &buffer : plan.info.buffers) {
+    auto &source = plan.descriptor_sources[buffer.source];
+    if (!source.indirect_descriptor) continue;
+    source.indirect_descriptor->workgroup_axis = UINT32_MAX;
+    source.indirect_descriptor->selector->maximum = 1023u;
+    source.indirect_descriptor->selector->bit_mask = 1023u;
+  }
+  LinearTestMemory memory;
+  memory.fail_address = memory.base + 0x1000u;
+  memory.watched_address = memory.fail_address;
+  std::array<uint32_t, 8> user_data{uint32_t(memory.base) + 256u, 192u << 16u,
+      2u, 0x5204u, uint32_t(memory.base) + 0x1000u, 12u << 16u,
+      MaxIndirectDescriptorProbes, 0x5204u};
+  const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+      .read_specialization_memory = ReadLinearTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            memory.reads == 0u && memory.watched_reads == 0u &&
+            snapshot.buffers.size() == plan.info.buffers.size(),
+        "GPU buffer table read a masked selector or enumerated its candidates");
   SetGpuBufferTables(false);
 }
 
@@ -9291,9 +9346,11 @@ int main() {
       TestGuardedWaterfallBufferRecords();
     });
     Run("GPU-selected buffer records", TestGpuSelectedBufferRecords);
+    Run("stable SRT layout", TestStableSrtLayout);
     Run("workgroup-selected buffer records", TestWorkgroupSelectedBufferRecords);
     Run("GPU buffer table skips counts", TestGpuBufferTableSkipsCounts);
     Run("GPU buffer table skips unmasked selector", TestGpuBufferTableSkipsUnmaskedSelector);
+    Run("GPU buffer table skips masked selector", TestGpuBufferTableSkipsMaskedSelector);
     Run("GPU image table skips unmasked selector", TestGpuTableSkipsUnmaskedImageSelector);
     Run("GPU-selected formatted record store", TestGpuSelectedFormattedRecordStore);
     Run("finite buffer selection", TestFiniteBufferSelection);
