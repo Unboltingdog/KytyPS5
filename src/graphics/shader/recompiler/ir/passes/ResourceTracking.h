@@ -19,16 +19,13 @@ inline bool GpuScalarLoadsEnabled() {
 	}();
 	return enabled;
 }
-// KYTY_GPU_BUFFER_TABLES=1: leave count-sized and unmasked buffer-table selection to the shader.
+// KYTY_GPU_BUFFER_TABLES=1: leave indirect buffer-table selection to the shader.
 inline bool GpuBufferTablesEnabled() {
 	const char* value = std::getenv("KYTY_GPU_BUFFER_TABLES");
 	return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 inline bool GpuBufferTableEnabled(const DescriptorSource::IndirectDescriptor& indirect) {
-	const bool unmasked_selector = indirect.selector &&
-	    indirect.selector->bit_mask == UINT32_MAX && indirect.selector->maximum == UINT32_MAX;
-	return GpuBufferTablesEnabled() && indirect.sources.empty() &&
-	       (indirect.workgroup_axis != UINT32_MAX || unmasked_selector || indirect.selector.has_value());
+	return GpuBufferTablesEnabled() && indirect.sources.empty();
 }
 // KYTY_STABLE_SRT_LAYOUT=1: use fixed indirect-map headers and a separate variable-length tail.
 inline bool StableSrtLayoutEnabled() {

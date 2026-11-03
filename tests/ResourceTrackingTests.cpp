@@ -7170,6 +7170,48 @@ void TestGpuBufferTableSkipsMaskedSelector() {
   SetGpuBufferTables(false);
 }
 
+void TestGpuBufferTableSkipsPointerTable() {
+  Check(SetGpuBufferTables(true),
+        "could not enable GPU buffer tables");
+  auto fixture = MakeBufferRecordFixture(1u, false, true, 0u, false, true);
+  auto plan = ExtractResourcePlan(fixture->program);
+  uint32_t pointer_offset = 1368u;
+  for (const auto &buffer : plan.info.buffers) {
+    auto &source = plan.descriptor_sources[buffer.source];
+    if (!source.indirect_descriptor) continue;
+    auto &indirect = *source.indirect_descriptor;
+    indirect.workgroup_axis = UINT32_MAX;
+    indirect.selector.reset();
+    indirect.table_maximum = 65535u;
+    indirect.pointer_table = DescriptorSource::IndirectDescriptor::PointerTable{
+        .count = 1u, .stride = 0u, .offset = pointer_offset, .indexed = false};
+    pointer_offset += 40u;
+  }
+  LinearTestMemory memory;
+  memory.fail_address = memory.base + 0x1000u;
+  memory.watched_address = memory.fail_address;
+  std::array<uint32_t, 8> user_data{uint32_t(memory.base) + 256u, 192u << 16u,
+      2u, 0x5204u, uint32_t(memory.base) + 0x1000u, 12u << 16u,
+      MaxIndirectDescriptorProbes, 0x5204u};
+  const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+      .read_specialization_memory = ReadLinearTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            memory.reads == 0u && memory.watched_reads == 0u &&
+            snapshot.buffers.size() == plan.info.buffers.size(),
+        "pointer table was enumerated on the CPU");
+  const auto first = specialization;
+  memory.words[0]++;
+  memory.fail_address = memory.base + 0x2000u;
+  memory.watched_address = memory.fail_address;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            memory.reads == 0u && memory.watched_reads == 0u &&
+            snapshot.buffers.size() == plan.info.buffers.size() && specialization == first,
+        "changed pointer-table contents changed the shader specialization");
+  SetGpuBufferTables(false);
+}
+
 void TestGpuTableSkipsUnmaskedImageSelector() {
   Check(SetGpuBufferTables(true),
         "could not enable GPU buffer tables");
@@ -9351,6 +9393,7 @@ int main() {
     Run("GPU buffer table skips counts", TestGpuBufferTableSkipsCounts);
     Run("GPU buffer table skips unmasked selector", TestGpuBufferTableSkipsUnmaskedSelector);
     Run("GPU buffer table skips masked selector", TestGpuBufferTableSkipsMaskedSelector);
+    Run("GPU buffer table skips pointer table", TestGpuBufferTableSkipsPointerTable);
     Run("GPU image table skips unmasked selector", TestGpuTableSkipsUnmaskedImageSelector);
     Run("GPU-selected formatted record store", TestGpuSelectedFormattedRecordStore);
     Run("finite buffer selection", TestFiniteBufferSelection);
