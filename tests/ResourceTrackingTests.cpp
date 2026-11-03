@@ -117,6 +117,32 @@ uint32_t CheckKeyCountClamp(const Program &program) {
   return static_cast<uint32_t>(clamps.size());
 }
 
+uint32_t CheckBoundedGpuDescriptorReads(const Program &program) {
+  uint32_t roots = 0;
+  for (const auto *block : program.blocks) {
+    for (const auto &inst : *block) {
+      if (inst.GetOpcode() != ValueOpcode::GetBufferResource ||
+          inst.Arg(0).ResolveInstruction() == nullptr ||
+          inst.Arg(0).ResolveInstruction()->GetOpcode() != ValueOpcode::ReadConstBuffer) {
+        continue;
+      }
+      for (uint32_t word = 0; word < 4u; ++word) {
+        const auto *read = inst.Arg(word).ResolveInstruction();
+        Check(read != nullptr && read->GetOpcode() == ValueOpcode::ReadConstBuffer,
+              "GPU descriptor root lost a scalar table read");
+        const auto &memory = program.memory_info[read->Flags<MemoryFlags>().index];
+        Check(!memory.planning_only &&
+                  (memory.kind == ResourceKind::IndirectBuffer ||
+                   memory.kind == ResourceKind::ScalarBuffer ||
+                   memory.kind == ResourceKind::ScalarAddress),
+              "GPU descriptor read bypassed scalar bounds or BDA mapping");
+      }
+      ++roots;
+    }
+  }
+  return roots;
+}
+
 struct Fixture {
   Program program;
   Block *block = nullptr;
@@ -7154,6 +7180,56 @@ void TestGpuKeyCountBufferTableClamp() {
   SetGpuBufferTables(false);
 }
 
+void TestGpuSelectorTableReadBounds() {
+  Check(SetGpuBufferTables(true), "could not enable GPU buffer tables");
+  auto fixture = MakeBufferRecordFixture(1u, false, true, 0u, false, true);
+  auto plan = ExtractResourcePlan(fixture->program);
+  Check(CheckBoundedGpuDescriptorReads(fixture->program) != 0u,
+        "selector table did not retain bounded descriptor roots");
+  for (const auto &buffer : plan.info.buffers) {
+    auto &source = plan.descriptor_sources[buffer.source];
+    if (!source.indirect_descriptor) continue;
+    auto &indirect = *source.indirect_descriptor;
+    indirect.workgroup_axis = UINT32_MAX;
+    Check(indirect.selector.has_value(), "selector bounds fixture changed its table shape");
+  }
+  SetGpuBufferTables(false);
+}
+
+void TestGpuWorkgroupTableReadBounds() {
+  Check(SetGpuBufferTables(true), "could not enable GPU buffer tables");
+  auto fixture = MakeBufferRecordFixture(1u, false, true, 0u, false, true);
+  const auto plan = ExtractResourcePlan(fixture->program);
+  Check(CheckBoundedGpuDescriptorReads(fixture->program) != 0u,
+        "workgroup table did not retain bounded descriptor roots");
+  for (const auto &buffer : plan.info.buffers) {
+    const auto &source = plan.descriptor_sources[buffer.source];
+    if (!source.indirect_descriptor) continue;
+    Check(source.indirect_descriptor->workgroup_axis == 0u,
+          "workgroup bounds fixture changed its table shape");
+  }
+  SetGpuBufferTables(false);
+}
+
+void TestGpuPointerTableReadBounds() {
+  Check(SetGpuBufferTables(true), "could not enable GPU buffer tables");
+  auto fixture = MakeBufferRecordFixture(1u, false, true, 0u, false, true);
+  auto plan = ExtractResourcePlan(fixture->program);
+  for (const auto &buffer : plan.info.buffers) {
+    auto &source = plan.descriptor_sources[buffer.source];
+    if (!source.indirect_descriptor) continue;
+    auto &indirect = *source.indirect_descriptor;
+    indirect.workgroup_axis = UINT32_MAX;
+    indirect.selector.reset();
+    indirect.table_maximum = 65535u;
+    indirect.pointer_table = DescriptorSource::IndirectDescriptor::PointerTable{
+        .offset = 1368u, .stride = 0u, .count = 1u, .indexed = false};
+  }
+  Check(CheckBoundedGpuDescriptorReads(fixture->program) != 0u,
+        "pointer-table parent reads bypassed scalar bounds");
+  SetGpuBufferTables(false);
+}
+
 void TestGpuBufferTableSkipsCounts() {
   Check(SetGpuBufferTables(true),
         "could not enable GPU buffer tables");
@@ -9471,6 +9547,9 @@ int main() {
     Run("stable SRT layout", TestStableSrtLayout);
     Run("workgroup-selected buffer records", TestWorkgroupSelectedBufferRecords);
     Run("GPU key-count buffer table clamp", TestGpuKeyCountBufferTableClamp);
+    Run("GPU selector table read bounds", TestGpuSelectorTableReadBounds);
+    Run("GPU workgroup table read bounds", TestGpuWorkgroupTableReadBounds);
+    Run("GPU pointer table read bounds", TestGpuPointerTableReadBounds);
     Run("GPU buffer table skips counts", TestGpuBufferTableSkipsCounts);
     Run("GPU buffer table skips unmasked selector", TestGpuBufferTableSkipsUnmaskedSelector);
     Run("GPU buffer table skips masked selector", TestGpuBufferTableSkipsMaskedSelector);

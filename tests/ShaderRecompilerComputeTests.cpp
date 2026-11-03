@@ -42910,6 +42910,21 @@ void CheckGpuTableBounds(VulkanHarness &vulkan) {
 #endif
 }
 
+void CheckGpuTableBounds(VulkanHarness &vulkan) {
+#if defined(_WIN32)
+  _putenv("KYTY_GPU_BUFFER_TABLES=1");
+#else
+  setenv("KYTY_GPU_BUFFER_TABLES", "1", 1);
+#endif
+  CheckGuardedWaterfallBufferRecords(vulkan);
+  CheckGpuSelectedRecordBufferAccess(vulkan);
+#if defined(_WIN32)
+  _putenv("KYTY_GPU_BUFFER_TABLES=");
+#else
+  unsetenv("KYTY_GPU_BUFFER_TABLES");
+#endif
+}
+
 void CheckStorageBufferBindingOver2GiB(VulkanHarness &vulkan) {
   // OpArrayLength reads 0 for ranges of 2 GiB or more on NVIDIA; bounds use the pushed binding size.
   constexpr u32 bytes = 0x80000010u, end = bytes / 4u, last = end - 1u;
@@ -54365,6 +54380,11 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     RunCase(&vulkan, BufferAtomicAddGpuSelectedDescriptors(32));
     RunCase(&vulkan, BufferAtomicAddGpuSelectedDescriptors(64));
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--gpu-table-bounds-only") == 0) {
+    VulkanHarness vulkan;
+    CheckGpuTableBounds(vulkan);
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--indirect-buffer-only") == 0) {
