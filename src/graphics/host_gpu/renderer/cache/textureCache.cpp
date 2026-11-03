@@ -49,6 +49,16 @@ bool DepthAliasEnabled() {
 	return enabled;
 }
 
+bool DynamicDepthEnabled() {
+	const char* value = std::getenv("KYTY_DYNAMIC_DEPTH");
+	return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+bool FixedRenderScaleEnabled() {
+	const char* value = std::getenv("KYTY_FIXED_RENDER_SCALE");
+	return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
 void LogDepthAlias(const char* kind, const ImageInfo& requested, const ImageInfo& depth,
                    TextureCache::BindingType binding) {
 	if (!GpuWaitStats::Enabled()) {
@@ -676,8 +686,27 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 	    view.base_layer < cached.info.resources.layers &&
 	    (view.type == vk::ImageViewType::e2D || view.type == vk::ImageViewType::e2DArray) &&
 	    IsSupportedSampledDepthFormat(cached.info.pixel_format, requested.pixel_format);
+	const bool fixed_depth_view =
+	    FixedRenderScaleEnabled() &&
+	    (binding == BindingType::Texture || binding == BindingType::DepthTarget) &&
+	    cached.info.IsDepth() && !requested.IsVolume() &&
+	    requested.data.address == cached.info.data.address &&
+	    requested.extent.width <= cached.info.extent.width &&
+	    requested.extent.height <= cached.info.extent.height &&
+	    requested.extent.depth <= cached.info.extent.depth && requested.pitch <= cached.info.pitch &&
+	    requested.bytes_per_block == cached.info.bytes_per_block && requested.samples == 1 &&
+	    cached.backing.samples == 1 && requested.resources.levels == 1 &&
+	    requested.resources.layers <= cached.info.resources.layers && view.base_level == 0 &&
+	    view.level_count == 1 && view.layer_count == 1 &&
+	    view.base_layer < cached.info.resources.layers &&
+	    (view.type == vk::ImageViewType::e2D || view.type == vk::ImageViewType::e2DArray) &&
+	    ((binding == BindingType::Texture &&
+	      IsSupportedSampledDepthFormat(cached.info.pixel_format, requested.pixel_format)) ||
+	     (binding == BindingType::DepthTarget && requested.IsDepth() &&
+	      requested.pixel_format == cached.info.pixel_format &&
+	      requested.HasStencil() == cached.info.HasStencil()));
 	if ((!cached.info.IsDepth() && !requested.IsDepth()) ||
-	    (cached.info.tile_mode != requested.tile_mode && !shared_depth_view)) {
+	    (cached.info.tile_mode != requested.tile_mode && !shared_depth_view && !fixed_depth_view)) {
 		return {};
 	}
 	const bool stencil_match = requested.HasStencil() == cached.info.HasStencil();
@@ -730,7 +759,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 	}
 	if (!recreate) {
 		if (cached.info.IsDepth()) {
-			LogDepthAlias("shared", requested, cached.info, binding);
+			LogDepthAlias(fixed_depth_view && !shared_depth_view ? "fixed-scale" : "shared",
+			              requested, cached.info, binding);
 		}
 		return cached_id;
 	}
@@ -840,6 +870,24 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 	if (!cached.registered) {
 		return {merged_id};
 	}
+	if (DynamicDepthEnabled() && cached.info.IsDepth() && !requested.IsDepth() &&
+	    binding != BindingType::Texture) {
+		LogDepthAlias("color-separate", requested, cached.info, binding);
+		return {merged_id};
+	}
+	if (DynamicDepthEnabled() && binding == BindingType::DepthTarget && cached.info.IsDepth() &&
+	    requested.data.address == cached.info.data.address &&
+	    (requested.extent != cached.info.extent || requested.pitch != cached.info.pitch)) {
+		if (FixedRenderScaleEnabled()) {
+			if (const auto depth_id = ResolveDepthOverlap(requested, binding, cached_id, view)) {
+				return {depth_id};
+			}
+		}
+		LogDepthAlias("retire-resize", requested, cached.info, binding);
+		cached.binding.needs_rebind |= cached.binding.is_bound || cached.binding.is_target;
+		FreeImage(cached_id);
+		return {merged_id};
+	}
 	// PS5: image heaps keep BC images and raw block views of their layers resident together, so a
 	// raw read of a layer subset with the same levels views the BC image instead of evicting it.
 	const bool raw_view = binding == BindingType::Texture && !requested.IsBlock() &&
@@ -860,7 +908,8 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 	const uint32_t requested_block = requested.bytes_per_block * requested.samples;
 	const uint32_t cached_block    = cached.info.bytes_per_block * cached.info.samples;
 	if (requested.data.address == cached.info.data.address &&
-	    requested.BlockExtent() == cached.info.BlockExtent() && requested_block == cached_block) {
+	    ((requested.BlockExtent() == cached.info.BlockExtent() && requested_block == cached_block) ||
+	     (FixedRenderScaleEnabled() && cached.info.IsDepth()))) {
 		if (const auto depth_id = ResolveDepthOverlap(requested, binding, cached_id, view)) {
 			return {depth_id};
 		}
@@ -1428,6 +1477,11 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			for (const auto candidate: candidates) {
 				const auto* depth = m_slot_images.try_get(candidate);
 				if (depth != nullptr && depth->registered && depth->info.IsDepth()) {
+					if ((desc.type == BindingType::Texture || desc.type == BindingType::Storage) &&
+					    (desc.info.extent != depth->info.extent ||
+					     desc.info.pitch != depth->info.pitch)) {
+						LogDepthAlias("stale-size", desc.info, depth->info, desc.type);
+					}
 					LogDepthAlias("separate", desc.info, depth->info, desc.type);
 					break;
 				}
