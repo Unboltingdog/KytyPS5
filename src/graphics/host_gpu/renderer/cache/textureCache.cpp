@@ -57,14 +57,6 @@ bool DynamicDepthEnabled() {
 	return enabled;
 }
 
-bool FixedRenderScaleEnabled() {
-	static const bool enabled = [] {
-		const char* value = std::getenv("KYTY_FIXED_RENDER_SCALE");
-		return value != nullptr && value[0] != '\0' && value[0] != '0';
-	}();
-	return enabled;
-}
-
 void LogDepthAlias(const char* kind, const ImageInfo& requested, const ImageInfo& depth,
                    TextureCache::BindingType binding) {
 	if (!GpuWaitStats::Enabled()) {
@@ -94,6 +86,19 @@ void LogDepthAlias(const char* kind, const ImageInfo& requested, const ImageInfo
 	     static_cast<uint32_t>(depth.pixel_format), static_cast<uint32_t>(depth.tile_mode),
 	     depth.extent.width, depth.extent.height, depth.extent.depth, depth.pitch,
 	     static_cast<uint32_t>(depth.metadata.kind))).c_str());
+}
+
+void LogDepthLiveAtAddress(uint64_t address, uint64_t count) {
+	if (!GpuWaitStats::Enabled() || count <= 8) return;
+	static std::mutex                         mutex;
+	static std::set<std::pair<uint64_t, uint64_t>> logged;
+	{
+		std::scoped_lock lock {mutex};
+		if (!logged.emplace(address, count).second) return;
+	}
+	GpuWaitStats::WriteDiag(fmt::sprintf(
+	    "depth-alias:live-at-address addr=0x%016" PRIx64 " count=%" PRIu64 "\n", address, count)
+	    .c_str());
 }
 
 [[nodiscard]] bool DecodeColorClear(const TextureCache::ImageDesc& desc, uint8_t code,
@@ -343,6 +348,17 @@ void TextureCache::FreeImage(ImageId id) {
 		image.ClearGpuModified();
 	}
 	DeleteImage(id);
+}
+
+void TextureCache::RetireImage(ImageId id) {
+	auto& image = m_slot_images[id];
+	if (image.SafeToDownload() && CanDownload(image)) {
+		(void)DownloadImageMemory(id);
+	} else {
+		RefreshCopySource(id);
+	}
+	image.binding.needs_rebind |= image.binding.is_bound || image.binding.is_target;
+	FreeImage(id);
 }
 
 void TextureCache::TouchImage(Image& image) {
@@ -692,27 +708,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 	    view.base_layer < cached.info.resources.layers &&
 	    (view.type == vk::ImageViewType::e2D || view.type == vk::ImageViewType::e2DArray) &&
 	    IsSupportedSampledDepthFormat(cached.info.pixel_format, requested.pixel_format);
-	const bool fixed_depth_view =
-	    FixedRenderScaleEnabled() &&
-	    (binding == BindingType::Texture || binding == BindingType::DepthTarget) &&
-	    cached.info.IsDepth() && !requested.IsVolume() &&
-	    requested.data.address == cached.info.data.address &&
-	    requested.extent.width <= cached.info.extent.width &&
-	    requested.extent.height <= cached.info.extent.height &&
-	    requested.extent.depth <= cached.info.extent.depth && requested.pitch <= cached.info.pitch &&
-	    requested.bytes_per_block == cached.info.bytes_per_block && requested.samples == 1 &&
-	    cached.backing.samples == 1 && requested.resources.levels == 1 &&
-	    requested.resources.layers <= cached.info.resources.layers && view.base_level == 0 &&
-	    view.level_count == 1 && view.layer_count == 1 &&
-	    view.base_layer < cached.info.resources.layers &&
-	    (view.type == vk::ImageViewType::e2D || view.type == vk::ImageViewType::e2DArray) &&
-	    ((binding == BindingType::Texture &&
-	      IsSupportedSampledDepthFormat(cached.info.pixel_format, requested.pixel_format)) ||
-	     (binding == BindingType::DepthTarget && requested.IsDepth() &&
-	      requested.pixel_format == cached.info.pixel_format &&
-	      requested.HasStencil() == cached.info.HasStencil()));
 	if ((!cached.info.IsDepth() && !requested.IsDepth()) ||
-	    (cached.info.tile_mode != requested.tile_mode && !shared_depth_view && !fixed_depth_view)) {
+	    (cached.info.tile_mode != requested.tile_mode && !shared_depth_view)) {
 		return {};
 	}
 	const bool stencil_match = requested.HasStencil() == cached.info.HasStencil();
@@ -765,8 +762,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 	}
 	if (!recreate) {
 		if (cached.info.IsDepth()) {
-			LogDepthAlias(fixed_depth_view && !shared_depth_view ? "fixed-scale" : "shared",
-			              requested, cached.info, binding);
+			LogDepthAlias("shared", requested, cached.info, binding);
 		}
 		return cached_id;
 	}
@@ -884,14 +880,8 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 	if (DynamicDepthEnabled() && binding == BindingType::DepthTarget && cached.info.IsDepth() &&
 	    requested.data.address == cached.info.data.address &&
 	    (requested.extent != cached.info.extent || requested.pitch != cached.info.pitch)) {
-		if (FixedRenderScaleEnabled()) {
-			if (const auto depth_id = ResolveDepthOverlap(requested, binding, cached_id, view)) {
-				return {depth_id};
-			}
-		}
 		LogDepthAlias("retire-resize", requested, cached.info, binding);
-		cached.binding.needs_rebind |= cached.binding.is_bound || cached.binding.is_target;
-		FreeImage(cached_id);
+		RetireImage(cached_id);
 		return {merged_id};
 	}
 	// PS5: image heaps keep BC images and raw block views of their layers resident together, so a
@@ -914,8 +904,7 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 	const uint32_t requested_block = requested.bytes_per_block * requested.samples;
 	const uint32_t cached_block    = cached.info.bytes_per_block * cached.info.samples;
 	if (requested.data.address == cached.info.data.address &&
-	    ((requested.BlockExtent() == cached.info.BlockExtent() && requested_block == cached_block) ||
-	     (FixedRenderScaleEnabled() && cached.info.IsDepth()))) {
+	    requested.BlockExtent() == cached.info.BlockExtent() && requested_block == cached_block) {
 		if (const auto depth_id = ResolveDepthOverlap(requested, binding, cached_id, view)) {
 			return {depth_id};
 		}
@@ -1489,6 +1478,13 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 						LogDepthAlias("stale-size", desc.info, depth->info, desc.type);
 					}
 					LogDepthAlias("separate", desc.info, depth->info, desc.type);
+					if (DynamicDepthEnabled() && desc.info.data.address == depth->info.data.address &&
+					    (desc.info.extent != depth->info.extent ||
+					     desc.info.pitch != depth->info.pitch ||
+					     desc.info.pixel_format != depth->info.pixel_format ||
+					     desc.info.tile_mode != depth->info.tile_mode)) {
+						RetireImage(candidate);
+					}
 					break;
 				}
 			}
@@ -1503,6 +1499,10 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		}
 		if (view_layer >= 0) {
 			desc.view_info.base_layer = static_cast<uint32_t>(view_layer);
+		}
+		if (DynamicDepthEnabled()) {
+			const auto page = Common::AlignDown(desc.info.data.address, TRACKER_PAGE_SIZE);
+			LogDepthLiveAtAddress(page, FindImagesInRegion(page, 1, true).size());
 		}
 		image.tick_accessed_last = m_scheduler.CurrentTick();
 		TouchImage(image);

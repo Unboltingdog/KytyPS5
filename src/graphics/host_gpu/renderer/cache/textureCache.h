@@ -123,6 +123,7 @@ private:
 	void                      UnregisterImage(ImageId id);
 	void                      DeleteImage(ImageId id);
 	void                      FreeImage(ImageId id);
+	void                      RetireImage(ImageId id);
 	void                      TouchImage(Image& image);
 	void                      TrackImage(ImageId id);
 	void                      TrackImageHead(ImageId id);
