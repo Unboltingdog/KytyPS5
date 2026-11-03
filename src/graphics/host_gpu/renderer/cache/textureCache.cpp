@@ -352,11 +352,10 @@ void TextureCache::FreeImage(ImageId id) {
 
 void TextureCache::RetireImage(ImageId id) {
 	auto& image = m_slot_images[id];
-	if (image.SafeToDownload() && CanDownload(image)) {
-		(void)DownloadImageMemory(id);
-	} else {
-		RefreshCopySource(id);
+	if (image.SafeToDownload() && !DownloadImageMemory(id)) {
+		return;
 	}
+	RefreshCopySource(id);
 	image.binding.needs_rebind |= image.binding.is_bound || image.binding.is_target;
 	FreeImage(id);
 }
@@ -875,6 +874,7 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 	if (DynamicDepthEnabled() && cached.info.IsDepth() && !requested.IsDepth() &&
 	    binding != BindingType::Texture) {
 		LogDepthAlias("color-separate", requested, cached.info, binding);
+		RetireImage(cached_id);
 		return {merged_id};
 	}
 	if (DynamicDepthEnabled() && binding == BindingType::DepthTarget && cached.info.IsDepth() &&

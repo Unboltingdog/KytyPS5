@@ -6328,6 +6328,66 @@ public:
     std::printf("[gpu]     %-32s ok\n", name);
   }
 
+  void CheckDynamicDepthRetirement() {
+    constexpr const char *name = "DynamicDepthRetirement";
+    constexpr uintptr_t base = 0x0000000200a00000ull;
+    constexpr uint64_t allocation_size = 0x200000;
+    EnsureRuntimeContext();
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            LibKernel::Memory::KernelAllocateDirectMemory(
+                0, LibKernel::Memory::KernelGetDirectMemorySize(), allocation_size, 0x200000, 0,
+                &direct_offset) == 0,
+            "dynamic-depth allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset, 0x200000) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "dynamic-depth mapping failed");
+    {
+      LibKernel::Memory::InstallGpuResources(&context);
+      auto &texture_cache = context.GetTextureCache();
+      context.MapMemory(base, allocation_size);
+      auto depth = MakeLinearDesc(base, 0x10000, vk::Format::eD32Sfloat,
+          Prospero::BufferFormat::k32Float, Prospero::ImageType::kColor2D,
+          {64, 64, 1}, 1, 4, 1);
+      depth.type = BindingType::DepthTarget;
+      depth.info.tile_mode = Prospero::TileMode::kDepth;
+      depth.view_info.aspect = vk::ImageAspectFlagBits::eDepth;
+      depth.view_info.usage = vk::ImageUsageFlagBits::eDepthStencilAttachment;
+      const auto depth_id = texture_cache.FindImage(depth);
+      auto color = MakeLinearDesc(base, 0x10000, vk::Format::eR32G32B32A32Sfloat,
+          Prospero::BufferFormat::k32_32_32_32Float, Prospero::ImageType::kColor2D,
+          {64, 64, 1}, 1, 16, 1);
+      color.type = BindingType::RenderTarget;
+      color.info.tile_mode = Prospero::TileMode::kRenderTarget;
+      color.view_info.usage = vk::ImageUsageFlagBits::eColorAttachment;
+      const auto color_id = texture_cache.FindImage(color);
+      Require(name, "color-separate retirement",
+              color_id && color_id != depth_id &&
+                  !TextureCacheTestAccess::Contains(texture_cache, depth_id) &&
+                  TextureCacheTestAccess::Contains(texture_cache, color_id) &&
+                  TextureCacheTestAccess::PageOwnerCount(texture_cache, base) == 1u,
+              "replaced depth image remained registered beside its color replacement");
+    }
+    scheduler.Finish();
+    context.ShutdownGpu();
+    Require(name, "release mapping", LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "dynamic-depth mapping release failed");
+    Require(name, "release backing",
+            LibKernel::Memory::KernelReleaseDirectMemory(direct_offset, allocation_size) == 0,
+            "dynamic-depth backing release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
   void CheckUnifiedTextureCacheFlow() {
     constexpr const char *name = "UnifiedTextureCacheFlow";
     constexpr uintptr_t base = 0x0000000200600000ull;
@@ -42910,21 +42970,6 @@ void CheckGpuTableBounds(VulkanHarness &vulkan) {
 #endif
 }
 
-void CheckGpuTableBounds(VulkanHarness &vulkan) {
-#if defined(_WIN32)
-  _putenv("KYTY_GPU_BUFFER_TABLES=1");
-#else
-  setenv("KYTY_GPU_BUFFER_TABLES", "1", 1);
-#endif
-  CheckGuardedWaterfallBufferRecords(vulkan);
-  CheckGpuSelectedRecordBufferAccess(vulkan);
-#if defined(_WIN32)
-  _putenv("KYTY_GPU_BUFFER_TABLES=");
-#else
-  unsetenv("KYTY_GPU_BUFFER_TABLES");
-#endif
-}
-
 void CheckStorageBufferBindingOver2GiB(VulkanHarness &vulkan) {
   // OpArrayLength reads 0 for ranges of 2 GiB or more on NVIDIA; bounds use the pushed binding size.
   constexpr u32 bytes = 0x80000010u, end = bytes / 4u, last = end - 1u;
@@ -54385,6 +54430,11 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--gpu-table-bounds-only") == 0) {
     VulkanHarness vulkan;
     CheckGpuTableBounds(vulkan);
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--dynamic-depth-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckDynamicDepthRetirement();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--indirect-buffer-only") == 0) {

@@ -714,6 +714,9 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-keycount-compile-only)
 	add_test(NAME gpu_table_bounds
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-table-bounds-only)
+	add_test(NAME dynamic_depth_retirement
+		COMMAND ${CMAKE_COMMAND} -E env KYTY_DYNAMIC_DEPTH=1
+		        $<TARGET_FILE:shader_recompiler_compute_tests> --dynamic-depth-only)
 	add_test(NAME shader_recompiler_tessellation
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --tessellation-only)
 	add_test(NAME shader_recompiler_float_min_max
