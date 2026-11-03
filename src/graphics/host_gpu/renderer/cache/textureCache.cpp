@@ -50,13 +50,19 @@ bool DepthAliasEnabled() {
 }
 
 bool DynamicDepthEnabled() {
-	const char* value = std::getenv("KYTY_DYNAMIC_DEPTH");
-	return value != nullptr && value[0] != '\0' && value[0] != '0';
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_DYNAMIC_DEPTH");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
 }
 
 bool FixedRenderScaleEnabled() {
-	const char* value = std::getenv("KYTY_FIXED_RENDER_SCALE");
-	return value != nullptr && value[0] != '\0' && value[0] != '0';
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_FIXED_RENDER_SCALE");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
 }
 
 void LogDepthAlias(const char* kind, const ImageInfo& requested, const ImageInfo& depth,

@@ -44,7 +44,8 @@ std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
 	const uint64_t version =
 	    KYTY_SHADER_CACHE_VERSION ^
 	    (ShaderRecompiler::IR::GpuScalarLoadsEnabled() ? uint64_t {0x9e3779b97f4a7c15} : 0u) ^
-	    (ShaderRecompiler::IR::GpuBufferTablesEnabled() ? uint64_t {0x3c6ef372fe94f82b} : 0u);
+	    (ShaderRecompiler::IR::GpuBufferTablesEnabled() ? uint64_t {0x3c6ef372fe94f82b} : 0u) ^
+	    (ShaderRecompiler::IR::StableSrtLayoutEnabled() ? uint64_t {0xa54ff53a5f1d36f1} : 0u);
 	Writer         header;
 	IoAll(header, version, SpirvProfile(graphics),
 	      graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);
