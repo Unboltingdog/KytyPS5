@@ -2,6 +2,7 @@
 #define EMULATOR_INCLUDE_EMULATOR_LIBS_LIBS_H_
 
 #include "common/abi.h"
+#include "common/guestWaitDiagnostics.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -111,6 +112,7 @@ template <typename R, typename... A, R(KYTY_SYSV_ABI* F)(A...), TraceName Name>
              ((std::is_scalar_v<A> || std::is_reference_v<A>) && ...))
 struct TraceWrap<F, Name> {
 	static R KYTY_SYSV_ABI Call(A... args) {
+		Common::GuestWaitDiagnostics::ReturnAddressScope return_scope(__builtin_return_address(0));
 		HleStats::Timer hle_timer(Name.text);
 		if constexpr (std::is_void_v<R>) {
 			F(args...);

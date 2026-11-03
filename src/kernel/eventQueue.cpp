@@ -418,7 +418,7 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	                            : 0u;
 	const auto timeout_us = timo == nullptr ? Common::GuestWaitDiagnostics::InfiniteTimeout
 	                                        : static_cast<uint64_t>(*timo);
-	const auto return_address = __builtin_return_address(0);
+	const auto return_address = Common::GuestWaitDiagnostics::CurrentReturnAddress();
 
 	LOGF("\tEqueue wait: %s, caller = 0x%016" PRIx64 ", eq = 0x%016" PRIx64 ", ev = 0x%016" PRIx64
 	     ", num = %d, timo = %s, thread_id = %d\n",

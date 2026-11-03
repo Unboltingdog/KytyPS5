@@ -297,7 +297,7 @@ int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time)
 	                            : 0u;
 	const auto timeout_us = time == nullptr ? Common::GuestWaitDiagnostics::InfiniteTimeout
 	                                        : static_cast<uint64_t>(*time);
-	const auto return_address = __builtin_return_address(0);
+	const auto return_address = Common::GuestWaitDiagnostics::CurrentReturnAddress();
 	auto result = sem->Wait(need, time);
 
 	int ret = OK;
@@ -354,7 +354,14 @@ int KYTY_SYSV_ABI KernelSignalSema(KernelSema sem, int count) {
 		case KernelSemaPrivate::Result::Canceled:
 		case KernelSemaPrivate::Result::Deleted: ret = KERNEL_ERROR_EINVAL; break;
 	}
-
+	if (Common::GuestWaitDiagnostics::Enabled()) {
+		Common::DiagLog::Write(fmt::format(
+		    "semaphore-signal time_us={} id=0x{:016x} count={} result={} return={} thread={}\n",
+		    Common::GuestWaitDiagnostics::NowNs() / 1000u, reinterpret_cast<uint64_t>(sem), count, ret,
+		    Common::GuestWaitDiagnostics::CurrentReturnAddress(),
+		    Common::Thread::GetThreadIdUnique())
+		    .c_str());
+	}
 	return ret;
 }
 

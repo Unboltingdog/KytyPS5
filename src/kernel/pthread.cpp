@@ -2914,7 +2914,7 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex,
 	const auto wait_start = Common::GuestWaitDiagnostics::Enabled()
 	                            ? Common::GuestWaitDiagnostics::NowNs()
 	                            : 0u;
-	const auto return_address = __builtin_return_address(0);
+	const auto return_address = Common::GuestWaitDiagnostics::CurrentReturnAddress();
 
 	std::unique_lock cond_lock(cond_value->m);
 	auto*            thread          = g_pthread_self;
@@ -3921,7 +3921,7 @@ int KYTY_SYSV_ABI KernelUsleep(KernelUseconds microseconds) {
 	const auto wait_start = Common::GuestWaitDiagnostics::Enabled()
 	                            ? Common::GuestWaitDiagnostics::NowNs()
 	                            : 0u;
-	const auto return_address = __builtin_return_address(0);
+	const auto return_address = Common::GuestWaitDiagnostics::CurrentReturnAddress();
 	SleepMicroWithSignalPoll(microseconds);
 	Common::GuestWaitDiagnostics::LogSlow("KernelUsleep", wait_start, microseconds, 0, "signalled",
 	                                      OK, return_address);

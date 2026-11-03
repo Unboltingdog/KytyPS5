@@ -27,6 +27,25 @@ constexpr uint64_t ReportAfterNs   = 5'000'000'000ull;
 	                                 .count());
 }
 
+inline thread_local const void* t_return_address = nullptr;
+
+class ReturnAddressScope {
+public:
+	explicit ReturnAddressScope(const void* address): previous(t_return_address) {
+		t_return_address = address;
+	}
+	~ReturnAddressScope() { t_return_address = previous; }
+	ReturnAddressScope(const ReturnAddressScope&)            = delete;
+	ReturnAddressScope& operator=(const ReturnAddressScope&) = delete;
+
+private:
+	const void* previous;
+};
+
+[[nodiscard]] inline const void* CurrentReturnAddress() {
+	return t_return_address;
+}
+
 inline void LogSlow(const char* name, uint64_t start_ns, uint64_t timeout_us, uint64_t id,
                     const char* outcome, int result, const void* return_address) noexcept {
 	if (!Enabled() || start_ns == 0) return;
