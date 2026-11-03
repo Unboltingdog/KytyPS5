@@ -219,6 +219,7 @@ private:
 		uint64_t     id = 0;
 		ShaderModule module;
 		Pipeline     pipeline;
+		bool         warmup = false;
 	};
 
 	struct Program {
@@ -291,7 +292,6 @@ private:
 	std::queue<std::unique_ptr<AsyncComputePipeline>> m_compute_async_jobs;
 	std::queue<std::unique_ptr<AsyncComputePipeline>> m_compute_async_done;
 	std::unordered_set<uint64_t> m_compute_async_pending;
-	std::vector<vk::PipelineCache> m_worker_caches;
 	uint32_t m_warmup_pending = 0;
 	uint32_t m_warmup_queued = 0;
 	// Declared last, so pipeline creation stops before device objects are destroyed.
@@ -312,7 +312,7 @@ private:
 	void QueueGraphicsPipeline(const GraphicsPipelineKey&                 key,
 	                           const std::array<const ShaderModule*, 4>& stages,
 	                           bool warmup = false);
-	void QueueComputePipeline(const ShaderModule& module);
+	bool QueueComputePipeline(const ShaderModule& module, bool warmup = false);
 	void ReapGraphicsPipelines();
 	void WaitForWarmup();
 

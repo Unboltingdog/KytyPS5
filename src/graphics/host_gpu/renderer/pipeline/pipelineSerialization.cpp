@@ -176,9 +176,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	for (const auto* module: modules | std::views::values) {
 		if (module == nullptr || module->info.stage != ShaderType::Compute) continue;
 		if (async) {
-			QueueComputePipeline(*module);
-			std::scoped_lock lock(m_async_mutex);
-			++m_warmup_pending;
+			(void)QueueComputePipeline(*module, true);
 		} else {
 			CreatePipelineInternal(m_graphics, m_compute_pipelines[module->id], *module,
 			                       m_driver_cache);
