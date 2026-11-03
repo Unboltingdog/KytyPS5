@@ -24,8 +24,13 @@ inline bool GpuBufferTablesEnabled() {
 	const char* value = std::getenv("KYTY_GPU_BUFFER_TABLES");
 	return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
+// PPSA26344: widening this to every table without sources lost the device 14 s in, right after
+// tables sized only by a key count (no selector, workgroup axis or maximum: CS 342f94414ac68fed,
+// 2aad43c2ed85beab) were first selected on the GPU. Keep those on the CPU path.
 inline bool GpuBufferTableEnabled(const DescriptorSource::IndirectDescriptor& indirect) {
-	return GpuBufferTablesEnabled() && indirect.sources.empty();
+	return GpuBufferTablesEnabled() && indirect.sources.empty() &&
+	       (indirect.workgroup_axis != UINT32_MAX || indirect.selector.has_value() ||
+	        indirect.table_maximum.has_value());
 }
 // KYTY_STABLE_SRT_LAYOUT=1: use fixed indirect-map headers and a separate variable-length tail.
 inline bool StableSrtLayoutEnabled() {
