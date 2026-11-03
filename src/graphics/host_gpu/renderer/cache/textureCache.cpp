@@ -67,7 +67,7 @@ void LogDepthAlias(const char* kind, const ImageInfo& requested, const ImageInfo
 	const char* binding_name = binding == TextureCache::BindingType::Texture    ? "texture"
 	                           : binding == TextureCache::BindingType::Storage ? "storage"
 	                                                                          : "depth-target";
-	LOGF("depth-alias:%s address=0x%016" PRIx64 " binding=%s "
+	::Log::WriteToConsoleAndLog(fmt::sprintf("depth-alias:%s address=0x%016" PRIx64 " binding=%s "
 	     "requested={format=%u tile=%u extent=%ux%ux%u pitch=%u metadata=%u} "
 	     "depth={address=0x%016" PRIx64
 	     " format=%u tile=%u extent=%ux%ux%u pitch=%u metadata=%u}\n",
@@ -77,7 +77,7 @@ void LogDepthAlias(const char* kind, const ImageInfo& requested, const ImageInfo
 	     static_cast<uint32_t>(requested.metadata.kind), depth.data.address,
 	     static_cast<uint32_t>(depth.pixel_format), static_cast<uint32_t>(depth.tile_mode),
 	     depth.extent.width, depth.extent.height, depth.extent.depth, depth.pitch,
-	     static_cast<uint32_t>(depth.metadata.kind));
+	     static_cast<uint32_t>(depth.metadata.kind)));
 }
 
 [[nodiscard]] bool DecodeColorClear(const TextureCache::ImageDesc& desc, uint8_t code,

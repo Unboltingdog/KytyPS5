@@ -70,21 +70,21 @@ void TraceStallCounterWrite(int queue_id, const char* kind, uint64_t submit_id, 
 	        std::chrono::steady_clock::now().time_since_epoch())
 	        .count());
 	if (data == nullptr) {
-		LOGF("cp-counter-write time_us=%" PRIu64 " queue=%d submit=%" PRIu64
+		::Log::WriteToConsoleAndLog(fmt::sprintf("cp-counter-write time_us=%" PRIu64 " queue=%d submit=%" PRIu64
 		     " kind=%s dst=0x%016" PRIx64 " size=%" PRIu64 " value=unknown thread=%d\n",
 		     time_us, queue_id, submit_id, kind, begin, end - begin,
-		     Common::Thread::GetThreadIdUnique());
+		     Common::Thread::GetThreadIdUnique()));
 		return;
 	}
 	for (auto current = begin; current < end;) {
 		const auto bytes = std::min<uint64_t>(sizeof(uint32_t), end - current);
 		uint32_t   value = 0;
 		std::memcpy(&value, static_cast<const uint8_t*>(data) + (current - address), bytes);
-		LOGF("cp-counter-write time_us=%" PRIu64 " queue=%d submit=%" PRIu64
+		::Log::WriteToConsoleAndLog(fmt::sprintf("cp-counter-write time_us=%" PRIu64 " queue=%d submit=%" PRIu64
 		     " kind=%s dst=0x%016" PRIx64 " value=0x%08" PRIx32 " size=%" PRIu64
 		     " thread=%d\n",
 		     time_us, queue_id, submit_id, kind, current, value, bytes,
-		     Common::Thread::GetThreadIdUnique());
+		     Common::Thread::GetThreadIdUnique()));
 		current += bytes;
 	}
 }
