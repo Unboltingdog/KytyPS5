@@ -4,6 +4,7 @@
 #include "common/common.h"
 #include "common/dateTime.h"
 #include "common/emulatorConfig.h"
+#include "common/guestWaitDiagnostics.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
 #include "common/singleton.h"
@@ -2910,6 +2911,10 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex,
 	if (mutex_value->owner != g_pthread_self) {
 		return KERNEL_ERROR_EPERM;
 	}
+	const auto wait_start = Common::GuestWaitDiagnostics::Enabled()
+	                            ? Common::GuestWaitDiagnostics::NowNs()
+	                            : 0u;
+	const auto return_address = __builtin_return_address(0);
 
 	std::unique_lock cond_lock(cond_value->m);
 	auto*            thread          = g_pthread_self;
@@ -2961,13 +2966,19 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex,
 
 	// LOGF("\tcond timedwait: %s, %d\n", (*cond)->name.c_str(), result);
 
+	int ret = KERNEL_ERROR_EINVAL;
 	switch (result) {
-		case 0: return OK;
-		case ETIMEDOUT: return KERNEL_ERROR_ETIMEDOUT;
-		case EPERM: return KERNEL_ERROR_EPERM;
+		case 0: ret = OK; break;
+		case ETIMEDOUT: ret = KERNEL_ERROR_ETIMEDOUT; break;
+		case EPERM: ret = KERNEL_ERROR_EPERM; break;
 		case EINVAL:
-		default: return KERNEL_ERROR_EINVAL;
+		default: break;
 	}
+	const char* outcome = ret == OK ? "signalled" : ret == KERNEL_ERROR_ETIMEDOUT ? "timeout" : "error";
+	Common::GuestWaitDiagnostics::LogSlow("PthreadCondTimedwait", wait_start, usec,
+	                                      reinterpret_cast<uint64_t>(cond), outcome, ret,
+	                                      return_address);
+	return ret;
 }
 
 int KYTY_SYSV_ABI PthreadCondTimedwaitAbs(PthreadCond* cond, PthreadMutex* mutex,
@@ -3907,7 +3918,13 @@ void KYTY_SYSV_ABI KernelSetThreadDtors(thread_dtors_func_t dtors) {
 }
 
 int KYTY_SYSV_ABI KernelUsleep(KernelUseconds microseconds) {
+	const auto wait_start = Common::GuestWaitDiagnostics::Enabled()
+	                            ? Common::GuestWaitDiagnostics::NowNs()
+	                            : 0u;
+	const auto return_address = __builtin_return_address(0);
 	SleepMicroWithSignalPoll(microseconds);
+	Common::GuestWaitDiagnostics::LogSlow("KernelUsleep", wait_start, microseconds, 0, "signalled",
+	                                      OK, return_address);
 	return OK;
 }
 

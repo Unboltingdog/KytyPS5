@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/guestWaitDiagnostics.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -412,6 +413,12 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	}
 
 	EXIT_NOT_IMPLEMENTED(out == nullptr);
+	const auto wait_start = Common::GuestWaitDiagnostics::Enabled()
+	                            ? Common::GuestWaitDiagnostics::NowNs()
+	                            : 0u;
+	const auto timeout_us = timo == nullptr ? Common::GuestWaitDiagnostics::InfiniteTimeout
+	                                        : static_cast<uint64_t>(*timo);
+	const auto return_address = __builtin_return_address(0);
 
 	LOGF("\tEqueue wait: %s, caller = 0x%016" PRIx64 ", eq = 0x%016" PRIx64 ", ev = 0x%016" PRIx64
 	     ", num = %d, timo = %s, thread_id = %d\n",
@@ -433,9 +440,15 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	}
 
 	if (*out == KERNEL_ERROR_EBADF) {
+		Common::GuestWaitDiagnostics::LogSlow("KernelWaitEqueue", wait_start, timeout_us,
+		                                      static_cast<uint64_t>(eq), "error", *out,
+		                                      return_address);
 		return KERNEL_ERROR_EBADF;
 	}
 	if (*out == 0) {
+		Common::GuestWaitDiagnostics::LogSlow("KernelWaitEqueue", wait_start, timeout_us,
+		                                      static_cast<uint64_t>(eq), "timeout",
+		                                      KERNEL_ERROR_ETIMEDOUT, return_address);
 		LOGF("\tEqueue wait timedout: %s\n", owner->GetName().c_str());
 		return KERNEL_ERROR_ETIMEDOUT;
 	}
@@ -445,7 +458,9 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	     ", udata = 0x%016" PRIx64 "\n",
 	     *out, static_cast<uint64_t>(ev[0].ident), ev[0].filter, ev[0].flags, ev[0].fflags,
 	     static_cast<uint64_t>(ev[0].data), reinterpret_cast<uint64_t>(ev[0].udata));
-
+	Common::GuestWaitDiagnostics::LogSlow("KernelWaitEqueue", wait_start, timeout_us,
+	                                      static_cast<uint64_t>(eq), "signalled", OK,
+	                                      return_address);
 	return OK;
 }
 

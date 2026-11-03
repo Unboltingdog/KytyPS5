@@ -1,6 +1,7 @@
 #include "kernel/semaphore.h"
 
 #include "common/assert.h"
+#include "common/guestWaitDiagnostics.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -291,6 +292,12 @@ int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time)
 		return KERNEL_ERROR_ESRCH;
 	}
 
+	const auto wait_start = Common::GuestWaitDiagnostics::Enabled()
+	                            ? Common::GuestWaitDiagnostics::NowNs()
+	                            : 0u;
+	const auto timeout_us = time == nullptr ? Common::GuestWaitDiagnostics::InfiniteTimeout
+	                                        : static_cast<uint64_t>(*time);
+	const auto return_address = __builtin_return_address(0);
 	auto result = sem->Wait(need, time);
 
 	int ret = OK;
@@ -302,7 +309,10 @@ int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time)
 		case KernelSemaPrivate::Result::Canceled: ret = KERNEL_ERROR_ECANCELED; break;
 		case KernelSemaPrivate::Result::Deleted: ret = KERNEL_ERROR_EACCES; break;
 	}
-
+	const char* outcome = ret == OK ? "signalled" : ret == KERNEL_ERROR_ETIMEDOUT ? "timeout" : "error";
+	Common::GuestWaitDiagnostics::LogSlow("KernelWaitSema", wait_start, timeout_us,
+	                                      reinterpret_cast<uint64_t>(sem), outcome, ret,
+	                                      return_address);
 	return ret;
 }
 

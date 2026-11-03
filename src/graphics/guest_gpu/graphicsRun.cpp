@@ -1170,6 +1170,12 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 
 	// GuestGpu::Process's end-of-slice flush submits the work this interrupt waits on.
 	if (interrupt) {
+		GpuWaitStats::WriteDiag(fmt::sprintf(
+		    "release-mem-interrupt queue=%d submit=%" PRIu64 " address=0x%016" PRIx64
+		    " data=0x%016" PRIx64 " event=0x%08x context=0x%08" PRIx32 "\n",
+		    m_interrupt_event_id, m_submit_id, reinterpret_cast<uint64_t>(address), data,
+		    m_interrupt_event_id, interrupt_context_id)
+		    .c_str());
 		GetScheduler().DeferPriorityOperation(
 		    [&renderer = m_renderer, event_id = m_interrupt_event_id, interrupt_context_id] {
 			    renderer.TriggerInterrupt(event_id, interrupt_context_id);

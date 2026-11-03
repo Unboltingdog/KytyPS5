@@ -2,6 +2,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 
 #include "common/assert.h"
+#include "common/diagLog.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/gpuCrashReport.h"
@@ -10,6 +11,7 @@
 
 #include <algorithm>
 #include <string>
+#include <fmt/format.h>
 
 namespace Libs::Graphics {
 
@@ -184,6 +186,9 @@ void RenderContext::AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int e
 	}
 
 	m_interrupt_eqs.push_back({eq, event_id});
+	GpuWaitStats::WriteDiag(fmt::format("interrupt-register eq=0x{:016x} event=0x{:08x}\n",
+	                                    static_cast<uint64_t>(eq), event_id)
+	                            .c_str());
 }
 
 void RenderContext::DeleteInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id) {
@@ -197,6 +202,9 @@ void RenderContext::DeleteInterruptEq(LibKernel::EventQueue::KernelEqueue eq, in
 	}
 
 	m_interrupt_eqs.erase(it);
+	GpuWaitStats::WriteDiag(fmt::format("interrupt-unregister eq=0x{:016x} event=0x{:08x}\n",
+	                                    static_cast<uint64_t>(eq), event_id)
+	                            .c_str());
 }
 
 void RenderContext::TriggerInterrupt(int event_id, uint32_t context_id) {
@@ -209,12 +217,20 @@ void RenderContext::TriggerInterrupt(int event_id, uint32_t context_id) {
 			}
 		}
 	}
-
+	GpuWaitStats::WriteDiag(fmt::format("interrupt-trigger event=0x{:08x} context=0x{:08x} "
+	                                    "registrations={}\n",
+	                                    event_id, context_id, registrations.size())
+	                            .c_str());
 	for (const auto& registration: registrations) {
 		const auto result = LibKernel::EventQueue::KernelTriggerEvent(
 		    registration.eq, static_cast<uintptr_t>(registration.event_id),
 		    LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
 		    reinterpret_cast<void*>(static_cast<uintptr_t>(context_id)));
+		GpuWaitStats::WriteDiag(fmt::format("interrupt-deliver eq=0x{:016x} event=0x{:08x} "
+		                                    "context=0x{:08x} result={}\n",
+		                                    static_cast<uint64_t>(registration.eq), event_id,
+		                                    context_id, result)
+		                            .c_str());
 		if (result == LibKernel::KERNEL_ERROR_EBADF || result == LibKernel::KERNEL_ERROR_ENOENT) {
 			DeleteInterruptEq(registration.eq, registration.event_id);
 			continue;
