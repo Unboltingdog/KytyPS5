@@ -20,6 +20,9 @@ void               RecordShaderTime(uint64_t key, bool pixel, uint64_t nanosecon
 void               RecordEvent(const char* name, uint64_t count = 1) noexcept;
 // Counts a CPU readback fault at a page, with the size read back; the busiest pages are listed.
 void               RecordFaultPage(uint64_t page, uint64_t bytes) noexcept;
+// KYTY_WAIT_STATS: appends a diagnostic line to kyty-diag.txt beside the emulator (kept out of the
+// console, whose scrollback a busy trace overruns).
+void WriteDiag(const char* text) noexcept;
 // The reason named by the innermost Scope on this thread, or nullptr.
 [[nodiscard]] const char* CurrentReason() noexcept;
 

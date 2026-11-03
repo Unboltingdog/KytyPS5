@@ -245,6 +245,16 @@ void RecordEvent(const char* name, uint64_t count) noexcept {
 	MaybePrint(state);
 }
 
+void WriteDiag(const char* text) noexcept {
+	if (!Enabled()) return;
+	static std::mutex mutex;
+	static std::FILE* file = std::fopen("kyty-diag.txt", "w");
+	if (file == nullptr) return;
+	std::scoped_lock lock {mutex};
+	std::fputs(text, file);
+	std::fflush(file);
+}
+
 const char* CurrentReason() noexcept {
 	return t_reason;
 }
