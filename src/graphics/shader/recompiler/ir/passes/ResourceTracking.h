@@ -24,13 +24,22 @@ inline bool GpuBufferTablesEnabled() {
 	const char* value = std::getenv("KYTY_GPU_BUFFER_TABLES");
 	return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
-// PPSA26344: widening this to every table without sources lost the device 14 s in, right after
-// tables sized only by a key count (no selector, workgroup axis or maximum: CS 342f94414ac68fed,
-// 2aad43c2ed85beab) were first selected on the GPU. Keep those on the CPU path.
+// KYTY_GPU_KEYCOUNT_TABLES=1: also GPU-select tables bounded only by key_count, with clamped loads.
+inline bool GpuKeyCountTablesEnabled() {
+	const char* value = std::getenv("KYTY_GPU_KEYCOUNT_TABLES");
+	return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+inline bool GpuKeyCountTableEnabled(const DescriptorSource::IndirectDescriptor& indirect) {
+	return GpuBufferTablesEnabled() && GpuKeyCountTablesEnabled() && indirect.sources.empty() &&
+	       !indirect.selector && !indirect.table_maximum && !indirect.pointer_table &&
+	       indirect.workgroup_axis == UINT32_MAX && !indirect.key_count.IsEmpty() &&
+	       indirect.selector_first.IsEmpty();
+}
+// PPSA26344: key-count-only tables stay on the CPU path unless their bounded-load switch is on.
 inline bool GpuBufferTableEnabled(const DescriptorSource::IndirectDescriptor& indirect) {
 	return GpuBufferTablesEnabled() && indirect.sources.empty() &&
 	       (indirect.workgroup_axis != UINT32_MAX || indirect.selector.has_value() ||
-	        indirect.table_maximum.has_value());
+	        indirect.table_maximum.has_value() || GpuKeyCountTableEnabled(indirect));
 }
 // KYTY_STABLE_SRT_LAYOUT=1: use fixed indirect-map headers and a separate variable-length tail.
 inline bool StableSrtLayoutEnabled() {

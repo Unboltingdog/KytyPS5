@@ -430,10 +430,66 @@ public:
 				memory.sampler = patch.sampler;
 			}
 		}
+		std::unordered_map<const Inst*, std::pair<Value, Value>> key_count_clamps;
+		const auto clamp_key_count_table = [&](const IndirectDescriptorPlan& plan) {
+			const auto& indirect = *m_sources[plan.source].indirect_descriptor;
+			EXIT_IF(plan.read_dwords != 4u ||
+			        std::ranges::any_of(std::span(plan.reads).first(plan.read_dwords),
+			                            [](const Inst* read) { return read == nullptr; }));
+			auto [clamp, inserted] = key_count_clamps.try_emplace(plan.reads[0]);
+			if (inserted) {
+				const Inst* first_read = nullptr;
+				for (const auto* candidate: std::span(plan.reads).first(plan.read_dwords)) {
+					const auto earliest = std::ranges::all_of(
+					    std::span(plan.reads).first(plan.read_dwords), [&](const Inst* other) {
+						    return candidate == other || AvailableBefore(*candidate, *other);
+					    });
+					if (earliest) first_read = candidate;
+				}
+				EXIT_IF(first_read == nullptr);
+				auto* anchor_block = first_read->Parent();
+				const auto anchor = std::ranges::find_if(anchor_block->Instructions(),
+				    [&](const Inst& inst) { return &inst == first_read; });
+				const auto emit = [&](ValueOpcode op, std::initializer_list<Value> args) {
+					return Value(&*anchor_block->PrependNewInst(anchor, op, args));
+				};
+				auto count = indirect.key_count;
+				if (indirect.signed_count) {
+					count = emit(ValueOpcode::SelectU32,
+					    {emit(ValueOpcode::SLessThan32, {count, Value(0u)}), Value(0u), count});
+				}
+				clamp->second.first = emit(ValueOpcode::ULessThan32, {plan.key, count});
+				auto boundary = emit(ValueOpcode::IMul32, {count, Value(indirect.table_stride)});
+				if (indirect.table_offset != 0u) {
+					boundary = emit(ValueOpcode::IAdd32, {boundary, Value(indirect.table_offset)});
+				}
+				clamp->second.second = boundary;
+				for (uint32_t word = 0; word < plan.read_dwords; ++word) {
+					auto* read = const_cast<Inst*>(plan.reads[word]);
+					auto* read_block = read->Parent();
+					const auto where = std::ranges::find_if(read_block->Instructions(),
+					    [&](const Inst& inst) { return &inst == read; });
+					const auto offset = Value(&*read_block->PrependNewInst(where,
+					    ValueOpcode::SelectU32, {clamp->second.first, read->Arg(1), boundary}));
+					read->SetArg(1, offset);
+				}
+			}
+			auto* handle_block = plan.handle->Parent();
+			for (uint32_t word = 0; word < plan.read_dwords; ++word) {
+				const auto where = std::ranges::find_if(handle_block->Instructions(),
+				    [&](const Inst& inst) { return &inst == plan.handle; });
+				const auto zero = Value(&*handle_block->PrependNewInst(where,
+				    ValueOpcode::SelectU32,
+				    {clamp->second.first, Value(const_cast<Inst*>(plan.reads[word])), Value(0u)}));
+				plan.handle->SetArg(word, zero);
+			}
+		};
 		std::vector<std::pair<const IndirectDescriptorPlan*, Value>> buffer_selections;
 		for (const auto& plan: m_indirect_descriptors) {
+			const auto& indirect = *m_sources[plan.source].indirect_descriptor;
 			if (plan.handle->GetOpcode() == ValueOpcode::GetBufferResource &&
-			    GpuBufferTableEnabled(*m_sources[plan.source].indirect_descriptor)) {
+			    GpuBufferTableEnabled(indirect)) {
+				if (GpuKeyCountTableEnabled(indirect)) clamp_key_count_table(plan);
 				continue;
 			}
 			auto key = plan.key;

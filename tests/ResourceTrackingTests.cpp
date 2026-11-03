@@ -59,6 +59,15 @@ bool SetGpuBufferTables(bool enabled) {
 #endif
 }
 
+bool SetGpuKeyCountTables(bool enabled) {
+#if defined(_WIN32)
+  return _putenv(enabled ? "KYTY_GPU_KEYCOUNT_TABLES=1" : "KYTY_GPU_KEYCOUNT_TABLES=") == 0;
+#else
+  return enabled ? setenv("KYTY_GPU_KEYCOUNT_TABLES", "1", 1) == 0
+                 : unsetenv("KYTY_GPU_KEYCOUNT_TABLES") == 0;
+#endif
+}
+
 bool SetStableSrtLayout(bool enabled) {
 #if defined(_WIN32)
   return _putenv(enabled ? "KYTY_STABLE_SRT_LAYOUT=1" : "KYTY_STABLE_SRT_LAYOUT=") == 0;
@@ -66,6 +75,46 @@ bool SetStableSrtLayout(bool enabled) {
   return enabled ? setenv("KYTY_STABLE_SRT_LAYOUT", "1", 1) == 0
                  : unsetenv("KYTY_STABLE_SRT_LAYOUT") == 0;
 #endif
+}
+
+uint32_t CheckKeyCountClamp(const Program &program) {
+  std::vector<const Inst *> clamps;
+  for (const auto *block : program.blocks) {
+    for (const auto &inst : *block) {
+      if (inst.GetOpcode() != ValueOpcode::GetBufferResource) continue;
+      const auto *first = inst.Arg(0).ResolveInstruction();
+      if (first == nullptr || first->GetOpcode() != ValueOpcode::SelectU32) continue;
+      const auto *valid = first->Arg(0).ResolveInstruction();
+      Check(valid != nullptr && valid->GetOpcode() == ValueOpcode::ULessThan32,
+            "key-count descriptor has no key/count comparison");
+      const Inst *boundary = nullptr;
+      for (uint32_t word = 0; word < 4u; ++word) {
+        const auto *selected = inst.Arg(word).ResolveInstruction();
+        Check(selected != nullptr && selected->GetOpcode() == ValueOpcode::SelectU32 &&
+                  selected->Arg(0).ResolveInstruction() == valid &&
+                  selected->Arg(2).Resolve() == Value(0u),
+              "out-of-range key did not select a null descriptor");
+        const auto *read = selected->Arg(1).ResolveInstruction();
+        Check(read != nullptr &&
+                  (read->GetOpcode() == ValueOpcode::ReadConstBuffer ||
+                   read->GetOpcode() == ValueOpcode::LoadAddressU32),
+              "key-count clamp lost its scalar descriptor read");
+        const auto *offset = read->Arg(1).ResolveInstruction();
+        Check(offset != nullptr && offset->GetOpcode() == ValueOpcode::SelectU32 &&
+                  offset->Arg(0).ResolveInstruction() == valid,
+              "key-count clamp did not guard the descriptor read offset");
+        const auto *candidate = offset->Arg(2).ResolveInstruction();
+        Check(candidate != nullptr &&
+                  (candidate->GetOpcode() == ValueOpcode::IMul32 ||
+                   candidate->GetOpcode() == ValueOpcode::IAdd32),
+              "out-of-range key did not clamp to the one-past-end record");
+        if (boundary == nullptr) boundary = candidate;
+        Check(boundary == candidate, "descriptor words disagree on the table boundary");
+      }
+      if (std::ranges::find(clamps, valid) == clamps.end()) clamps.push_back(valid);
+    }
+  }
+  return static_cast<uint32_t>(clamps.size());
 }
 
 struct Fixture {
@@ -7087,6 +7136,24 @@ void TestWorkgroupSelectedBufferRecords() {
         "a plan without workgroup counts read the indirect argument pointer");
 }
 
+void TestGpuKeyCountBufferTableClamp() {
+  Check(SetGpuBufferTables(true), "could not enable GPU buffer tables");
+  auto cpu = MakeBufferRecordFixture();
+  Check(CheckKeyCountClamp(cpu->program) == 0u,
+        "key-count-only tables left the CPU path by default");
+  Check(SetGpuKeyCountTables(true), "could not enable GPU key-count tables");
+  auto fixture = MakeBufferRecordFixture();
+  Check(CheckKeyCountClamp(fixture->program) == 2u,
+        "dynamic key-count table did not clamp both descriptor roots");
+  for (const auto *block : fixture->program.blocks)
+    for (const auto &inst : *block)
+      Check(inst.GetOpcode() != ValueOpcode::GetBufferResourceIndex,
+            "clamped key-count table retained CPU candidate selection");
+  ValidateProgram(fixture->program);
+  SetGpuKeyCountTables(false);
+  SetGpuBufferTables(false);
+}
+
 void TestGpuBufferTableSkipsCounts() {
   Check(SetGpuBufferTables(true),
         "could not enable GPU buffer tables");
@@ -7707,6 +7774,19 @@ void TestFiniteBufferSelection() {
     CheckFatal([&] { invalid->PlanAndTrack(); }, "not a valid runtime value",
                "finite buffer selection accepted an unproved EXEC or selector domain");
   }
+  Check(SetGpuBufferTables(true) && SetGpuKeyCountTables(true),
+        "could not enable immediate key-count GPU selection");
+  auto gpu = make(Variant::Valid);
+  gpu->PlanAndTrack();
+  Check(CheckKeyCountClamp(gpu->program) == 1u,
+        "immediate key-count table did not clamp its descriptor read");
+  const auto gpu_plan = ExtractResourcePlan(gpu->program);
+  memory.reads = 0u;
+  Check(MaterializeResources(gpu_plan, runtime, snapshot, specialization) &&
+            memory.reads == 0u && snapshot.buffers.size() == 1u,
+        "clamped immediate table was enumerated on the CPU");
+  SetGpuKeyCountTables(false);
+  SetGpuBufferTables(false);
 }
 
 void TestPackedScalarBufferSelection() {
@@ -9390,6 +9470,7 @@ int main() {
     Run("GPU-selected buffer records", TestGpuSelectedBufferRecords);
     Run("stable SRT layout", TestStableSrtLayout);
     Run("workgroup-selected buffer records", TestWorkgroupSelectedBufferRecords);
+    Run("GPU key-count buffer table clamp", TestGpuKeyCountBufferTableClamp);
     Run("GPU buffer table skips counts", TestGpuBufferTableSkipsCounts);
     Run("GPU buffer table skips unmasked selector", TestGpuBufferTableSkipsUnmaskedSelector);
     Run("GPU buffer table skips masked selector", TestGpuBufferTableSkipsMaskedSelector);

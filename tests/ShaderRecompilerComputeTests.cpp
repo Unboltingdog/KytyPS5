@@ -42820,6 +42820,96 @@ void CheckFiniteBufferSelection(VulkanHarness &vulkan) {
   }
 }
 
+void CheckGpuKeyCountBufferSelection(u32 subgroup) {
+  using namespace ShaderRecompiler::IR;
+#if defined(_WIN32)
+  Require("GpuKeyCountBufferSelection", "enable GPU tables",
+          _putenv("KYTY_GPU_BUFFER_TABLES=1") == 0 &&
+              _putenv("KYTY_GPU_KEYCOUNT_TABLES=1") == 0,
+          "could not set GPU table switches");
+#else
+  Require("GpuKeyCountBufferSelection", "enable GPU tables",
+          setenv("KYTY_GPU_BUFFER_TABLES", "1", 1) == 0 &&
+              setenv("KYTY_GPU_KEYCOUNT_TABLES", "1", 1) == 0,
+          "could not set GPU table switches");
+#endif
+  for (const u32 wave : {32u, 64u}) {
+    TestCase test;
+    test.name = wave == 32 ? "GpuKeyCountBufferSelection32" : "GpuKeyCountBufferSelection64";
+    auto &code = test.code;
+    code.insert(code.end(), {EncodeSMovB32(32, InlineU32(0)), EncodeSop1(0x04, 36, 126)});
+    AppendVMovLiteral(&code, 13, 0x80000000u);
+    code.insert(code.end(), {EncodeVopc(0xc2, InlineU32(6), 0),
+        EncodeVop2(0x01, 12, Vgpr(0), 13)});
+    AppendVMovLiteral(&code, 14, 0x55555556u);
+    code.insert(code.end(), {EncodeVopc(0xc2, InlineU32(6), 0),
+        EncodeVop2(0x01, 15, Vgpr(0), 14)});
+    AppendVMovLiteral(&code, 10, 0xa5c39b72u);
+    const auto header = code.size();
+    code.push_back(EncodeSopc(0x04, 32, 4));
+    const auto exit_branch = code.size();
+    code.push_back(0);
+    code.insert(code.end(), {EncodeSop2(0x26, 33, 32, 255), 192u,
+        EncodeSmem0(0x0a, 8, 0), EncodeSmem1(160u, 33),
+        EncodeSmem0(0x0a, 12, 0), EncodeSmem1(176u, 33), EncodeSopp(0x0c, 0),
+        EncodeMubuf0(0x83, 0, true, false), EncodeMubuf1(4, 2, 12),
+        EncodeMubuf0(0x83, 0, true, false, true), EncodeMubuf1(6, 2, 12),
+        EncodeSopp(0x0c, 0), EncodeSop2(0x1e, 34, 32, InlineU32(std::countr_zero(wave))),
+        EncodeVop2(0x25, 20, 34, 0),
+        EncodeMubuf0(0x1e, 0, true, false), EncodeMubuf1(4, 4, 20)});
+    AppendSMovLiteral(&code, 126, 0x55555555u);
+    AppendSMovLiteral(&code, 127, wave == 64 ? 0x55555555u : 0u);
+    code.insert(code.end(), {EncodeMubuf0(0x19, 0, true, false, true), EncodeMubuf1(10, 3, 15),
+        EncodeSop1(0x04, 126, 36), EncodeSop2(0x02, 32, 32, InlineU32(1))});
+    code.push_back(EncodeSopp(0x02, header - code.size() - 1u));
+    code[exit_branch] = EncodeSopp(0x04, code.size() - exit_branch - 1u);
+    AppendEnd(&code);
+    test.initial.assign(4096u, 0xdeadbeefu);
+    test.has_user_data = test.has_compute_info = true;
+    test.user_data[0] = 256u;
+    test.user_data[1] = 8u << 16u;
+    test.user_data[2] = 6u * 192u / 8u;
+    test.user_data[3] = 0x5204u;
+    test.user_data[4] = 3u;
+    const std::array<u32, 4> output{4096u, 16u << 16u, 6u * wave, 0x5204u};
+    std::copy(output.begin(), output.end(), test.user_data.begin() + 16u);
+    test.compute_info.wave_size = wave;
+    test.compute_info.threads_num[0] = wave;
+    test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1u;
+    test.compute_info.thread_ids_num = 1;
+    test.compute_info.lds_size_dwords = 0;
+    test.required_spirv = {"OpULessThan", "OpSelect"};
+    const auto compiled = CompileCase(test, subgroup);
+    for (const auto *block : compiled.program.blocks)
+      for (const auto &inst : *block)
+        Require(test.name, "no CPU key map", inst.GetOpcode() != ValueOpcode::GetBufferResourceIndex,
+                "dynamic key-count table retained candidate-map selection");
+    std::printf("[compile] %-40s subgroup %u ok\n", test.name, subgroup);
+  }
+#if defined(_WIN32)
+  _putenv("KYTY_GPU_BUFFER_TABLES=");
+  _putenv("KYTY_GPU_KEYCOUNT_TABLES=");
+#else
+  unsetenv("KYTY_GPU_BUFFER_TABLES");
+  unsetenv("KYTY_GPU_KEYCOUNT_TABLES");
+#endif
+}
+
+void CheckGpuTableBounds(VulkanHarness &vulkan) {
+#if defined(_WIN32)
+  _putenv("KYTY_GPU_BUFFER_TABLES=1");
+#else
+  setenv("KYTY_GPU_BUFFER_TABLES", "1", 1);
+#endif
+  CheckGuardedWaterfallBufferRecords(vulkan);
+  CheckGpuSelectedRecordBufferAccess(vulkan);
+#if defined(_WIN32)
+  _putenv("KYTY_GPU_BUFFER_TABLES=");
+#else
+  unsetenv("KYTY_GPU_BUFFER_TABLES");
+#endif
+}
+
 void CheckStorageBufferBindingOver2GiB(VulkanHarness &vulkan) {
   // OpArrayLength reads 0 for ranges of 2 GiB or more on NVIDIA; bounds use the pushed binding size.
   constexpr u32 bytes = 0x80000010u, end = bytes / 4u, last = end - 1u;
@@ -54257,6 +54347,10 @@ int main(int argc, char **argv) {
     return 0;
   }
   // Without a GPU with the harness's features: decode, IR, SPIR-V emission and validation only.
+  if (argc == 2 && std::strcmp(argv[1], "--gpu-keycount-compile-only") == 0) {
+    for (const u32 subgroup : {32u, 64u}) CheckGpuKeyCountBufferSelection(subgroup);
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--indirect-buffer-atomic-compile-only") == 0) {
     for (const u32 wave : {32u, 64u}) {
       for (const u32 subgroup : {32u, 64u}) {
