@@ -197,11 +197,13 @@ bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& 
 		                                                  .layout_epoch  = epoch});
 		created->slots.resize(bytes / 4u + 1u);
 		created->buffer = SlotBuffer(m_context, bytes);
-		UpdateProbes(*created, 0u, bytes);
 		// The first upload also clears the slots no probe selects.
 		created->dirty_begin = 0;
 		created->dirty_end   = created->slots.size();
 		view = views.insert(views.end(), std::move(created));
+		// Probe only once the view is listed: Allocate can sweep orphans and the occupancy
+		// diagnostics count entries, and both must see this view's map and slots.
+		UpdateProbes(**view, 0u, bytes);
 	} else {
 		// Empty after the first acquire in a draw, since the table refreshes once per draw.
 		UpdateProbes(**view, (*view)->changed_begin, (*view)->changed_end);
