@@ -27,6 +27,7 @@
 #include "kernel/memory.h"
 #include "loader/systemContent.h"
 
+#include <chrono>
 #include <filesystem>
 #include <cstdlib>
 #include <algorithm>
@@ -891,6 +892,44 @@ void PipelineCache::WaitForWarmup() {
 	                            .c_str());
 }
 
+
+namespace {
+// KYTY_WAIT_STATS: one line per pipeline whose driver compile took over a second, naming its
+// shaders, so a long no-frame stall can be traced to the shader that caused it.
+class SlowCompileNote final {
+public:
+	SlowCompileNote(const char* kind, std::initializer_list<const ShaderModule*> stages)
+	    : m_kind(kind), m_start(std::chrono::steady_clock::now()) {
+		for (const auto* stage: stages) {
+			if (stage == nullptr) continue;
+			m_hashes[m_count++] = stage->info.shader_hash;
+			m_words += stage->function_code.size();
+			if (m_count == m_hashes.size()) break;
+		}
+	}
+	~SlowCompileNote() {
+		const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+		                    std::chrono::steady_clock::now() - m_start)
+		                    .count();
+		if (ms < 1000) return;
+		std::string hashes;
+		for (size_t i = 0; i < m_count; ++i) {
+			hashes += fmt::format("{}0x{:016x}", i == 0 ? "" : ",", m_hashes[i]);
+		}
+		GpuWaitStats::WriteDiag(fmt::format("slow-pipeline kind={} ms={} shaders={} spirv_words={}\n",
+		                                    m_kind, ms, hashes, m_words)
+		                            .c_str());
+	}
+
+private:
+	const char*                           m_kind;
+	std::chrono::steady_clock::time_point m_start;
+	std::array<uint64_t, 4>               m_hashes {};
+	size_t                                m_count = 0;
+	size_t                                m_words = 0;
+};
+} // namespace
+
 PipelineCache::PipelineCache(GraphicContext&                         graphics,
                              ShaderRecompiler::IR::ImageHeapSource* image_heap,
                              const std::filesystem::path&           shader_store)
@@ -921,6 +960,8 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 						    Common::DebugCounters::Counter::PipelineCreateNs,
 						    Common::DebugCounters::Peak::PipelineCreateNs);
 						GpuWaitStats::CpuTimer wait_timer("pipeline:async-create");
+						SlowCompileNote slow("graphics-async",
+						                     {stages[0], stages[1], stages[2], stages[3]});
 						// The driver cache is shared: VkPipelineCache is internally synchronized.
 						CreatePipelineInternal(m_graphics, job->pipeline, job->key, stages,
 						                       m_driver_cache);
@@ -946,6 +987,7 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 						    Common::DebugCounters::Counter::PipelineCreateNs,
 						    Common::DebugCounters::Peak::PipelineCreateNs);
 						GpuWaitStats::CpuTimer wait_timer("pipeline:compute-async-create");
+						SlowCompileNote slow("compute-async", {&job->module});
 						CreatePipelineInternal(m_graphics, job->pipeline, job->module,
 						                       m_driver_cache);
 					}
@@ -1587,6 +1629,7 @@ PipelineCache::Pipeline* PipelineCache::FindGraphicsPipeline(const CommandBuffer
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
+		SlowCompileNote slow("graphics", {stages[0], stages[1], stages[2], stages[3]});
 		CreatePipelineInternal(m_graphics, pipeline, key, stages, m_driver_cache);
 	}
 	StorePipeline(key);
@@ -1648,6 +1691,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
+		SlowCompileNote slow("compute", {&module});
 		CreatePipelineInternal(m_graphics, pipeline, module, m_driver_cache);
 	}
 	CheckpointDriverCache();
