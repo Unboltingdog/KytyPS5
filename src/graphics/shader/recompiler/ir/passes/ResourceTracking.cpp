@@ -463,14 +463,18 @@ public:
 				if (indirect.table_offset != 0u) {
 					boundary = emit(ValueOpcode::IAdd32, {boundary, Value(indirect.table_offset)});
 				}
-				clamp->second.second = boundary;
+				// Out-of-range keys read the table's first record (always inside the table the
+				// pointer names) rather than the address one past its end, which may be unmapped.
+				// The selected words are zeroed below, so what that read returns is irrelevant.
+				(void)boundary;
+				clamp->second.second = Value(indirect.table_offset);
 				for (uint32_t word = 0; word < plan.read_dwords; ++word) {
 					auto* read = const_cast<Inst*>(plan.reads[word]);
 					auto* read_block = read->Parent();
 					const auto where = std::ranges::find_if(read_block->Instructions(),
 					    [&](const Inst& inst) { return &inst == read; });
 					const auto offset = Value(&*read_block->PrependNewInst(where,
-					    ValueOpcode::SelectU32, {clamp->second.first, read->Arg(1), boundary}));
+					    ValueOpcode::SelectU32, {clamp->second.first, read->Arg(1), clamp->second.second}));
 					read->SetArg(1, offset);
 				}
 			}

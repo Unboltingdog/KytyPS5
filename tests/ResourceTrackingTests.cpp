@@ -87,7 +87,7 @@ uint32_t CheckKeyCountClamp(const Program &program) {
       const auto *valid = first->Arg(0).ResolveInstruction();
       Check(valid != nullptr && valid->GetOpcode() == ValueOpcode::ULessThan32,
             "key-count descriptor has no key/count comparison");
-      const Inst *boundary = nullptr;
+      Value first_record;
       for (uint32_t word = 0; word < 4u; ++word) {
         const auto *selected = inst.Arg(word).ResolveInstruction();
         Check(selected != nullptr && selected->GetOpcode() == ValueOpcode::SelectU32 &&
@@ -103,13 +103,12 @@ uint32_t CheckKeyCountClamp(const Program &program) {
         Check(offset != nullptr && offset->GetOpcode() == ValueOpcode::SelectU32 &&
                   offset->Arg(0).ResolveInstruction() == valid,
               "key-count clamp did not guard the descriptor read offset");
-        const auto *candidate = offset->Arg(2).ResolveInstruction();
-        Check(candidate != nullptr &&
-                  (candidate->GetOpcode() == ValueOpcode::IMul32 ||
-                   candidate->GetOpcode() == ValueOpcode::IAdd32),
-              "out-of-range key did not clamp to the one-past-end record");
-        if (boundary == nullptr) boundary = candidate;
-        Check(boundary == candidate, "descriptor words disagree on the table boundary");
+        // Out-of-range keys read the table's first record (an immediate table offset), never an
+        // address computed from the key or past the table's end.
+        const auto fallback = offset->Arg(2).Resolve();
+        Check(fallback.IsImmediate(), "out-of-range key did not clamp to the table's first record");
+        if (word == 0) first_record = fallback;
+        Check(fallback == first_record, "descriptor words disagree on the clamped record");
       }
       if (std::ranges::find(clamps, valid) == clamps.end()) clamps.push_back(valid);
     }
