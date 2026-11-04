@@ -476,7 +476,7 @@ static void LoadEnvironmentFile(const char* argv0) {
 #else
 			setenv(key.c_str(), value.c_str(), 0);
 #endif
-			std::printf("kyty-env.txt: %s=%s\n", key.c_str(), value.c_str());
+			std::fprintf(stderr, "kyty-env.txt: %s=%s\n", key.c_str(), value.c_str());
 		}
 		std::fclose(file);
 		return;

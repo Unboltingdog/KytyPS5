@@ -14,6 +14,7 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <bit>
 #include <xxhash.h>
 
@@ -434,20 +435,50 @@ uint32_t ImageHeap::Allocate(bool sampler) {
 			return index;
 		}
 		if (m_image_next == IR::ImageHeapCapacity) {
+			WriteOccupancy("full");
 			EXIT("image heaps exceed %u resident images\n", IR::ImageHeapCapacity);
 		}
 		const auto index = m_image_next++;
 		if (m_elements.size() <= index) m_elements.resize(index + 1u);
-		if (index + 1u >= 16384u && ((index + 1u) & index) == 0u) {
-			LOGF("ImageHeap: %u resident images (%zu retired awaiting the GPU)\n", index + 1u,
-			     m_retired.size());
-		}
+		if (index + 1u >= 4096u && ((index + 1u) & index) == 0u) WriteOccupancy("grow");
 		return index;
 	}
 	const auto index = free.back();
 	free.pop_back();
 	m_elements[index] = {};
 	return index;
+}
+
+void ImageHeap::WriteOccupancy(const char* event) const {
+	// KYTY_WAIT_STATS: where resident image entries sit, to tell a leak from a large live set.
+	size_t views = 0, view_elements = 0, held = 0, large = 0, small_views = 0, small_elements = 0;
+	size_t unreferenced = 0;
+	for (const auto& memory: m_memories) {
+		const bool is_large = memory->size >= MinTableBytes;
+		large += is_large;
+		for (const auto& view: memory->views) {
+			++views;
+			view_elements += view->elements.size();
+			held += view->held.size();
+			if (!is_large) {
+				++small_views;
+				small_elements += view->elements.size();
+			}
+		}
+	}
+	for (uint32_t index = 1; index < m_image_next && index < m_elements.size(); ++index) {
+		unreferenced += m_elements[index].refs == 0u;
+	}
+	char line[512];
+	std::snprintf(line, sizeof(line),
+	              "image-heap event=%s tick=%llu resident=%u free=%zu retired=%zu memories=%zu "
+	              "large_memories=%zu views=%zu view_elements=%zu small_views=%zu "
+	              "small_view_elements=%zu held=%zu unreferenced=%zu",
+	              event,
+	              static_cast<unsigned long long>(m_context.GetCommandScheduler().CurrentTick()),
+	              m_image_next, m_free.size(), m_retired.size(), m_memories.size(), large, views,
+	              view_elements, small_views, small_elements, held, unreferenced);
+	GpuWaitStats::WriteDiag(line);
 }
 
 void ImageHeap::Retire(View& view) {

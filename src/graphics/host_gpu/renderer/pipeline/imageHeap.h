@@ -122,6 +122,7 @@ private:
 	Image*   ImageOf(const Element& element) const;
 	uint32_t Allocate(bool sampler = false);
 	void     Retire(View& view);
+	void     WriteOccupancy(const char* event) const;
 	void     Resize(Memory& memory, uint64_t size);
 	void     WriteDescriptors();
 
