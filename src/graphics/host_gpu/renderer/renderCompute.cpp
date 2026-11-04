@@ -404,7 +404,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	RebindImages(bindings);
 	BindSharedMemory(m_context, input_info, bindings);
 	RebindBuffers(bindings);
-	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
+	auto* pipeline_ptr = m_context.GetPipelineCache().GetComputePipeline(input_info);
+	if (pipeline_ptr == nullptr) return;
+	auto& pipeline = *pipeline_ptr;
 
 	auto              vk_buffer        = buffer.Handle();
 	{
@@ -564,7 +566,9 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
 	RebindBuffers(bindings);
-	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
+	auto* pipeline_ptr = m_context.GetPipelineCache().GetComputePipeline(input_info);
+	if (pipeline_ptr == nullptr) return;
+	auto& pipeline = *pipeline_ptr;
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
 	const auto vk_buffer = buffer.Handle();

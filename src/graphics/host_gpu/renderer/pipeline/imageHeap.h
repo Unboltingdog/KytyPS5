@@ -123,6 +123,7 @@ private:
 	uint32_t Allocate(bool sampler = false);
 	void     Retire(View& view);
 	void     WriteOccupancy(const char* event) const;
+	uint32_t SweepOrphans();
 	void     Resize(Memory& memory, uint64_t size);
 	void     WriteDescriptors();
 

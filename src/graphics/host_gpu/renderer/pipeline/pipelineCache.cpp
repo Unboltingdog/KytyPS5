@@ -794,6 +794,16 @@ bool AsyncGraphicsPipelinesEnabled() {
 	return enabled;
 }
 
+// KYTY_ASYNC_COMPUTE_SKIP=1 (with KYTY_ASYNC_PIPELINES=1): a dispatch whose compute pipeline is
+// still compiling is skipped instead of waiting for it.
+bool AsyncComputeSkipEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_ASYNC_COMPUTE_SKIP");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
+}
+
 void PipelineCache::QueueGraphicsPipeline(const GraphicsPipelineKey&                 key,
                                           const std::array<const ShaderModule*, 4>& stages,
                                           bool warmup) {
@@ -1650,7 +1660,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipelineAsync(const CommandBu
 	return FindGraphicsPipeline(command, state, true);
 }
 
-PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info) {
+PipelineCache::Pipeline* PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info) {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
 
 	EXIT_IF(input_info.stage.module == nullptr);
@@ -1660,6 +1670,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 		ReapGraphicsPipelines();
 		QueueComputePipeline(module);
 		auto  iter = m_compute_pipelines.find(module.id);
+		if (AsyncComputeSkipEnabled() && iter->second.pipeline == nullptr) return nullptr;
 		bool  waited = false;
 		{
 			GpuWaitStats::CpuTimer wait_timer("pipeline:compute-wait");
@@ -1674,13 +1685,13 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 		if (waited) {
 			GpuWaitStats::RecordEvent("pipeline:compute-wait");
 		}
-		return iter->second;
+		return &iter->second;
 	}
 
 	auto [iter, inserted] = m_compute_pipelines.try_emplace(module.id);
 	auto& pipeline        = iter->second;
 	if (!inserted) {
-		return pipeline;
+		return &pipeline;
 	}
 
 	if (graphics_debug_dump_enabled()) {
@@ -1696,6 +1707,6 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	}
 	CheckpointDriverCache();
 
-	return pipeline;
+	return &pipeline;
 }
 } // namespace Libs::Graphics

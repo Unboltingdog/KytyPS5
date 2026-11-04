@@ -434,9 +434,25 @@ uint32_t ImageHeap::Allocate(bool sampler) {
 			m_elements.resize(m_elements.size() + 2u);
 			return index;
 		}
+		if (m_image_next >= 65536u && (m_image_next & 16383u) == 0u) SweepOrphans();
 		if (m_image_next == IR::ImageHeapCapacity) {
 			WriteOccupancy("full");
-			EXIT("image heaps exceed %u resident images\n", IR::ImageHeapCapacity);
+			// Last resort before giving up: reclaim orphans and wait for the GPU to release them.
+			if (SweepOrphans() != 0u || !m_retired.empty()) {
+				scheduler.Finish();
+				while (!m_retired.empty() && scheduler.IsFree(m_retired.front().first)) {
+					const auto index = m_retired.front().second;
+					(index >= IR::SamplerHeapBase ? m_sampler_free : m_free).push_back(index);
+					m_retired.pop_front();
+				}
+			}
+			if (m_free.empty()) {
+				EXIT("image heaps exceed %u resident images\n", IR::ImageHeapCapacity);
+			}
+			const auto index = m_free.back();
+			m_free.pop_back();
+			m_elements[index] = {};
+			return index;
 		}
 		const auto index = m_image_next++;
 		if (m_elements.size() <= index) m_elements.resize(index + 1u);
@@ -447,6 +463,48 @@ uint32_t ImageHeap::Allocate(bool sampler) {
 	free.pop_back();
 	m_elements[index] = {};
 	return index;
+}
+
+uint32_t ImageHeap::SweepOrphans() {
+	// PPSA26344 leaks image entries that keep a reference although no view maps them and no slot
+	// selects them (see the image-heap orphans diagnostics). Until the leaking path is found, hand
+	// such entries back once the GPU work recorded so far completes. An entry any view still lists
+	// (pending, away, dcc, held) is left alone.
+	std::vector<uint8_t> live(m_image_next, 0u);
+	const auto keep = [&](uint32_t index) {
+		if (index < live.size()) live[index] = 1u;
+	};
+	for (const auto& memory: m_memories) {
+		for (const auto& view: memory->views) {
+			if (view->sampler_profile) continue;
+			for (const auto& [value, index]: view->elements) keep(index);
+			for (const auto slot: view->slots) keep(slot & ElementMask);
+			for (const auto index: view->pending) keep(index);
+			for (const auto index: view->away) keep(index);
+			for (const auto index: view->dcc) keep(index);
+			for (const auto index: view->held) keep(index);
+			for (const auto index: view->released) keep(index);
+		}
+	}
+	for (const auto& [tick, index]: m_retired) keep(index);
+	for (const auto index: m_free) keep(index);
+	const auto tick  = m_context.GetCommandScheduler().CurrentTick();
+	uint32_t   swept = 0;
+	for (uint32_t index = 1; index < m_image_next && index < m_elements.size(); ++index) {
+		auto& element = m_elements[index];
+		if (live[index] != 0u || element.refs == 0u) continue;
+		Unreference(element);
+		element.refs = 0u;
+		m_retired.emplace_back(tick, index);
+		++swept;
+	}
+	if (swept != 0u) {
+		char line[160];
+		std::snprintf(line, sizeof(line), "image-heap event=sweep tick=%llu resident=%u swept=%u\n",
+		              static_cast<unsigned long long>(tick), m_image_next, swept);
+		GpuWaitStats::WriteDiag(line);
+	}
+	return swept;
 }
 
 void ImageHeap::WriteOccupancy(const char* event) const {

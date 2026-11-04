@@ -203,7 +203,8 @@ public:
 	Pipeline& GetGraphicsPipeline(const CommandBuffer& command, const DrawRenderState& state);
 	// Null means an asynchronous pipeline build is pending; skip this draw and retry the next one.
 	Pipeline* GetGraphicsPipelineAsync(const CommandBuffer& command, const DrawRenderState& state);
-	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info);
+	// Null only with KYTY_ASYNC_COMPUTE_SKIP while the pipeline is still compiling: skip the dispatch.
+	Pipeline* GetComputePipeline(const ShaderComputeInputInfo& input_info);
 
 private:
 	friend struct PipelineCacheTestAccess;
