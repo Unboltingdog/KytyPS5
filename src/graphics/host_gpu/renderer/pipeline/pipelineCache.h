@@ -22,6 +22,7 @@
 #include <mutex>
 #include <queue>
 #include <span>
+#include <string>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -316,6 +317,12 @@ private:
 	bool QueueComputePipeline(const ShaderModule& module, bool warmup = false);
 	void ReapGraphicsPipelines();
 	void WaitForWarmup();
+	void NoteGraphicsVariant(const GraphicsPipelineKey&                 key,
+	                         const std::array<const ShaderModule*, 4>& stages);
+	static std::string GraphicsVariantDiff(const GraphicsPipelineKey&                 key,
+	                                       const std::array<const ShaderModule*, 4>& stages,
+	                                       const GraphicsPipelineKey&                 previous_key,
+	                                       const std::array<const ShaderModule*, 4>& previous_stages);
 
 	// pipelineSerialization.cpp
 	void WarmUp(const std::filesystem::path& path);

@@ -1434,6 +1434,148 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	return GetProgram(params, input_info, push_data_cursor);
 }
 
+std::string PipelineCache::GraphicsVariantDiff(
+    const GraphicsPipelineKey& key, const std::array<const ShaderModule*, 4>& stages,
+    const GraphicsPipelineKey& previous_key,
+    const std::array<const ShaderModule*, 4>& previous_stages) {
+	std::string diff;
+	const auto add = [&](std::string item) {
+		if (diff.size() < 900) diff += " " + item;
+	};
+	const auto field = [&](std::string name, uint64_t before, uint64_t after) {
+		if (before != after) add(fmt::format("{} {}->{}", name, before, after));
+	};
+	const auto& a = previous_key.static_params;
+	const auto& b = key.static_params;
+	field("negative_one_to_one", a.negative_one_to_one, b.negative_one_to_one);
+	field("depth_clip", a.depth_clip_enable, b.depth_clip_enable);
+	field("topology", static_cast<uint32_t>(a.topology), static_cast<uint32_t>(b.topology));
+	field("patch_points", a.patch_control_points, b.patch_control_points);
+	field("primitive_restart", a.primitive_restart_enable, b.primitive_restart_enable);
+	field("samples", a.samples, b.samples);
+	field("sample_shading", a.sample_shading_enable, b.sample_shading_enable);
+	field("alpha_to_coverage", a.alpha_to_coverage_enable, b.alpha_to_coverage_enable);
+	field("provoking_last", a.provoking_vtx_last, b.provoking_vtx_last);
+	field("polygon_mode", static_cast<uint32_t>(a.polygon_mode), static_cast<uint32_t>(b.polygon_mode));
+	for (uint32_t i = 0; i < RENDER_COLOR_ATTACHMENTS_MAX; ++i) {
+		field(fmt::format("c{}.mask", i), a.color_mask[i], b.color_mask[i]);
+		field(fmt::format("c{}.blend", i), a.blend_enable[i], b.blend_enable[i]);
+		field(fmt::format("c{}.src", i), a.color_srcblend[i], b.color_srcblend[i]);
+		field(fmt::format("c{}.op", i), a.color_comb_fcn[i], b.color_comb_fcn[i]);
+		field(fmt::format("c{}.dst", i), a.color_destblend[i], b.color_destblend[i]);
+		field(fmt::format("a{}.src", i), a.alpha_srcblend[i], b.alpha_srcblend[i]);
+		field(fmt::format("a{}.op", i), a.alpha_comb_fcn[i], b.alpha_comb_fcn[i]);
+		field(fmt::format("a{}.dst", i), a.alpha_destblend[i], b.alpha_destblend[i]);
+		field(fmt::format("c{}.separate_alpha", i), a.separate_alpha_blend[i], b.separate_alpha_blend[i]);
+	}
+	const auto& ar = previous_key.rendering;
+	const auto& br = key.rendering;
+	field("color_count", ar.color_count, br.color_count);
+	field("depth_format", static_cast<uint32_t>(ar.depth_format), static_cast<uint32_t>(br.depth_format));
+	field("stencil_format", static_cast<uint32_t>(ar.stencil_format),
+	      static_cast<uint32_t>(br.stencil_format));
+	for (uint32_t i = 0; i < RENDER_COLOR_ATTACHMENTS_MAX; ++i) {
+		field(fmt::format("c{}.format", i), static_cast<uint32_t>(ar.color_formats[i]),
+		      static_cast<uint32_t>(br.color_formats[i]));
+	}
+	const auto& av = previous_key.vertex_input;
+	const auto& bv = key.vertex_input;
+	field("vertex_bindings", av.binding_count, bv.binding_count);
+	field("vertex_attributes", av.attribute_count, bv.attribute_count);
+	for (uint32_t i = 0; i < ShaderVertexInputInfo::RES_MAX; ++i) {
+		field(fmt::format("vb{}.stride", i), av.bindings[i].stride, bv.bindings[i].stride);
+		field(fmt::format("vb{}.instance", i), av.bindings[i].instance, bv.bindings[i].instance);
+		field(fmt::format("va{}.offset", i), av.attributes[i].offset, bv.attributes[i].offset);
+		field(fmt::format("va{}.binding", i), av.attributes[i].binding, bv.attributes[i].binding);
+	}
+	for (size_t i = 0; i < stages.size(); ++i) {
+		if (stages[i] == nullptr || previous_stages[i] == nullptr) continue;
+		const auto& before = *previous_stages[i];
+		const auto& after = *stages[i];
+		if (before.id != after.id) {
+			add(fmt::format("s{}.id {:016x}->{:016x}", i, before.id, after.id));
+		}
+		field(fmt::format("s{}.push_data", i), before.info.bindings.push_data_start_dword,
+		      after.info.bindings.push_data_start_dword);
+		if (before.function_code != after.function_code) add(fmt::format("s{}.function_code", i));
+		if (before.vertex_formats != after.vertex_formats) add(fmt::format("s{}.vertex_formats", i));
+		if (before.specialization == after.specialization) continue;
+		ShaderRecompiler::IR::Writer old_writer;
+		ShaderRecompiler::IR::Writer new_writer;
+		ShaderRecompiler::IR::IoAll(old_writer, before.specialization);
+		ShaderRecompiler::IR::IoAll(new_writer, after.specialization);
+		const auto word = [](const std::vector<uint8_t>& bytes, size_t index) {
+			uint32_t value = 0;
+			if (index * 4u + 4u <= bytes.size()) std::memcpy(&value, bytes.data() + index * 4u, 4u);
+			return value;
+		};
+		const auto words = std::max((old_writer.bytes.size() + 3u) / 4u,
+		                            (new_writer.bytes.size() + 3u) / 4u);
+		for (size_t w = 0; w < words; ++w) {
+			const auto old_word = word(old_writer.bytes, w);
+			const auto new_word = word(new_writer.bytes, w);
+			if (old_word != new_word) {
+				add(fmt::format("s{}.spec[{}] {:08x}->{:08x}", i, w, old_word, new_word));
+			}
+		}
+	}
+	if (diff.empty()) diff = " (no compared field differs)";
+	return diff;
+}
+
+void PipelineCache::NoteGraphicsVariant(const GraphicsPipelineKey&                 key,
+                                        const std::array<const ShaderModule*, 4>& stages) {
+	if (!GpuWaitStats::Enabled()) return;
+	const auto modules = MapModules();
+	const GraphicsPipelineKey* closest = nullptr;
+	std::array<const ShaderModule*, 4> previous_stages {};
+	size_t closest_score = SIZE_MAX;
+	size_t variants = 1;
+	for (const auto& [candidate, pipeline]: m_graphics_pipelines) {
+		if (candidate == key) continue;
+		std::array<const ShaderModule*, 4> candidate_stages {};
+		bool same_shaders = true;
+		for (size_t i = 0; i < stages.size(); ++i) {
+			const auto found = modules.find(candidate.stage_ids[i]);
+			if (found == modules.end()) {
+				same_shaders = false;
+				break;
+			}
+			candidate_stages[i] = found->second;
+			if ((stages[i] == nullptr) != (candidate_stages[i] == nullptr) ||
+			    (stages[i] != nullptr &&
+			     stages[i]->info.shader_hash != candidate_stages[i]->info.shader_hash)) {
+				same_shaders = false;
+				break;
+			}
+		}
+		if (!same_shaders) continue;
+		++variants;
+		size_t score = std::memcmp(&candidate.rendering, &key.rendering, sizeof(key.rendering)) != 0;
+		score += std::memcmp(&candidate.vertex_input, &key.vertex_input, sizeof(key.vertex_input)) != 0;
+		score += std::memcmp(&candidate.static_params, &key.static_params, sizeof(key.static_params)) != 0;
+		for (size_t i = 0; i < stages.size(); ++i) {
+			if (stages[i] != nullptr && stages[i]->specialization != candidate_stages[i]->specialization) {
+				++score;
+			}
+		}
+		if (score < closest_score) {
+			closest = &candidate;
+			previous_stages = candidate_stages;
+			closest_score = score;
+		}
+	}
+	if (closest == nullptr) return;
+	std::string hashes;
+	for (const auto* stage: stages) {
+		if (stage == nullptr) continue;
+		hashes += fmt::format("{}0x{:016x}", hashes.empty() ? "" : ",", stage->info.shader_hash);
+	}
+	const auto diff = GraphicsVariantDiff(key, stages, *closest, previous_stages);
+	GpuWaitStats::WriteDiag(fmt::format("graphics-variant shaders={} n={}:{}\n", hashes, variants, diff)
+	                            .c_str());
+}
+
 PipelineCache::Pipeline* PipelineCache::FindGraphicsPipeline(const CommandBuffer&   command,
                                                              const DrawRenderState& state,
                                                              bool allow_async) {
@@ -1620,6 +1762,7 @@ PipelineCache::Pipeline* PipelineCache::FindGraphicsPipeline(const CommandBuffer
 	if (!inserted) {
 		return pipeline.pipeline != nullptr ? &pipeline : nullptr;
 	}
+	NoteGraphicsVariant(key, stages);
 	if (allow_async) {
 		QueueGraphicsPipeline(key, stages);
 		return nullptr;

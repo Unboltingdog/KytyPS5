@@ -684,6 +684,13 @@ struct PipelineCacheTestAccess {
 
   static const auto &TessLayouts(const PipelineCache &cache) { return cache.m_tess_layouts; }
 
+  static std::string GraphicsVariantDiff(
+      const GraphicsPipelineKey &key, const std::array<const ShaderModule *, 4> &stages,
+      const GraphicsPipelineKey &previous_key,
+      const std::array<const ShaderModule *, 4> &previous_stages) {
+    return PipelineCache::GraphicsVariantDiff(key, stages, previous_key, previous_stages);
+  }
+
   static std::array<size_t, 2> Pipelines(const PipelineCache &cache) {
     return {cache.m_graphics_pipelines.size(), cache.m_compute_pipelines.size()};
   }
@@ -51705,6 +51712,36 @@ void CheckDynamicRenderingState() {
   Require("DynamicRenderingState", "pipeline depth/stencil identity",
           rgba != depth,
           "depth/stencil formats did not participate in pipeline identity");
+
+  ShaderModule old_vertex;
+  ShaderModule new_vertex;
+  old_vertex.id = 1;
+  new_vertex.id = 2;
+  const std::array<const ShaderModule *, 4> old_stages{&old_vertex, nullptr, nullptr, nullptr};
+  const std::array<const ShaderModule *, 4> new_stages{&new_vertex, nullptr, nullptr, nullptr};
+  auto variant = uint_color;
+  variant.static_params.color_mask[0] = 15;
+  variant.static_params.blend_enable[0] = true;
+  variant.static_params.topology = vk::PrimitiveTopology::eLineList;
+  variant.vertex_input.binding_count = 1;
+  variant.vertex_input.bindings[0].stride = 32;
+  const auto variant_diff = PipelineCacheTestAccess::GraphicsVariantDiff(
+      variant, new_stages, rgba, old_stages);
+  Require("DynamicRenderingState", "graphics variant key fields",
+          variant_diff.find("c0.mask 0->15") != std::string::npos &&
+              variant_diff.find("c0.blend 0->1") != std::string::npos &&
+              variant_diff.find("c0.format") != std::string::npos &&
+              variant_diff.find("topology") != std::string::npos &&
+              variant_diff.find("vb0.stride 0->32") != std::string::npos,
+          "graphics variant diagnostics omitted a changed pipeline key field");
+  new_vertex.specialization.buffers.resize(1);
+  new_vertex.specialization.buffers[0].packed_stride = 16;
+  const auto specialization_diff = PipelineCacheTestAccess::GraphicsVariantDiff(
+      rgba, new_stages, rgba, old_stages);
+  Require("DynamicRenderingState", "graphics variant specialization",
+          specialization_diff.find("s0.id") != std::string::npos &&
+              specialization_diff.find("s0.spec[") != std::string::npos,
+          "graphics variant diagnostics omitted changed specialization words");
 
   RenderDepthInfo attachment{};
   attachment.desc.view_info.format = vk::Format::eD32SfloatS8Uint;
