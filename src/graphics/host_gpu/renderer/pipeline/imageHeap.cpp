@@ -466,10 +466,43 @@ void ImageHeap::WriteOccupancy(const char* event) const {
 			}
 		}
 	}
-	for (uint32_t index = 1; index < m_image_next && index < m_elements.size(); ++index) {
-		unreferenced += m_elements[index].refs == 0u;
+	// A leak shows as element refs no slot accounts for, or in-use elements no view map holds.
+	std::vector<uint8_t> mapped(m_image_next, 0u);
+	uint64_t slot_refs = 0, element_refs = 0;
+	size_t   orphans = 0, orphan_stale = 0, orphan_dead_image = 0;
+	for (const auto& memory: m_memories) {
+		for (const auto& view: memory->views) {
+			if (view->sampler_profile) continue;
+			for (const auto& [value, index]: view->elements) {
+				if (index < m_image_next) mapped[index] = 1u;
+			}
+			for (const auto slot: view->slots) slot_refs += (slot & ElementMask) != 0u;
+		}
 	}
-	char line[512];
+	for (uint32_t index = 1; index < m_image_next && index < m_elements.size(); ++index) {
+		const auto& element = m_elements[index];
+		unreferenced += element.refs == 0u;
+		element_refs += element.refs;
+		if (element.refs != 0u && mapped[index] == 0u) {
+			++orphans;
+			orphan_stale += element.stale;
+			orphan_dead_image += element.binding.image_id && ImageOf(element) == nullptr;
+		}
+	}
+	for (const auto& [tick, index]: m_retired) {
+		if (index < m_image_next && m_elements[index].refs != 0u && mapped[index] == 0u) --orphans;
+	}
+	for (const auto index: m_free) {
+		if (index < m_image_next && m_elements[index].refs != 0u && mapped[index] == 0u) --orphans;
+	}
+	char tail[256];
+	std::snprintf(tail, sizeof(tail),
+	              " slot_refs=%llu element_refs=%llu orphans=%zu orphan_stale=%zu "
+	              "orphan_dead_image=%zu\n",
+	              static_cast<unsigned long long>(slot_refs),
+	              static_cast<unsigned long long>(element_refs), orphans, orphan_stale,
+	              orphan_dead_image);
+	char line[768];
 	std::snprintf(line, sizeof(line),
 	              "image-heap event=%s tick=%llu resident=%u free=%zu retired=%zu memories=%zu "
 	              "large_memories=%zu views=%zu view_elements=%zu small_views=%zu "
@@ -478,7 +511,7 @@ void ImageHeap::WriteOccupancy(const char* event) const {
 	              static_cast<unsigned long long>(m_context.GetCommandScheduler().CurrentTick()),
 	              m_image_next, m_free.size(), m_retired.size(), m_memories.size(), large, views,
 	              view_elements, small_views, small_elements, held, unreferenced);
-	GpuWaitStats::WriteDiag(line);
+	GpuWaitStats::WriteDiag((std::string(line) + tail).c_str());
 }
 
 void ImageHeap::Retire(View& view) {
