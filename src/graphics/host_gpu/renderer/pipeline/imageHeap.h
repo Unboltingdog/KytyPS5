@@ -129,6 +129,10 @@ private:
 	void     WriteDescriptors();
 
 	RenderContext&                       m_context;
+	// Read once per heap: the capacity switches are consulted on every allocation and release.
+	uint32_t m_image_capacity = ShaderRecompiler::IR::ImageHeapCapacity();
+	uint32_t m_sampler_base   = ShaderRecompiler::IR::SamplerHeapBase();
+	uint64_t m_large_gc_limit = 0;
 	PageManager&                         m_page_manager;
 	std::mutex                           m_mutex; // Fault-visible Memory state and m_memories.
 	std::vector<std::unique_ptr<Memory>> m_memories;

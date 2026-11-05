@@ -296,13 +296,10 @@ struct ImageHeapTestAccess {
       return retired.second == index;
     });
   }
-  static bool SetLargeGcLimit(uint32_t limit) {
-    const auto value = std::to_string(limit);
-#if defined(_WIN32)
-    return _putenv((std::string("KYTY_HEAP_LARGE_GC=") + value).c_str()) == 0;
-#else
-    return setenv("KYTY_HEAP_LARGE_GC", value.c_str(), 1) == 0;
-#endif
+  // The heap reads KYTY_HEAP_LARGE_GC once when it is created; tests set its copy directly.
+  static bool SetLargeGcLimit(ImageHeap &heap, uint32_t limit) {
+    heap.m_large_gc_limit = limit == 1u ? 600u : limit;
+    return true;
   }
   static uint64_t InactiveRefs(const ImageHeap &heap) {
     uint64_t result = 0;
@@ -6021,7 +6018,7 @@ public:
       draw();
       const auto large_first = ImageHeapTestAccess::Views(heap).at(0)->slots[0];
       const auto large_second = ImageHeapTestAccess::Views(heap).at(0)->slots[8];
-      Require(name, "large GC configuration", ImageHeapTestAccess::SetLargeGcLimit(2u),
+      Require(name, "large GC configuration", ImageHeapTestAccess::SetLargeGcLimit(heap, 2u),
               "could not configure large-table GC");
       context.RunGarbageCollector();
       heap.BeginDraw();
@@ -6044,7 +6041,7 @@ public:
                    ImageHeapTestAccess::IsFree(heap, large_second)) &&
                   references_balanced(),
               "completed large-table entries did not become free");
-      ImageHeapTestAccess::SetLargeGcLimit(0u);
+      ImageHeapTestAccess::SetLargeGcLimit(heap, 0u);
       context.UnmapMemory(base, idle_table - base);
       scheduler.Finish();
       device.destroyPipelineLayout(layout, nullptr);
