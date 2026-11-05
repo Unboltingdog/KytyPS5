@@ -248,6 +248,55 @@ struct ImageHeapTestAccess {
   static ImageId ImageOf(const ImageHeap &heap, uint32_t entry) {
     return Element(heap, entry).binding.image_id;
   }
+  static uint64_t ElementRefs(const ImageHeap &heap) {
+    uint64_t result = 0;
+    for (uint32_t index = 1; index < heap.m_image_next && index < heap.m_elements.size(); ++index)
+      result += heap.m_elements[index].refs;
+    return result;
+  }
+  static uint64_t SlotRefs(const ImageHeap &heap) {
+    constexpr uint32_t mask = (1u << ShaderRecompiler::IR::ImageHeapKindShift) - 1u;
+    uint64_t result = 0;
+    for (const auto &memory : heap.m_memories)
+      for (const auto &view : memory->views) {
+        if (view->sampler_profile) continue;
+        for (const auto slot : view->slots) result += (slot & mask) != 0u;
+      }
+    return result;
+  }
+  static size_t Orphans(const ImageHeap &heap) {
+    std::vector<bool> mapped(heap.m_image_next, false);
+    for (const auto &memory : heap.m_memories)
+      for (const auto &view : memory->views) {
+        if (view->sampler_profile) continue;
+        for (const auto &[value, index] : view->elements) {
+          if (index < mapped.size()) mapped[index] = true;
+        }
+      }
+    size_t result = 0;
+    for (uint32_t index = 1; index < heap.m_image_next && index < heap.m_elements.size(); ++index)
+      result += heap.m_elements[index].refs != 0u && !mapped[index];
+    for (const auto &[tick, index] : heap.m_retired)
+      result -= index < heap.m_image_next && heap.m_elements[index].refs != 0u && !mapped[index];
+    for (const auto index : heap.m_free)
+      result -= index < heap.m_image_next && heap.m_elements[index].refs != 0u && !mapped[index];
+    return result;
+  }
+  static size_t RetiredCount(const ImageHeap &heap) { return heap.m_retired.size(); }
+  static uint64_t InactiveRefs(const ImageHeap &heap) {
+    uint64_t result = 0;
+    for (const auto &[tick, index] : heap.m_retired)
+      result += index < heap.m_elements.size() ? heap.m_elements[index].refs : 0u;
+    for (const auto index : heap.m_free)
+      result += index < heap.m_elements.size() ? heap.m_elements[index].refs : 0u;
+    return result;
+  }
+  static void MakeNextSecondAllocationSweep(ImageHeap &heap) {
+    heap.m_free.clear();
+    heap.m_retired.clear();
+    heap.m_image_next = 65535u;
+    heap.m_elements.resize(heap.m_image_next);
+  }
   // Whether the newest table no longer watches its last page.
   static bool TailPageDirty(const ImageHeap &heap) {
     return heap.m_memories.back()->dirty_pages.back() != 0u;
@@ -5576,15 +5625,27 @@ public:
       auto unfiltered = sampled;
       unfiltered.unfiltered_access_only = true;
       IR::ImageHeapView view{};
+      const auto references_balanced = [&] {
+        return ImageHeapTestAccess::ElementRefs(heap) ==
+                   ImageHeapTestAccess::SlotRefs(heap) + ImageHeapTestAccess::InactiveRefs(heap) &&
+               ImageHeapTestAccess::Orphans(heap) == 0u;
+      };
       const auto acquire = [&](const IR::ImageResource &root, uint64_t address = table,
                                uint64_t count = table_size / 32u) {
-        return heap.Acquire({address, table_size, 32u, 0u, count, &root}, view);
+        const bool acquired = heap.Acquire({address, table_size, 32u, 0u, count, &root}, view);
+        Require(name, "acquired view references", !acquired || references_balanced(),
+                "acquiring a view orphaned live element references");
+        return acquired;
       };
       const auto draw = [&] {
         heap.Rebind(executor);
+        Require(name, "rebind references", references_balanced(),
+                "resource discovery orphaned live element references");
         heap.Commit(scheduler.Current(), vk::PipelineBindPoint::eCompute, layout);
         scheduler.Finish();
         heap.BeginDraw();
+        Require(name, "committed view references", references_balanced(),
+                "committing a view orphaned live element references");
       };
       const auto write = [&](uint64_t probe, const std::array<uint32_t, 8> &words) {
         Libs::LibKernel::Memory::WriteBacking(table + probe * 32u, words.data(), sizeof(words));
@@ -5869,6 +5930,17 @@ public:
       Require(name, "regrown descriptor",
               ImageHeapTestAccess::ImageOf(heap, filtered.slots[table_size / 4u]) == added,
               "a table grown again after shrinking missed its descriptor");
+
+      // The second distinct descriptor crosses the sweep threshold while this new view is probed.
+      // Its first element must already be visible through memory.views or the sweep retires it live.
+      ImageHeapTestAccess::MakeNextSecondAllocationSweep(heap);
+      Require(name, "new view during sweep",
+              acquire(sampled, table, 8u) && ImageHeapTestAccess::RetiredCount(heap) == 0u &&
+                  references_balanced(),
+              "initial probing hid a new view from orphan collection");
+      Require(name, "same-draw size after sweep",
+              heap.Acquire(grown, view) && references_balanced(),
+              "a same-draw size request changed view ownership");
 
       heap.UnmapMemory(table, table_size);
       Require(name, "unmapped table",
@@ -55061,6 +55133,11 @@ int main(int argc, char **argv) {
     vulkan.CheckComparisonDepthTexture();
     vulkan.CheckRasterization(true);
     RunCase(nullptr, ImageSampleA16CompareBiasRdna2AddressOrder());
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--resident-image-heap-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckResidentImageHeap();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--indirect-image-only") == 0) {
