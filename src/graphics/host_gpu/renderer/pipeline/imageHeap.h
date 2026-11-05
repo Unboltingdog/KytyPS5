@@ -103,6 +103,7 @@ private:
 		std::vector<uint8_t>               dirty_pages; // Unwatched, so unread since a write.
 		std::vector<uint64_t>              dead;        // Per word, a buried descriptor's hash.
 		uint64_t                           draw = 0;    // Last draw that refreshed it.
+		uint64_t                           suspend_age = 0; // Idle suspend points for large-table GC.
 		std::vector<std::unique_ptr<View>> views;
 	};
 

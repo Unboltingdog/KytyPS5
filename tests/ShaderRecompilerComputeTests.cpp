@@ -283,6 +283,27 @@ struct ImageHeapTestAccess {
     return result;
   }
   static size_t RetiredCount(const ImageHeap &heap) { return heap.m_retired.size(); }
+  static uint32_t IndexOf(uint32_t entry) {
+    return entry & ((1u << ShaderRecompiler::IR::ImageHeapKindShift) - 1u);
+  }
+  static bool IsFree(const ImageHeap &heap, uint32_t entry) {
+    const auto index = IndexOf(entry);
+    return std::ranges::find(heap.m_free, index) != heap.m_free.end();
+  }
+  static bool IsRetired(const ImageHeap &heap, uint32_t entry) {
+    const auto index = IndexOf(entry);
+    return std::ranges::any_of(heap.m_retired, [index](const auto &retired) {
+      return retired.second == index;
+    });
+  }
+  static bool SetLargeGcLimit(uint32_t limit) {
+    const auto value = std::to_string(limit);
+#if defined(_WIN32)
+    return _putenv((std::string("KYTY_HEAP_LARGE_GC=") + value).c_str()) == 0;
+#else
+    return setenv("KYTY_HEAP_LARGE_GC", value.c_str(), 1) == 0;
+#endif
+  }
   static uint64_t InactiveRefs(const ImageHeap &heap) {
     uint64_t result = 0;
     for (const auto &[tick, index] : heap.m_retired)
@@ -5987,6 +6008,43 @@ public:
                   ImageHeapTestAccess::TailPageDirty(heap),
               "a write fault next to a table left its page watched");
       draw();
+
+      // An opted-in large table leaves after N idle suspend points, not N draws. Its entries
+      // retire first and become reusable only after their GPU tick has completed.
+      Libs::LibKernel::Memory::WriteBacking(idle_table, descriptor(60, Format::k8_8_8_8UNorm).data(),
+                                            32u);
+      Libs::LibKernel::Memory::WriteBacking(idle_table + 32u,
+                                            descriptor(61, Format::k8_8_8_8UNorm).data(), 32u);
+      context.InvalidateMemory(idle_table, 64u);
+      Require(name, "large GC fixture", acquire(sampled, idle_table),
+              "could not populate the large-table GC fixture");
+      draw();
+      const auto large_first = ImageHeapTestAccess::Views(heap).at(0)->slots[0];
+      const auto large_second = ImageHeapTestAccess::Views(heap).at(0)->slots[8];
+      Require(name, "large GC configuration", ImageHeapTestAccess::SetLargeGcLimit(2u),
+              "could not configure large-table GC");
+      context.RunGarbageCollector();
+      heap.BeginDraw();
+      context.RunGarbageCollector();
+      Require(name, "large GC before age", ImageHeapTestAccess::MemoryCount(heap) == 2u,
+              "a large table left before its configured idle age");
+      heap.BeginDraw();
+      context.RunGarbageCollector();
+      Require(name, "large GC at age",
+              ImageHeapTestAccess::MemoryCount(heap) == 0u &&
+                  ImageHeapTestAccess::RetiredCount(heap) >= 2u &&
+                  ImageHeapTestAccess::IsRetired(heap, large_first) &&
+                  ImageHeapTestAccess::IsRetired(heap, large_second),
+              "an idle large table was not dropped with its entries retired");
+      scheduler.Finish();
+      const IR::ImageHeapRequest first_only{idle_table, table_size, 32u, 0u, 1u, &sampled};
+      Require(name, "large GC free entries",
+              heap.Acquire(first_only, view) && ImageHeapTestAccess::RetiredCount(heap) == 0u &&
+                  (ImageHeapTestAccess::IsFree(heap, large_first) !=
+                   ImageHeapTestAccess::IsFree(heap, large_second)) &&
+                  references_balanced(),
+              "completed large-table entries did not become free");
+      ImageHeapTestAccess::SetLargeGcLimit(0u);
       context.UnmapMemory(base, idle_table - base);
       scheduler.Finish();
       device.destroyPipelineLayout(layout, nullptr);

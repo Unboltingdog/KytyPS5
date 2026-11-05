@@ -14,7 +14,10 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <bit>
 #include <xxhash.h>
 
@@ -26,6 +29,17 @@ namespace IR = ShaderRecompiler::IR;
 // Smaller tables are often written for one draw, so they enter on a second draw of a frame.
 constexpr uint64_t MinTableBytes = 64ull * 1024ull;
 constexpr uint32_t ElementMask   = (1u << IR::ImageHeapKindShift) - 1u;
+
+// KYTY_HEAP_LARGE_GC=N: drop a large table after N idle suspend points; 1 selects 600, 0 is off.
+uint64_t LargeGcSuspendLimit() {
+	const char* value = std::getenv("KYTY_HEAP_LARGE_GC");
+	if (value == nullptr || *value == '\0') return 0u;
+	uint64_t limit = 0;
+	const auto end = value + std::strlen(value);
+	const auto parsed = std::from_chars(value, end, limit);
+	if (parsed.ec != std::errc {} || parsed.ptr != end) return 0u;
+	return limit == 1u ? 600u : limit;
+}
 
 template <typename Pred, typename Fn>
 void ForEachRun(size_t begin, size_t end, Pred&& pred, Fn&& fn) {
@@ -832,10 +846,19 @@ void ImageHeap::UnmapMemory(uint64_t address, uint64_t size) {
 }
 
 void ImageHeap::RunGarbageCollector() {
-	// A smaller table rebuilt each frame moves to a new base. Larger ones keep their dead words.
+	// A smaller table rebuilt each frame moves to a new base. A large one can opt into an idle age.
+	const auto large_limit = LargeGcSuspendLimit();
 	std::scoped_lock lock {m_mutex};
 	std::erase_if(m_memories, [&](const std::unique_ptr<Memory>& memory) {
-		if (memory->size >= MinTableBytes || memory->draw > m_suspend_draw) return false;
+		if (memory->draw > m_suspend_draw) {
+			memory->suspend_age = 0u;
+			return false;
+		}
+		if (memory->size < MinTableBytes) {
+			Drop(*memory);
+			return true;
+		}
+		if (large_limit == 0u || ++memory->suspend_age < large_limit) return false;
 		Drop(*memory);
 		return true;
 	});
