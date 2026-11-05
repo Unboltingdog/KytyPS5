@@ -145,6 +145,20 @@ std::string ResourceSpecializationDiff(const ResourceSpecialization& before,
 	return diff;
 }
 
+void NormalizeStableGraphicsSpec(ResourceSpecialization& specialization) {
+	if (!StableGraphicsSpecEnabled()) return;
+	const auto normalize = [](auto& resources) {
+		for (auto& resource: resources) {
+			if (resource.indirect_search_iterations != 0u) {
+				resource.indirect_search_iterations = RuntimeIndirectSearchIterations;
+			}
+		}
+	};
+	normalize(specialization.buffers);
+	normalize(specialization.images);
+	normalize(specialization.samplers);
+}
+
 bool SpecializationReadMayDefer() {
 	return t_specialization_read_may_defer && SrtWalkerNoStallActive();
 }
@@ -1134,6 +1148,7 @@ bool AppendStableMappingHeaders(std::vector<Specialization>& specializations,
 		const auto words = count * (root.indirect_search_iterations == 0u ? 1u : 2u);
 		if (words > flattened.size() - source - 1u) return false;
 		normalized[header] = count;
+		normalized[header + 2u] = root.indirect_search_iterations;
 		tails.push_back({header, source + 1u, words});
 	}
 	return true;
@@ -1154,6 +1169,7 @@ bool NormalizeStableSrtLayout(const ResourcePlan& program, ResourceSnapshot& sna
 	                                normalized, tails, cursor)) {
 		return false;
 	}
+	NormalizeStableGraphicsSpec(specialization);
 	for (const auto& tail: tails) {
 		normalized[tail.header + 1u] = static_cast<uint32_t>(normalized.size());
 		normalized.insert(normalized.end(), flattened.begin() + tail.source,
@@ -2121,7 +2137,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		}
 	}
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
-	if (StableSrtLayoutEnabled() &&
+	if ((StableSrtLayoutEnabled() || StableGraphicsSpecEnabled()) &&
 	    !NormalizeStableSrtLayout(program, snapshot, specialization, srt_prefix_words)) {
 		return SpecializationFail("stable indirect mapping layout is invalid");
 	}

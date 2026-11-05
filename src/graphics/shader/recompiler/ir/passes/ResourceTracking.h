@@ -46,6 +46,11 @@ inline bool StableSrtLayoutEnabled() {
 	const char* value = std::getenv("KYTY_STABLE_SRT_LAYOUT");
 	return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
+// KYTY_STABLE_GRAPHICS_SPEC=1: read indirect-table search counts from the stable SRT header.
+inline bool StableGraphicsSpecEnabled() {
+	const char* value = std::getenv("KYTY_STABLE_GRAPHICS_SPEC");
+	return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
 void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg,
                     ShaderStageInputInfo input);
 

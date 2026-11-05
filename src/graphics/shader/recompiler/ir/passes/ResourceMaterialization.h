@@ -7,6 +7,8 @@
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
+inline constexpr uint32_t RuntimeIndirectSearchIterations = UINT32_MAX;
+
 // Canonical module-affecting resource state. Runtime addresses and descriptor payloads remain in
 // ResourceSnapshot and therefore do not create shader permutations.
 struct ResourceSpecialization {
@@ -55,6 +57,7 @@ struct ResourceSpecialization {
 std::string ResourceSpecializationDiff(const ResourceSpecialization& before,
                                        const ResourceSpecialization& after,
                                        std::string_view prefix = {});
+void NormalizeStableGraphicsSpec(ResourceSpecialization& specialization);
 
 // Extracts the descriptor/SRT value graph before resource specialization. The returned plan owns
 // its values and is independent of the translated shader CFG.

@@ -51,6 +51,7 @@
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/recompiler/ir/Serialize.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
 #include "graphics/shader/rectListShader.h"
@@ -104,6 +105,7 @@
 #include <string_view>
 #include <tuple>
 #include <vector>
+#include <xxhash.h>
 
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
 #include <cerrno>
@@ -51728,6 +51730,98 @@ void CheckDepthFeedbackAspects() {
   std::printf("[host]    %-32s ok\n", "DepthFeedbackAspects");
 }
 
+void CheckStableGraphicsSpec() {
+  constexpr const char *name = "StableGraphicsSpec";
+  using namespace ShaderRecompiler::IR;
+  struct Result {
+    uint64_t key;
+    std::vector<u32> spirv;
+  };
+  const auto emit = [&](uint32_t search_iterations) {
+    ResourceSpecialization specialization;
+    specialization.buffers.resize(2);
+    specialization.buffers[0].indirect_root = 0;
+    specialization.buffers[0].indirect_mapping_offset = 4;
+    specialization.buffers[0].indirect_search_iterations = search_iterations;
+    specialization.buffers[1].indirect_root = 0;
+    specialization.buffers[1].indirect_mapping_offset = 4;
+    NormalizeStableGraphicsSpec(specialization);
+    Writer writer;
+    IoAll(writer, specialization);
+    const auto key = XXH3_64bits(writer.bytes.data(), writer.bytes.size());
+
+    CompiledShader compiled;
+    auto &program = compiled.program;
+    program.stage = ShaderType::Compute;
+    program.wave_size = 32;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    program.block_storage.push_back(std::make_unique<Block>());
+    auto *block = program.block_storage.back().get();
+    program.blocks.push_back(block);
+    auto &lane = block->AppendNewInst(ValueOpcode::LaneId);
+    auto &selection = block->AppendNewInst(ValueOpcode::GetBufferResourceIndex,
+                                           {Value(&lane)});
+    selection.SetFlags<uint32_t>(0u);
+    block->AppendNewInst(ValueOpcode::ReferenceU32, {Value(&selection)});
+
+    BufferResource root;
+    root.indirect_root = 0;
+    root.indirect_mapping_offset = 4;
+    root.indirect_search_iterations =
+        specialization.buffers[0].indirect_search_iterations;
+    root.indirect_resources = {0u, 1u};
+    auto candidate = root;
+    candidate.indirect_search_iterations = 0;
+    candidate.indirect_resources.clear();
+    program.info.buffers = {root, candidate};
+    program.descriptor_sources.resize(1);
+    program.descriptor_sources[0].indirect_descriptor =
+        DescriptorSource::IndirectDescriptor{.table_stride = 16};
+    ShaderComputeInputInfo compute{};
+    compute.wave_size = 32;
+    compute.host_subgroup_size = 32;
+    compute.threads_num[0] = 32;
+    CollectShaderInfo(program, {.compute = &compute});
+    compiled.spirv = Spirv::EmitProgram(program, {.compute = &compute});
+    ValidateSpirv(name, compiled.spirv);
+    return Result{key, std::move(compiled.spirv)};
+  };
+#if defined(_WIN32)
+  const bool disabled = _putenv("KYTY_STABLE_GRAPHICS_SPEC=") == 0;
+#else
+  const bool disabled = unsetenv("KYTY_STABLE_GRAPHICS_SPEC") == 0;
+#endif
+  Require(name, "disable switch", disabled, "could not disable stable graphics specialization");
+  const auto unstable = emit(2u);
+  const auto other_unstable = emit(3u);
+  Require(name, "default cache identity", unstable.key != other_unstable.key &&
+              unstable.spirv != other_unstable.spirv,
+          "search counts stopped changing the default shader specialization");
+#if defined(_WIN32)
+  const bool enabled = _putenv("KYTY_STABLE_GRAPHICS_SPEC=1") == 0;
+#else
+  const bool enabled = setenv("KYTY_STABLE_GRAPHICS_SPEC", "1", 1) == 0;
+#endif
+  Require(name, "enable switch", enabled, "could not enable stable graphics specialization");
+  const auto stable = emit(2u);
+  const auto other_stable = emit(3u);
+  Require(name, "stable cache identity", stable.key == other_stable.key &&
+              stable.spirv == other_stable.spirv,
+          "runtime search counts still changed SPIR-V or the pipeline key");
+  spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+  std::string text;
+  Require(name, "runtime loop", tools.Disassemble(stable.spirv, &text) &&
+              text.find("OpLoopMerge") != std::string::npos,
+          "stable table search did not emit a runtime loop");
+#if defined(_WIN32)
+  _putenv("KYTY_STABLE_GRAPHICS_SPEC=");
+#else
+  unsetenv("KYTY_STABLE_GRAPHICS_SPEC");
+#endif
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckDynamicRenderingState() {
   RenderState first{};
   first.width = 64;
@@ -51828,6 +51922,7 @@ void CheckDynamicRenderingState() {
           depth_attachment_layout(attachment) ==
               vk::ImageLayout::eDepthStencilAttachmentOptimal,
           "combined depth/stencil writes did not use the writable layout");
+  CheckStableGraphicsSpec();
   std::printf("[host]    %-32s ok\n", "DynamicRenderingState");
 }
 

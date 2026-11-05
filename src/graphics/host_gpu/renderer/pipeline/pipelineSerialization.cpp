@@ -50,6 +50,7 @@ std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
 	    (ShaderRecompiler::IR::GpuBufferTablesEnabled() ? uint64_t {0x3c6ef372fe94f82b} : 0u) ^
 	    (ShaderRecompiler::IR::GpuKeyCountTablesEnabled() ? uint64_t {0x6a09e667f3bcc909} : 0u) ^
 	    (ShaderRecompiler::IR::StableSrtLayoutEnabled() ? uint64_t {0xa54ff53a5f1d36f1} : 0u) ^
+	    (ShaderRecompiler::IR::StableGraphicsSpecEnabled() ? uint64_t {0x1b873593c2b6f35d} : 0u) ^
 	    (ShaderRecompiler::IR::ImageHeapCapacity1MEnabled() ? uint64_t {0xbb67ae8584caa73b} : 0u);
 	Writer         header;
 	IoAll(header, version, SpirvProfile(graphics),
