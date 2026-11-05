@@ -14,6 +14,7 @@
 
 #include <array>
 #include <bit>
+#include <cstdlib>
 #include <list>
 #include <memory>
 #include <optional>
@@ -368,10 +369,19 @@ inline constexpr uint32_t ImageBindingCount           = 50u;
 // reserve adjacent float and integer variants after SamplerHeapBase.
 inline constexpr uint32_t ImageHeapSet                = 1u;
 // PPSA26344 keeps more than 65536 images resident while loading its world.
-inline constexpr uint32_t ImageHeapCapacity           = 262144u;
-inline constexpr uint32_t ImageHeapKindShift          = 20u;
-inline constexpr uint32_t SamplerHeapBase             = ImageHeapCapacity;
-inline constexpr uint32_t SamplerHeapCapacity         = 4096u; // Two variants per sampler.
+// KYTY_IMAGE_HEAP_CAPACITY_1M=1: opt into 2^20 images on drivers with sufficient bindless limits.
+inline bool ImageHeapCapacity1MEnabled() {
+	const char* value = std::getenv("KYTY_IMAGE_HEAP_CAPACITY_1M");
+	return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+inline uint32_t ImageHeapCapacity() {
+	return ImageHeapCapacity1MEnabled() ? 1048576u : 262144u;
+}
+inline constexpr uint32_t ImageHeapKindShift = 20u;
+inline uint32_t SamplerHeapBase() {
+	return ImageHeapCapacity();
+}
+inline constexpr uint32_t SamplerHeapCapacity = 4096u; // Two variants per sampler.
 
 enum class DescriptorBindingKind : uint32_t {
 	Buffers  = 0u,

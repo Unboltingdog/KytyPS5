@@ -99,7 +99,7 @@ ImageHeap::ImageHeap(RenderContext& context, PageManager& page_manager)
 	EXIT_NOT_IMPLEMENTED(std::min({limits.maxDescriptorSetUpdateAfterBindSampledImages,
 	                               limits.maxPerStageDescriptorUpdateAfterBindSampledImages,
 	                               limits.maxPerStageUpdateAfterBindResources}) <
-	                     IR::ImageHeapCapacity);
+	                     IR::ImageHeapCapacity());
 	EXIT_NOT_IMPLEMENTED(std::min({limits.maxDescriptorSetUpdateAfterBindSamplers,
 	                               limits.maxPerStageDescriptorUpdateAfterBindSamplers}) <
 	                     IR::SamplerHeapCapacity);
@@ -116,7 +116,7 @@ ImageHeap::ImageHeap(RenderContext& context, PageManager& page_manager)
 	flags_info.pBindingFlags = binding_flags.data();
 	const std::array bindings {
 	    vk::DescriptorSetLayoutBinding {0, vk::DescriptorType::eSampledImage,
-	                                    IR::ImageHeapCapacity, vk::ShaderStageFlagBits::eAll, nullptr},
+	                                    IR::ImageHeapCapacity(), vk::ShaderStageFlagBits::eAll, nullptr},
 	    vk::DescriptorSetLayoutBinding {1, vk::DescriptorType::eSampler,
 	                                    IR::SamplerHeapCapacity, vk::ShaderStageFlagBits::eAll, nullptr}};
 	vk::DescriptorSetLayoutCreateInfo layout_info {};
@@ -127,7 +127,7 @@ ImageHeap::ImageHeap(RenderContext& context, PageManager& page_manager)
 	EXIT_IF(graphics.device.createDescriptorSetLayout(&layout_info, nullptr, &m_layout) !=
 	        vk::Result::eSuccess);
 	const std::array pool_sizes {
-	    vk::DescriptorPoolSize {vk::DescriptorType::eSampledImage, IR::ImageHeapCapacity},
+	    vk::DescriptorPoolSize {vk::DescriptorType::eSampledImage, IR::ImageHeapCapacity()},
 	    vk::DescriptorPoolSize {vk::DescriptorType::eSampler, IR::SamplerHeapCapacity}};
 	vk::DescriptorPoolCreateInfo pool_info {};
 	pool_info.flags         = vk::DescriptorPoolCreateFlagBits::eUpdateAfterBind;
@@ -400,14 +400,14 @@ uint32_t ImageHeap::Intern(View& view, uint32_t kind, const DescriptorValue& val
 		view.pending.push_back(found->second);
 	}
 	++m_elements[found->second].refs;
-	return sampler ? found->second - IR::SamplerHeapBase
+	return sampler ? found->second - IR::SamplerHeapBase()
 	               : arm << IR::ImageHeapKindShift | found->second;
 }
 
 void ImageHeap::Release(View& view, uint32_t entry) {
 	auto index = entry & ElementMask;
 	if (index == 0u) return;
-	if (view.sampler_profile) index += IR::SamplerHeapBase;
+	if (view.sampler_profile) index += IR::SamplerHeapBase();
 	if (--m_elements[index].refs != 0u) return;
 	auto& element = m_elements[index];
 	if (const auto found = view.elements.find(element.value);
@@ -434,16 +434,16 @@ uint32_t ImageHeap::Allocate(bool sampler) {
 	auto& scheduler = m_context.GetCommandScheduler();
 	while (!m_retired.empty() && scheduler.IsFree(m_retired.front().first)) {
 		const auto index = m_retired.front().second;
-		(index >= IR::SamplerHeapBase ? m_sampler_free : m_free).push_back(index);
+		(index >= IR::SamplerHeapBase() ? m_sampler_free : m_free).push_back(index);
 		m_retired.pop_front();
 	}
 	auto& free = sampler ? m_sampler_free : m_free;
 	if (free.empty()) {
 		if (sampler) {
-			if (m_elements.size() < IR::SamplerHeapBase + 2u) {
-				m_elements.resize(IR::SamplerHeapBase + 2u);
+			if (m_elements.size() < IR::SamplerHeapBase() + 2u) {
+				m_elements.resize(IR::SamplerHeapBase() + 2u);
 			}
-			if (m_elements.size() - IR::SamplerHeapBase >= IR::SamplerHeapCapacity) {
+			if (m_elements.size() - IR::SamplerHeapBase() >= IR::SamplerHeapCapacity) {
 				EXIT("sampler heaps exceed %u resident samplers\n", IR::SamplerHeapCapacity);
 			}
 			const auto index = static_cast<uint32_t>(m_elements.size());
@@ -451,19 +451,19 @@ uint32_t ImageHeap::Allocate(bool sampler) {
 			return index;
 		}
 		if (m_image_next >= 65536u && (m_image_next & 16383u) == 0u) SweepOrphans();
-		if (m_image_next == IR::ImageHeapCapacity) {
+		if (m_image_next == IR::ImageHeapCapacity()) {
 			WriteOccupancy("full");
 			// Last resort before giving up: reclaim orphans and wait for the GPU to release them.
 			if (SweepOrphans() != 0u || !m_retired.empty()) {
 				scheduler.Finish();
 				while (!m_retired.empty() && scheduler.IsFree(m_retired.front().first)) {
 					const auto index = m_retired.front().second;
-					(index >= IR::SamplerHeapBase ? m_sampler_free : m_free).push_back(index);
+					(index >= IR::SamplerHeapBase() ? m_sampler_free : m_free).push_back(index);
 					m_retired.pop_front();
 				}
 			}
 			if (m_free.empty()) {
-				EXIT("image heaps exceed %u resident images\n", IR::ImageHeapCapacity);
+				EXIT("image heaps exceed %u resident images\n", IR::ImageHeapCapacity());
 			}
 			const auto index = m_free.back();
 			m_free.pop_back();
@@ -766,8 +766,8 @@ void ImageHeap::WriteDescriptors() {
 	};
 	for (const auto index: m_writes) {
 		auto& element = m_elements[index];
-		if (index < IR::SamplerHeapBase) image(index, element.binding);
-		if (index != 0u && index < IR::SamplerHeapBase) continue;
+		if (index < IR::SamplerHeapBase()) image(index, element.binding);
+		if (index != 0u && index < IR::SamplerHeapBase()) continue;
 		if (index == 0u && element.samplers[0] == nullptr) {
 			ShaderSamplerResource descriptor {};
 			auto integer = descriptor;
@@ -775,7 +775,7 @@ void ImageHeap::WriteDescriptors() {
 			element.samplers[0] = m_context.GetSamplerCache().GetSampler(descriptor, false);
 			element.samplers[1] = m_context.GetSamplerCache().GetSampler(integer, true);
 		}
-		const auto first = index == 0u ? 0u : index - IR::SamplerHeapBase;
+		const auto first = index == 0u ? 0u : index - IR::SamplerHeapBase();
 		for (uint32_t variant = 0; variant < 2u; ++variant) {
 			sampler(first + variant, element.samplers[variant]);
 		}

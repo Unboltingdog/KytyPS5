@@ -77,6 +77,15 @@ bool SetStableSrtLayout(bool enabled) {
 #endif
 }
 
+bool SetImageHeapCapacity1M(bool enabled) {
+#if defined(_WIN32)
+  return _putenv(enabled ? "KYTY_IMAGE_HEAP_CAPACITY_1M=1" : "KYTY_IMAGE_HEAP_CAPACITY_1M=") == 0;
+#else
+  return enabled ? setenv("KYTY_IMAGE_HEAP_CAPACITY_1M", "1", 1) == 0
+                 : unsetenv("KYTY_IMAGE_HEAP_CAPACITY_1M") == 0;
+#endif
+}
+
 uint32_t CheckKeyCountClamp(const Program &program) {
   std::vector<const Inst *> clamps;
   for (const auto *block : program.blocks) {
@@ -7024,6 +7033,25 @@ void TestStableSrtLayout() {
   SetStableSrtLayout(false);
 }
 
+void TestImageHeapCapacity() {
+  Check(SetImageHeapCapacity1M(false) && ImageHeapCapacity() == 262144u &&
+            SamplerHeapBase() == ImageHeapCapacity(),
+        "default image heap capacity or sampler base changed");
+  Check(SetImageHeapCapacity1M(true) && ImageHeapCapacity() == 1048576u &&
+            SamplerHeapBase() == ImageHeapCapacity(),
+        "1M image heap capacity did not move the sampler base");
+  constexpr uint32_t mask = (1u << ImageHeapKindShift) - 1u;
+  const uint32_t last_image = ImageHeapCapacity() - 1u;
+  const uint32_t encoded = 3u << ImageHeapKindShift | last_image;
+  Check(last_image == mask && (encoded & mask) == last_image &&
+            (encoded >> ImageHeapKindShift) == 3u,
+        "the largest 1M image index did not survive kind encoding");
+  const uint32_t sampler = SamplerHeapBase() + 1234u;
+  Check(sampler - SamplerHeapBase() == 1234u && sampler > last_image,
+        "sampler indices overlap the 1M image heap");
+  SetImageHeapCapacity1M(false);
+}
+
 void TestWorkgroupSelectedBufferRecords() {
   namespace Prospero = Libs::Graphics::Prospero;
   auto fixture = MakeBufferRecordFixture(1u, false, true, 0u, false, true);
@@ -9544,6 +9572,7 @@ int main() {
     });
     Run("GPU-selected buffer records", TestGpuSelectedBufferRecords);
     Run("stable SRT layout", TestStableSrtLayout);
+    Run("1M image heap capacity", TestImageHeapCapacity);
     Run("workgroup-selected buffer records", TestWorkgroupSelectedBufferRecords);
     Run("GPU key-count buffer table clamp", TestGpuKeyCountBufferTableClamp);
     Run("GPU selector table read bounds", TestGpuSelectorTableReadBounds);

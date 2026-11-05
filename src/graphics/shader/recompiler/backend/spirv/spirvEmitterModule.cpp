@@ -237,7 +237,7 @@ void DefineDescriptors(EmitterState& state) {
 			// Heap kinds alias one array; the root itself is never accessed.
 			auto& definition = state.heap_images[IR::ImageBindingIndex(*kind)];
 			if (image.indirect_resources.empty() && definition.variable == 0) {
-				DefineImageArray(state, definition, image, IR::ImageHeapCapacity, IR::ImageHeapSet, 0u);
+				DefineImageArray(state, definition, image, IR::ImageHeapCapacity(), IR::ImageHeapSet, 0u);
 			}
 			continue;
 		}
