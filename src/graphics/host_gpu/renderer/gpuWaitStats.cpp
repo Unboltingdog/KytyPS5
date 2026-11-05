@@ -57,8 +57,29 @@ void MaybePrint(State& state) {
 	std::vector<std::pair<std::string, Totals>> rows(state.totals.begin(), state.totals.end());
 	state.totals.clear();
 	std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
-		return a.second.nanoseconds + a.second.submits > b.second.nanoseconds + b.second.submits;
+		if (a.second.nanoseconds != b.second.nanoseconds) {
+			return a.second.nanoseconds > b.second.nanoseconds;
+		}
+		if (a.second.submits != b.second.submits) return a.second.submits > b.second.submits;
+		return a.first < b.first;
 	});
+	std::string wait_top = "wait-top";
+	for (size_t i = 0; i < rows.size() && i < 5u; ++i) {
+		const auto& [reason, totals] = rows[i];
+		char line[160];
+		if (totals.events != 0 && totals.submits == 0 && totals.waits == 0) {
+			std::snprintf(line, sizeof(line), " %s events=%llu;", reason.c_str(),
+			              static_cast<unsigned long long>(totals.events));
+		} else {
+			std::snprintf(line, sizeof(line), " %s wait_ms=%.1f waits=%llu submits=%llu;",
+			              reason.c_str(), static_cast<double>(totals.nanoseconds) / 1e6,
+			              static_cast<unsigned long long>(totals.waits),
+			              static_cast<unsigned long long>(totals.submits));
+		}
+		wait_top += line;
+	}
+	wait_top += "\n";
+	WriteDiag(wait_top.c_str());
 	char busy[64];
 	std::snprintf(busy, sizeof(busy), " gpu_busy_ms=%.0f;",
 	              static_cast<double>(state.gpu_busy_ns) / 1e6);
