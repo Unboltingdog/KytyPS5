@@ -51783,7 +51783,7 @@ void CheckStableGraphicsSpec() {
     compute.host_subgroup_size = 32;
     compute.threads_num[0] = 32;
     CollectShaderInfo(program, {.compute = &compute});
-    compiled.spirv = Spirv::EmitProgram(program, {.compute = &compute});
+    compiled.spirv = ShaderRecompiler::Spirv::EmitProgram(program, {.compute = &compute});
     ValidateSpirv(name, compiled.spirv);
     return Result{key, std::move(compiled.spirv)};
   };
@@ -51906,6 +51906,7 @@ void CheckDynamicRenderingState() {
               variant_diff.find("topology") != std::string::npos &&
               variant_diff.find("vb0.stride 0->32") != std::string::npos,
           "graphics variant diagnostics omitted a changed pipeline key field");
+  old_vertex.specialization.images.resize(1);
   new_vertex.specialization.images.resize(1);
   new_vertex.specialization.images[0].mip_count = 2;
   const auto specialization_diff = PipelineCacheTestAccess::GraphicsVariantDiff(

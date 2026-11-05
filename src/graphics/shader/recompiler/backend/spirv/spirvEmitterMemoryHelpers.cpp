@@ -116,10 +116,9 @@ uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t m
 		const auto active = Binary(state, spv::OpULessThan, TypeBool(state), low_phi, high_phi);
 		const auto remaining = Binary(state, spv::OpULessThan, TypeBool(state), iteration_phi,
 		                              iterations);
+		const auto condition = Binary(state, spv::OpLogicalAnd, TypeBool(state), active, remaining);
 		state.builder.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlDontUnrollMask);
-		state.builder.AddFunction(spv::OpBranchConditional,
-		                          Binary(state, spv::OpLogicalAnd, TypeBool(state), active, remaining),
-		                          body, merge);
+		state.builder.AddFunction(spv::OpBranchConditional, condition, body, merge);
 		EmitLabel(state, body);
 		const auto mid = Binary(state, spv::OpShiftRightLogical, TypeU32(state),
 		                        Binary(state, spv::OpIAdd, TypeU32(state), low_phi, high_phi),

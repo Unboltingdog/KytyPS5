@@ -5,20 +5,21 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
-#include <stdexcept>
 #include <string>
 #include <thread>
 
 namespace {
 
 void Check(bool condition, const char* message) {
-	if (!condition) throw std::runtime_error(message);
+	if (!condition) {
+		std::cerr << "GPU wait stats test failed: " << message << '\n';
+		std::exit(1);
+	}
 }
 
 } // namespace
 
 int main() {
-	try {
 #if defined(_WIN32)
 		Check(_putenv("KYTY_WAIT_STATS=1") == 0, "could not enable wait stats");
 #else
@@ -59,10 +60,6 @@ int main() {
 #if !defined(_WIN32)
 		std::remove("kyty-diag.txt");
 #endif
-	} catch (const std::exception& exception) {
-		std::cerr << "GPU wait stats test failed: " << exception.what() << '\n';
-		return 1;
-	}
 	std::cout << "GPU wait stats tests passed\n";
 	return 0;
 }

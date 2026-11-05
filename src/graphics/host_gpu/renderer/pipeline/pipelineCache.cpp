@@ -43,6 +43,7 @@
 #include <ranges>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
+#include <spirv/unified1/spirv.hpp>
 #include <unordered_set>
 #include <string>
 #include <utility>
@@ -544,8 +545,9 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 			const auto add = [&](std::string item) {
 				if (diff.size() < 900) diff += " " + item;
 			};
-			add(ShaderRecompiler::IR::ResourceSpecializationDiff(prev.specialization,
-			                                                     now.specialization));
+			const auto specialization_diff = ShaderRecompiler::IR::ResourceSpecializationDiff(
+			    prev.specialization, now.specialization);
+			if (!specialization_diff.empty()) add(specialization_diff);
 			if (prev.info.bindings.push_data_start_dword != now.info.bindings.push_data_start_dword)
 				add(fmt::format("push_data_start {}->{}", prev.info.bindings.push_data_start_dword, now.info.bindings.push_data_start_dword));
 			if (prev.function_code != now.function_code) add("function_code");
