@@ -114,6 +114,8 @@ struct alignas(4) GraphicsPipelineKey {
 // Keys are compared and hashed as bytes.
 static_assert(std::has_unique_object_representations_v<GraphicsPipelineKey>);
 
+std::vector<uint32_t> SpirvFunctionInstructionCounts(std::span<const uint32_t> spirv);
+
 // A compiled stage with what pipeline creation needs from it besides the key.
 struct ShaderModule {
 	uint64_t                                     id     = 0;
@@ -127,6 +129,8 @@ struct ShaderModule {
 	std::vector<RectListParameter>               rect_parameters;
 	// Indirect mesh draw: a task shader reads the records and launches the groups.
 	bool                                         mesh_task = false;
+	uint32_t                                     spirv_words = 0;
+	std::vector<uint32_t>                        spirv_function_instructions;
 };
 
 // A draw's topology, shader stages (from PipelineCache::GetGraphicsPrograms) and targets.

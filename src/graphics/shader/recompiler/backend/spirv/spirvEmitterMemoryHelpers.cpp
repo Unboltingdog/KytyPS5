@@ -93,9 +93,13 @@ uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t m
 	};
 	auto low = ConstantU32(state, 0u);
 	auto high = count;
-	if (search_iterations == IR::RuntimeIndirectSearchIterations) {
-		const auto iterations = LoadFlattenedSrt(
-		    state, Binary(state, spv::OpIAdd, TypeU32(state), mapping, ConstantU32(state, 2u)));
+	const bool runtime_loop = search_iterations == IR::RuntimeIndirectSearchIterations ||
+	                          (IR::NoTableUnrollEnabled() && search_iterations > 4u);
+	if (runtime_loop) {
+		const auto iterations = search_iterations == IR::RuntimeIndirectSearchIterations
+		    ? LoadFlattenedSrt(state, Binary(state, spv::OpIAdd, TypeU32(state), mapping,
+		                                     ConstantU32(state, 2u)))
+		    : ConstantU32(state, search_iterations);
 		const auto preheader = state.current_label;
 		const auto header = state.builder.AllocateId();
 		const auto body = state.builder.AllocateId();

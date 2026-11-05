@@ -336,6 +336,29 @@ std::vector<vk::Format> VertexInputFormats(const ShaderVertexInputInfo&         
 
 } // namespace
 
+std::vector<uint32_t> SpirvFunctionInstructionCounts(std::span<const uint32_t> spirv) {
+	std::vector<uint32_t> result;
+	uint32_t              function = 0;
+	uint32_t              count = 0;
+	for (size_t offset = 5; offset < spirv.size();) {
+		const auto header = spirv[offset];
+		const auto words = header >> spv::WordCountShift;
+		if (words == 0u || words > spirv.size() - offset) break;
+		const auto opcode = static_cast<spv::Op>(header & 0xffffu);
+		if (opcode == spv::OpFunction && words >= 3u) {
+			function = spirv[offset + 2u];
+			count = 0;
+		}
+		if (function != 0u) ++count;
+		if (opcode == spv::OpFunctionEnd && function != 0u) {
+			result.insert(result.end(), {function, count});
+			function = 0;
+		}
+		offset += words;
+	}
+	return result;
+}
+
 ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics) {
 	// AMD GPUs (vendor 0x1002) run NMin/NMax as v_min/v_max, which give the guest's NaN and
 	// signed-zero results; GLSL.std.450 alone does not order -0 below +0.
@@ -505,6 +528,8 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	    .info           = std::move(info),
 	    .specialization = program.specialization,
 	    .function_code  = {function_code.begin(), function_code.end()},
+	    .spirv_words    = static_cast<uint32_t>(result.spirv.size()),
+	    .spirv_function_instructions = SpirvFunctionInstructionCounts(result.spirv),
 	});
 	EXIT_IF(module.module == nullptr);
 	m_compiled[static_cast<size_t>(key.stage)]++;
@@ -882,7 +907,14 @@ public:
 		for (const auto* stage: stages) {
 			if (stage == nullptr) continue;
 			m_hashes[m_count++] = stage->info.shader_hash;
-			m_words += stage->function_code.size();
+			m_words += stage->spirv_words;
+			for (size_t i = 0; i < stage->spirv_function_instructions.size(); i += 2u) {
+				if (m_functions.size() < 900) {
+					m_functions += fmt::format("{}0x{:x}:{}", m_functions.empty() ? "" : ",",
+					                          stage->spirv_function_instructions[i],
+					                          stage->spirv_function_instructions[i + 1u]);
+				}
+			}
 			if (m_count == m_hashes.size()) break;
 		}
 	}
@@ -895,8 +927,9 @@ public:
 		for (size_t i = 0; i < m_count; ++i) {
 			hashes += fmt::format("{}0x{:016x}", i == 0 ? "" : ",", m_hashes[i]);
 		}
-		GpuWaitStats::WriteDiag(fmt::format("slow-pipeline kind={} ms={} shaders={} spirv_words={}\n",
-		                                    m_kind, ms, hashes, m_words)
+		GpuWaitStats::WriteDiag(fmt::format(
+		    "slow-pipeline kind={} ms={} shaders={} spirv_words={} functions={}\n",
+		    m_kind, ms, hashes, m_words, m_functions)
 		                            .c_str());
 	}
 
@@ -906,6 +939,7 @@ private:
 	std::array<uint64_t, 4>               m_hashes {};
 	size_t                                m_count = 0;
 	size_t                                m_words = 0;
+	std::string                           m_functions;
 };
 } // namespace
 

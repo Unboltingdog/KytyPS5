@@ -51,6 +51,7 @@ std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
 	    (ShaderRecompiler::IR::GpuKeyCountTablesEnabled() ? uint64_t {0x6a09e667f3bcc909} : 0u) ^
 	    (ShaderRecompiler::IR::StableSrtLayoutEnabled() ? uint64_t {0xa54ff53a5f1d36f1} : 0u) ^
 	    (ShaderRecompiler::IR::StableGraphicsSpecEnabled() ? uint64_t {0x1b873593c2b6f35d} : 0u) ^
+	    (ShaderRecompiler::IR::NoTableUnrollEnabled() ? uint64_t {0x243f6a8885a308d3} : 0u) ^
 	    (ShaderRecompiler::IR::ImageHeapCapacity1MEnabled() ? uint64_t {0xbb67ae8584caa73b} : 0u);
 	Writer         header;
 	IoAll(header, version, SpirvProfile(graphics),
@@ -67,7 +68,7 @@ template <class S, class Key> void IoKey(S& io, Key& key) {
 template <class S, class Module> void IoModule(S& io, Module& stage) {
 	// The handle comes from the SPIR-V; stored programs have no function code.
 	auto& [id, handle, info, specialization, function_code, vertex_formats, rect_parameters,
-	       mesh_task] = stage;
+	       mesh_task, spirv_words, spirv_function_instructions] = stage;
 	IoAll(io, id, info, specialization, vertex_formats, rect_parameters, mesh_task);
 }
 
@@ -248,6 +249,8 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 				m_program_cache.erase(program);
 				return false;
 			}
+			module.spirv_words = static_cast<uint32_t>(spirv.size());
+			module.spirv_function_instructions = SpirvFunctionInstructionCounts(spirv);
 			module.module = CompileSPV(spirv, m_graphics.device);
 			if (module.module == nullptr) {
 				return false;

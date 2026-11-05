@@ -51814,10 +51814,33 @@ void CheckStableGraphicsSpec() {
   Require(name, "runtime loop", tools.Disassemble(stable.spirv, &text) &&
               text.find("OpLoopMerge") != std::string::npos,
           "stable table search did not emit a runtime loop");
+  const auto functions = SpirvFunctionInstructionCounts(stable.spirv);
+  Require(name, "function instruction counts", functions.size() >= 2u &&
+              functions.size() % 2u == 0u && functions[1] != 0u,
+          "SPIR-V function instruction counts were not retained");
 #if defined(_WIN32)
   _putenv("KYTY_STABLE_GRAPHICS_SPEC=");
 #else
   unsetenv("KYTY_STABLE_GRAPHICS_SPEC");
+#endif
+  const auto unrolled = emit(12u);
+#if defined(_WIN32)
+  const bool no_unroll = _putenv("KYTY_NO_TABLE_UNROLL=1") == 0;
+#else
+  const bool no_unroll = setenv("KYTY_NO_TABLE_UNROLL", "1", 1) == 0;
+#endif
+  Require(name, "enable no-unroll switch", no_unroll,
+          "could not enable runtime table loops");
+  const auto looped = emit(12u);
+  Require(name, "large table loop", looped.key == unrolled.key &&
+              looped.spirv.size() < unrolled.spirv.size() &&
+              tools.Disassemble(looped.spirv, &text) &&
+              text.find("OpLoopMerge") != std::string::npos,
+          "large table search did not become a smaller runtime loop");
+#if defined(_WIN32)
+  _putenv("KYTY_NO_TABLE_UNROLL=");
+#else
+  unsetenv("KYTY_NO_TABLE_UNROLL");
 #endif
   std::printf("[host]    %-32s ok\n", name);
 }
