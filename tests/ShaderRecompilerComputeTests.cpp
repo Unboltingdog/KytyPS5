@@ -51789,14 +51789,15 @@ void CheckDynamicRenderingState() {
               variant_diff.find("topology") != std::string::npos &&
               variant_diff.find("vb0.stride 0->32") != std::string::npos,
           "graphics variant diagnostics omitted a changed pipeline key field");
-  new_vertex.specialization.buffers.resize(1);
-  new_vertex.specialization.buffers[0].packed_stride = 16;
+  new_vertex.specialization.images.resize(1);
+  new_vertex.specialization.images[0].mip_count = 2;
   const auto specialization_diff = PipelineCacheTestAccess::GraphicsVariantDiff(
       rgba, new_stages, rgba, old_stages);
   Require("DynamicRenderingState", "graphics variant specialization",
           specialization_diff.find("s0.id") != std::string::npos &&
-              specialization_diff.find("s0.spec[") != std::string::npos,
-          "graphics variant diagnostics omitted changed specialization words");
+              specialization_diff.find("s0.i0.mip_count 1->2") != std::string::npos &&
+              specialization_diff.find("spec[") == std::string::npos,
+          "graphics variant diagnostics omitted the changed image field name");
 
   RenderDepthInfo attachment{};
   attachment.desc.view_info.format = vk::Format::eD32SfloatS8Uint;

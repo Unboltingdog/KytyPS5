@@ -86,6 +86,65 @@ uint64_t TakeWalkNanoseconds() {
 	return ns;
 }
 
+std::string ResourceSpecializationDiff(const ResourceSpecialization& before,
+                                       const ResourceSpecialization& after,
+                                       std::string_view prefix) {
+	std::string diff;
+	const auto add = [&](std::string item) {
+		if (diff.size() < 900) diff += " " + item;
+	};
+	const auto field = [&](std::string_view name, auto old_value, auto new_value) {
+		if (old_value == new_value) return;
+		add(fmt::format("{}{} {}->{}", prefix, name, static_cast<uint64_t>(old_value),
+		                static_cast<uint64_t>(new_value)));
+	};
+	field("buffers.count", before.buffers.size(), after.buffers.size());
+	for (size_t i = 0; i < std::min(before.buffers.size(), after.buffers.size()); ++i) {
+		const auto& a = before.buffers[i];
+		const auto& b = after.buffers[i];
+		const auto at = [&](std::string_view name) { return fmt::format("b{}.{}", i, name); };
+		field(at("packed_stride"), a.packed_stride, b.packed_stride);
+		field(at("descriptor_format"), a.descriptor_format, b.descriptor_format);
+		field(at("descriptor_swizzle"), a.descriptor_swizzle, b.descriptor_swizzle);
+		field(at("zero_stride_oob"), a.zero_stride_oob, b.zero_stride_oob);
+		field(at("scalar_empty"), a.scalar_empty, b.scalar_empty);
+		field(at("indirect_root"), a.indirect_root, b.indirect_root);
+		field(at("indirect_mapping_offset"), a.indirect_mapping_offset, b.indirect_mapping_offset);
+		field(at("indirect_search_iterations"), a.indirect_search_iterations,
+		      b.indirect_search_iterations);
+	}
+	field("images.count", before.images.size(), after.images.size());
+	for (size_t i = 0; i < std::min(before.images.size(), after.images.size()); ++i) {
+		const auto& a = before.images[i];
+		const auto& b = after.images[i];
+		const auto at = [&](std::string_view name) { return fmt::format("i{}.{}", i, name); };
+		field(at("numeric_class"), a.numeric_class, b.numeric_class);
+		field(at("dimension"), a.dimension, b.dimension);
+		field(at("mip_count"), a.mip_count, b.mip_count);
+		field(at("conversion_format"), a.conversion_format, b.conversion_format);
+		field(at("shader_swizzle"), a.shader_swizzle, b.shader_swizzle);
+		field(at("indirect_root"), a.indirect_root, b.indirect_root);
+		field(at("indirect_mapping_offset"), a.indirect_mapping_offset, b.indirect_mapping_offset);
+		field(at("indirect_search_iterations"), a.indirect_search_iterations,
+		      b.indirect_search_iterations);
+		field(at("cube"), a.cube, b.cube);
+		field(at("fmask"), a.fmask, b.fmask);
+		field(at("heap"), a.heap, b.heap);
+	}
+	field("samplers.count", before.samplers.size(), after.samplers.size());
+	for (size_t i = 0; i < std::min(before.samplers.size(), after.samplers.size()); ++i) {
+		const auto& a = before.samplers[i];
+		const auto& b = after.samplers[i];
+		const auto at = [&](std::string_view name) { return fmt::format("s{}.{}", i, name); };
+		field(at("indirect_root"), a.indirect_root, b.indirect_root);
+		field(at("indirect_mapping_offset"), a.indirect_mapping_offset, b.indirect_mapping_offset);
+		field(at("indirect_search_iterations"), a.indirect_search_iterations,
+		      b.indirect_search_iterations);
+		field(at("heap"), a.heap, b.heap);
+	}
+	return diff;
+}
+
 bool SpecializationReadMayDefer() {
 	return t_specialization_read_may_defer && SrtWalkerNoStallActive();
 }

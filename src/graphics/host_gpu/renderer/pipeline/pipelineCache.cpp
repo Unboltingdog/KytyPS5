@@ -519,39 +519,8 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 			const auto add = [&](std::string item) {
 				if (diff.size() < 900) diff += " " + item;
 			};
-			const auto& a = prev.specialization;
-			const auto& b = now.specialization;
-			if (a.buffers.size() != b.buffers.size()) add(fmt::format("buffers.size {}->{}", a.buffers.size(), b.buffers.size()));
-			for (size_t i = 0; i < std::min(a.buffers.size(), b.buffers.size()); ++i) {
-				const auto& x = a.buffers[i];
-				const auto& y = b.buffers[i];
-				if (x.packed_stride != y.packed_stride) add(fmt::format("b{}.stride {:x}->{:x}", i, x.packed_stride, y.packed_stride));
-				if (x.descriptor_format != y.descriptor_format) add(fmt::format("b{}.format {}->{}", i, static_cast<uint32_t>(x.descriptor_format), static_cast<uint32_t>(y.descriptor_format)));
-				if (x.descriptor_swizzle != y.descriptor_swizzle) add(fmt::format("b{}.swizzle", i));
-				if (x.zero_stride_oob != y.zero_stride_oob) add(fmt::format("b{}.zero_stride_oob", i));
-				if (x.scalar_empty != y.scalar_empty) add(fmt::format("b{}.scalar_empty", i));
-				if (x.indirect_root != y.indirect_root) add(fmt::format("b{}.indirect_root {}->{}", i, x.indirect_root, y.indirect_root));
-				if (x.indirect_mapping_offset != y.indirect_mapping_offset) add(fmt::format("b{}.mapping_offset {}->{}", i, x.indirect_mapping_offset, y.indirect_mapping_offset));
-				if (x.indirect_search_iterations != y.indirect_search_iterations) add(fmt::format("b{}.search {}->{}", i, x.indirect_search_iterations, y.indirect_search_iterations));
-			}
-			if (a.images.size() != b.images.size()) add(fmt::format("images.size {}->{}", a.images.size(), b.images.size()));
-			for (size_t i = 0; i < std::min(a.images.size(), b.images.size()); ++i) {
-				const auto& x = a.images[i];
-				const auto& y = b.images[i];
-				if (x.numeric_class != y.numeric_class) add(fmt::format("i{}.numeric", i));
-				if (x.dimension != y.dimension) add(fmt::format("i{}.dimension", i));
-				if (x.mip_count != y.mip_count) add(fmt::format("i{}.mips {}->{}", i, x.mip_count, y.mip_count));
-				if (x.conversion_format != y.conversion_format) add(fmt::format("i{}.conversion", i));
-				if (x.shader_swizzle != y.shader_swizzle) add(fmt::format("i{}.swizzle", i));
-				if (x.indirect_root != y.indirect_root) add(fmt::format("i{}.indirect_root {}->{}", i, x.indirect_root, y.indirect_root));
-				if (x.indirect_mapping_offset != y.indirect_mapping_offset) add(fmt::format("i{}.mapping_offset {}->{}", i, x.indirect_mapping_offset, y.indirect_mapping_offset));
-				if (x.indirect_search_iterations != y.indirect_search_iterations) add(fmt::format("i{}.search {}->{}", i, x.indirect_search_iterations, y.indirect_search_iterations));
-				if (x.cube != y.cube || x.fmask != y.fmask || x.heap != y.heap) add(fmt::format("i{}.cube/fmask/heap", i));
-			}
-			if (a.samplers.size() != b.samplers.size()) add(fmt::format("samplers.size {}->{}", a.samplers.size(), b.samplers.size()));
-			for (size_t i = 0; i < std::min(a.samplers.size(), b.samplers.size()); ++i) {
-				if (!(a.samplers[i] == b.samplers[i])) add(fmt::format("s{}", i));
-			}
+			add(ShaderRecompiler::IR::ResourceSpecializationDiff(prev.specialization,
+			                                                     now.specialization));
 			if (prev.info.bindings.push_data_start_dword != now.info.bindings.push_data_start_dword)
 				add(fmt::format("push_data_start {}->{}", prev.info.bindings.push_data_start_dword, now.info.bindings.push_data_start_dword));
 			if (prev.function_code != now.function_code) add("function_code");
@@ -1500,24 +1469,8 @@ std::string PipelineCache::GraphicsVariantDiff(
 		if (before.function_code != after.function_code) add(fmt::format("s{}.function_code", i));
 		if (before.vertex_formats != after.vertex_formats) add(fmt::format("s{}.vertex_formats", i));
 		if (before.specialization == after.specialization) continue;
-		ShaderRecompiler::IR::Writer old_writer;
-		ShaderRecompiler::IR::Writer new_writer;
-		ShaderRecompiler::IR::IoAll(old_writer, before.specialization);
-		ShaderRecompiler::IR::IoAll(new_writer, after.specialization);
-		const auto word = [](const std::vector<uint8_t>& bytes, size_t index) {
-			uint32_t value = 0;
-			if (index * 4u + 4u <= bytes.size()) std::memcpy(&value, bytes.data() + index * 4u, 4u);
-			return value;
-		};
-		const auto words = std::max((old_writer.bytes.size() + 3u) / 4u,
-		                            (new_writer.bytes.size() + 3u) / 4u);
-		for (size_t w = 0; w < words; ++w) {
-			const auto old_word = word(old_writer.bytes, w);
-			const auto new_word = word(new_writer.bytes, w);
-			if (old_word != new_word) {
-				add(fmt::format("s{}.spec[{}] {:08x}->{:08x}", i, w, old_word, new_word));
-			}
-		}
+		add(ShaderRecompiler::IR::ResourceSpecializationDiff(
+		    before.specialization, after.specialization, fmt::format("s{}.", i)));
 	}
 	if (diff.empty()) diff = " (no compared field differs)";
 	return diff;
