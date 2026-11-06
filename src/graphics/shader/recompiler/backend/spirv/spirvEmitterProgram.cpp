@@ -506,6 +506,19 @@ void EmitStructuredBlock(ValueEmitContext& ctx, StructuredFunctionState& structu
 		                              then_exit, false_values[index], header);
 		inst->SetDefinition(0, phi);
 	}
+	if (ctx.state.typed_vgprs && ctx.dispatcher_spills == nullptr) {
+		// Typed F32 views created while emitting the branch body (of the branched selects, or of
+		// anything else in the region) do not dominate the merge. After it, a branched select's
+		// F32 view is its merge phi reinterpreted.
+		for (size_t index = region->first; index <= region->last; index++) {
+			ctx.typed_f32_values.erase(instructions[index]);
+		}
+		for (const auto* inst: region->selects) {
+			const auto view = Unary(ctx.state, spv::OpBitcast, TypeF32(ctx.state), ctx.Def(IR::Value(const_cast<IR::Inst*>(inst))));
+			ctx.typed_f32_values.insert_or_assign(inst, view);
+			ctx.typed_f32_availability.insert_or_assign(inst, true);
+		}
+	}
 	for (size_t index = region->last + 1u; index < instructions.size(); index++) {
 		EmitStructuredInstruction(ctx, structured, *instructions[index]);
 	}
