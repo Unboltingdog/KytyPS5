@@ -717,6 +717,10 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 					Libs::Graphics::GpuWaitStats::RecordEvent("rb:async-load-emulated");
 					return true;
 				}
+				if (unsupported != nullptr) {
+					const std::string reason = std::string("rb:async-fallthrough:") + unsupported;
+					Libs::Graphics::GpuWaitStats::RecordEvent(reason.c_str());
+				}
 			}
 		}
 		if (access == GpuAccess::Read &&

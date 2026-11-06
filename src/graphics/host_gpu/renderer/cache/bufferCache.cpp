@@ -509,7 +509,9 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool 
 			}
 		} else if (FastReadbackEnabled() && m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
 			// Its data is on the way in a proactive readback; wait for that one.
-			GpuWaitStats::Scope in_flight("proactive-readback-wait");
+			GpuWaitStats::Scope in_flight(cpu_fault ? (is_write ? "proactive-readback-wait:write-fault"
+			                                                  : "proactive-readback-wait:read-fault")
+			                                        : "proactive-readback-wait:non-fault");
 			(void)WaitProactiveReadbacks(vaddr, size);
 		}
 		if (is_write) {
