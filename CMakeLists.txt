@@ -495,7 +495,7 @@ add_executable(gpu_wait_stats_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GpuWaitStatsTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/gpuWaitStats.cpp"
 )
-target_link_libraries(gpu_wait_stats_tests common)
+target_link_libraries(gpu_wait_stats_tests common ${CMAKE_DL_LIBS})
 target_include_directories(gpu_wait_stats_tests PRIVATE ${inc_headers})
 
 add_executable(shader_vertex_metadata_tests EXCLUDE_FROM_ALL

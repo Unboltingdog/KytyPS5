@@ -163,12 +163,13 @@ private:
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
-	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size,
+	                                        uint64_t fault_vaddr = 0, uint64_t readback_size = 0);
 	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] static bool FastReadbackEnabled();
 	void               NoteGpuWrite(uint64_t vaddr, uint64_t size);
 	void               RetireProactiveReadbacks();
-	[[nodiscard]] bool WaitProactiveReadbacks(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool WaitProactiveReadbacks(uint64_t vaddr, uint64_t size, uint64_t readback_size);
 
 	// A queued readback; once the GPU finished it and its data reached guest memory, its range
 	// stops being GPU-modified, except the parts the GPU wrote again after it was recorded.

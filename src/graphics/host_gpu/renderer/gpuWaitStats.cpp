@@ -4,24 +4,54 @@
 #include "common/logging/log.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 namespace Libs::Graphics::GpuWaitStats {
 namespace {
 
 thread_local const char* t_reason = nullptr;
+thread_local uint64_t    t_exception_rva = 0;
 
 struct Totals {
 	uint64_t submits     = 0;
 	uint64_t waits       = 0;
 	uint64_t nanoseconds = 0;
 	uint64_t events      = 0;
+};
+
+constexpr size_t MaxReadbackWaits = 32;
+constexpr size_t MaxReadbackPages = 8;
+
+struct ReadbackPage {
+	uint64_t page        = 0;
+	uint64_t bytes       = 0;
+	uint64_t nanoseconds = 0;
+	uint64_t count       = 0;
+};
+
+struct ReadbackWait {
+	char                              reason[48] {};
+	uint64_t                          rva         = 0;
+	uint64_t                          nanoseconds = 0;
+	uint64_t                          count       = 0;
+	std::array<ReadbackPage, MaxReadbackPages> pages {};
 };
 
 struct State {
@@ -33,10 +63,26 @@ struct State {
 	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> shaders; // ns, count
 	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> pixel_shaders; // ns, count
 	std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> cpu;          // ns, count
+	std::array<ReadbackWait, MaxReadbackWaits>     readback_waits {};
 };
 
 // Nanoseconds this thread has spent in blocking GPU waits, so CPU timers can exclude them.
 thread_local uint64_t t_wait_ns = 0;
+
+uint64_t ModuleRelativeAddress(uint64_t instruction_address) noexcept {
+	if (!Enabled() || instruction_address == 0) return 0;
+#if defined(_WIN32)
+	const auto base = reinterpret_cast<uint64_t>(GetModuleHandle(nullptr));
+#else
+	Dl_info module {};
+	if (dladdr(reinterpret_cast<void*>(&ModuleRelativeAddress), &module) == 0 ||
+	    module.dli_fbase == nullptr) {
+		return 0;
+	}
+	const auto base = reinterpret_cast<uint64_t>(module.dli_fbase);
+#endif
+	return instruction_address >= base ? instruction_address - base : 0;
+}
 
 uint64_t NowNs() {
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -167,6 +213,53 @@ void MaybePrint(State& state) {
 		}
 		text += "\n";
 	}
+	if (std::any_of(state.readback_waits.begin(), state.readback_waits.end(),
+	                [](const auto& entry) { return entry.count != 0; })) {
+		std::vector<ReadbackWait> readbacks;
+		for (const auto& entry: state.readback_waits) {
+			if (entry.count != 0) readbacks.push_back(entry);
+		}
+		state.readback_waits = {};
+		std::sort(readbacks.begin(), readbacks.end(), [](const auto& a, const auto& b) {
+			if (a.nanoseconds != b.nanoseconds) return a.nanoseconds > b.nanoseconds;
+			const int reason_order = std::strcmp(a.reason, b.reason);
+			return reason_order != 0 ? reason_order < 0 : a.rva < b.rva;
+		});
+		std::string readback_text = "gpu-thread-readback top=";
+		for (size_t i = 0; i < readbacks.size() && i < 8; ++i) {
+			const auto& entry = readbacks[i];
+			char        rva[24];
+			if (entry.rva != 0) {
+				std::snprintf(rva, sizeof(rva), "0x%llx",
+				              static_cast<unsigned long long>(entry.rva));
+			} else {
+				std::snprintf(rva, sizeof(rva), "none");
+			}
+			char head[192];
+			std::snprintf(head, sizeof(head), " %s rva=%s wait_ms=%.1f waits=%llu pages=", entry.reason,
+			              rva, static_cast<double>(entry.nanoseconds) / 1e6,
+			              static_cast<unsigned long long>(entry.count));
+			readback_text += head;
+			std::vector<ReadbackPage> pages;
+			for (const auto& page: entry.pages) {
+				if (page.count != 0) pages.push_back(page);
+			}
+			std::sort(pages.begin(), pages.end(), [](const auto& a, const auto& b) {
+				return a.nanoseconds > b.nanoseconds;
+			});
+			for (size_t p = 0; p < pages.size(); ++p) {
+				char page[80];
+				std::snprintf(page, sizeof(page), "%s0x%llx+0x%llx(x%llu)", p != 0 ? "," : "",
+				              static_cast<unsigned long long>(pages[p].page),
+				              static_cast<unsigned long long>(pages[p].bytes),
+				              static_cast<unsigned long long>(pages[p].count));
+				readback_text += page;
+			}
+			readback_text += ";";
+		}
+		readback_text += "\n";
+		WriteDiag(readback_text.c_str());
+	}
 	Log::WriteToConsoleAndLog(text);
 }
 
@@ -190,12 +283,16 @@ bool ProfileEnabled() noexcept {
 	return enabled;
 }
 
-bool Enabled() noexcept {
+bool WaitStatsEnabled() noexcept {
 	static const bool enabled = [] {
 		const char* value = std::getenv("KYTY_WAIT_STATS");
-		return (value != nullptr && value[0] != '\0' && value[0] != '0') || ProfileEnabled();
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
 	}();
 	return enabled;
+}
+
+bool Enabled() noexcept {
+	return WaitStatsEnabled() || ProfileEnabled();
 }
 
 void RecordShaderTime(uint64_t key, bool pixel, uint64_t nanoseconds) noexcept {
@@ -252,6 +349,55 @@ void RecordFaultPage(uint64_t page, uint64_t bytes) noexcept {
 	entry.second += bytes;
 }
 
+void RecordGpuThreadReadbackWait(uint64_t page, uint64_t bytes, uint64_t nanoseconds) noexcept {
+	if (!WaitStatsEnabled()) return;
+	auto&            state = GetState();
+	std::scoped_lock lock {state.mutex};
+	const char*      reason = CurrentReason() != nullptr ? CurrentReason() : "none";
+	auto             entry  = std::find_if(state.readback_waits.begin(), state.readback_waits.end(),
+	                                      [&](const auto& candidate) {
+		                                      return candidate.count != 0 && candidate.rva == t_exception_rva &&
+		                                             std::strcmp(candidate.reason, reason) == 0;
+	                                      });
+	if (entry == state.readback_waits.end()) {
+		entry = std::find_if(state.readback_waits.begin(), state.readback_waits.end(),
+		                     [](const auto& candidate) { return candidate.count == 0; });
+	}
+	if (entry == state.readback_waits.end()) {
+		entry = std::min_element(state.readback_waits.begin(), state.readback_waits.end(),
+		                         [](const auto& a, const auto& b) {
+			                         return a.nanoseconds < b.nanoseconds;
+		                         });
+	}
+	if (entry->rva != t_exception_rva || entry->count == 0 ||
+	    std::strcmp(entry->reason, reason) != 0) {
+		*entry = ReadbackWait {};
+		std::snprintf(entry->reason, sizeof(entry->reason), "%s", reason);
+		entry->rva = t_exception_rva;
+	}
+	entry->nanoseconds += nanoseconds;
+	entry->count++;
+	auto page_entry = std::find_if(entry->pages.begin(), entry->pages.end(), [&](const auto& candidate) {
+		return candidate.count != 0 && candidate.page == page && candidate.bytes == bytes;
+	});
+	if (page_entry == entry->pages.end()) {
+		page_entry = std::find_if(entry->pages.begin(), entry->pages.end(),
+		                          [](const auto& candidate) { return candidate.count == 0; });
+	}
+	if (page_entry == entry->pages.end()) {
+		page_entry = std::min_element(entry->pages.begin(), entry->pages.end(),
+		                              [](const auto& a, const auto& b) {
+			                              return a.nanoseconds < b.nanoseconds;
+		                              });
+	}
+	if (page_entry->count == 0 || page_entry->page != page || page_entry->bytes != bytes) {
+		*page_entry = ReadbackPage {.page = page, .bytes = bytes};
+	}
+	page_entry->nanoseconds += nanoseconds;
+	page_entry->count++;
+	MaybePrint(state);
+}
+
 void RecordGpuBusy(uint64_t nanoseconds) noexcept {
 	if (!Enabled()) return;
 	auto&            state = GetState();
@@ -274,6 +420,14 @@ void WriteDiag(const char* text) noexcept {
 
 const char* CurrentReason() noexcept {
 	return t_reason;
+}
+
+ExceptionScope::ExceptionScope(uint64_t exception_address) noexcept: m_previous(t_exception_rva) {
+	t_exception_rva = ModuleRelativeAddress(exception_address);
+}
+
+ExceptionScope::~ExceptionScope() {
+	t_exception_rva = m_previous;
 }
 
 Scope::Scope(const char* reason) noexcept: m_previous(t_reason) {

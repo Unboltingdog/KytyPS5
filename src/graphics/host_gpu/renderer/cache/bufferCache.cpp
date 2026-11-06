@@ -165,7 +165,8 @@ void BufferCache::DeleteBuffer(BufferId id) {
 }
 
 template <bool async>
-bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size,
+                                       uint64_t fault_vaddr, uint64_t readback_size) {
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size     = 0;
 	const auto                  buffer_address = buffer.CpuAddress();
@@ -241,9 +242,19 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	if constexpr (async) {
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else {
-		const auto tick = m_scheduler.CurrentTick();
+		const auto tick           = m_scheduler.CurrentTick();
+		const bool attribute_wait = GpuWaitStats::WaitStatsEnabled() && GuestGpu::IsGpuThread();
+		std::chrono::steady_clock::time_point wait_begin;
+		if (attribute_wait) wait_begin = std::chrono::steady_clock::now();
 		m_scheduler.Wait(tick);
 		m_scheduler.WaitPriorityOperations(tick);
+		if (attribute_wait) {
+			GpuWaitStats::RecordGpuThreadReadbackWait(
+			    fault_vaddr & ~uint64_t {4095}, readback_size,
+			    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			        std::chrono::steady_clock::now() - wait_begin)
+			                              .count()));
+		}
 		publish();
 	}
 	return true;
@@ -531,8 +542,9 @@ void BufferCache::ReadMemorySync(uint64_t vaddr, uint64_t size, bool is_write, b
 			GpuWaitStats::RecordEvent(covered_by_proactive ? "rb:fault-covered-by-proactive"
 			                                              : "rb:fault-separate-download");
 		}
-		if (!covered_by_proactive && DownloadBufferMemory<false>(*request.buffer, request.start,
-		                                                         request.end - request.start)) {
+		if (!covered_by_proactive &&
+		    DownloadBufferMemory<false>(*request.buffer, request.start, request.end - request.start,
+		                                vaddr, request.end - request.start)) {
 			m_memory_tracker.UnmarkRegionAsGpuModified(request.start, request.end - request.start);
 			if (FastReadbackEnabled()) {
 				RetireProactiveReadbacks();
@@ -542,7 +554,7 @@ void BufferCache::ReadMemorySync(uint64_t vaddr, uint64_t size, bool is_write, b
 			GpuWaitStats::Scope in_flight(cpu_fault ? (is_write ? "proactive-readback-wait:write-fault"
 			                                                  : "proactive-readback-wait:read-fault")
 			                                        : "proactive-readback-wait:non-fault");
-			(void)WaitProactiveReadbacks(vaddr, size);
+			(void)WaitProactiveReadbacks(vaddr, size, request.end - request.start);
 		}
 		CompleteReadMemory(vaddr, size, is_write);
 	});
@@ -715,11 +727,21 @@ void BufferCache::RetireProactiveReadbacks() {
 	});
 }
 
-bool BufferCache::WaitProactiveReadbacks(uint64_t vaddr, uint64_t size) {
+bool BufferCache::WaitProactiveReadbacks(uint64_t vaddr, uint64_t size, uint64_t readback_size) {
+	const bool attribute_wait = GpuWaitStats::WaitStatsEnabled() && GuestGpu::IsGpuThread();
+	std::chrono::steady_clock::time_point wait_begin;
+	if (attribute_wait) wait_begin = std::chrono::steady_clock::now();
 	const auto begin = FaultReadback::Begin(m_readbacks_in_flight, vaddr, size,
 	                                        FaultReadback::WaitMode::Synchronous, m_scheduler);
 	if (begin.wait_tick == 0) {
 		return false;
+	}
+	if (attribute_wait) {
+		GpuWaitStats::RecordGpuThreadReadbackWait(
+		    vaddr & ~uint64_t {4095}, readback_size,
+		    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		        std::chrono::steady_clock::now() - wait_begin)
+		                              .count()));
 	}
 	RetireProactiveReadbacks();
 	return true;

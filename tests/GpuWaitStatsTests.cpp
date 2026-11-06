@@ -132,6 +132,36 @@ int main() {
 	      "wait-top included the sixth-ranked reason");
 	Check(wait_top.find("flush") == std::string::npos,
 	      "wait-top included an event instead of a wait reason");
+
+	{
+		Libs::Graphics::GpuWaitStats::Scope scope("gpu-readback-fast");
+		Libs::Graphics::GpuWaitStats::RecordGpuThreadReadbackWait(0x2000, 0x4000, 2'000'000);
+	}
+	{
+		Libs::Graphics::GpuWaitStats::Scope scope("gpu-readback-slow");
+		Libs::Graphics::GpuWaitStats::RecordGpuThreadReadbackWait(0x3000, 0x8000, 5'000'000);
+	}
+	std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+	Libs::Graphics::GpuWaitStats::RecordEvent("flush");
+	input.open("kyty-diag.txt");
+	Check(input.good(), "diagnostic log could not be reopened");
+	std::string gpu_readbacks;
+	uint32_t    gpu_readback_lines = 0;
+	while (std::getline(input, line)) {
+		if (line.starts_with("gpu-thread-readback top=")) {
+			gpu_readbacks = line;
+			gpu_readback_lines++;
+		}
+	}
+	input.close();
+	Check(gpu_readback_lines == 1, "synthetic waits did not produce exactly one readback line");
+	const auto slow = gpu_readbacks.find("gpu-readback-slow rva=none wait_ms=5.0 waits=1");
+	const auto fast = gpu_readbacks.find("gpu-readback-fast rva=none wait_ms=2.0 waits=1");
+	Check(slow != std::string::npos && fast != std::string::npos && slow < fast,
+	      "GPU-thread readbacks were not ordered by total wait time");
+	Check(gpu_readbacks.find("0x3000+0x8000") != std::string::npos &&
+	          gpu_readbacks.find("0x2000+0x4000") != std::string::npos,
+	      "GPU-thread readback pages or range sizes are missing");
 #if !defined(_WIN32)
 	std::remove("kyty-diag.txt");
 #endif
