@@ -28,6 +28,9 @@ struct GraphicContext {
 	vk::Device                         device                                = nullptr;
 	VmaAllocator                       allocator                             = nullptr;
 	bool                               memory_budget_ext_enabled             = false;
+	bool                               host_import_supported                = false;
+	bool                               host_import_enabled                  = false;
+	vk::DeviceSize                     min_imported_host_pointer_alignment  = 0;
 	bool                               compute_subgroup_size_control_enabled = false;
 	bool                               sample_rate_shading_enabled           = false;
 	bool                               shader_image_int64_atomics_enabled    = false;

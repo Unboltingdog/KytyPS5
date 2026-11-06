@@ -498,6 +498,11 @@ add_executable(gpu_wait_stats_tests EXCLUDE_FROM_ALL
 target_link_libraries(gpu_wait_stats_tests common ${CMAKE_DL_LIBS})
 target_include_directories(gpu_wait_stats_tests PRIVATE ${inc_headers})
 
+add_executable(host_import_probe_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/HostImportProbeTests.cpp"
+)
+target_include_directories(host_import_probe_tests PRIVATE ${inc_headers})
+
 add_executable(shader_vertex_metadata_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ShaderVertexMetadataTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
@@ -701,6 +706,7 @@ if(BUILD_TESTING)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
 	add_test(NAME gpu_wait_stats COMMAND $<TARGET_FILE:gpu_wait_stats_tests>)
+	add_test(NAME host_import_probe COMMAND $<TARGET_FILE:host_import_probe_tests>)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME build_flags COMMAND $<TARGET_FILE:build_flags_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
@@ -825,6 +831,7 @@ if(BUILD_TESTING)
 		image_page_table_tests
 		memory_tracker_tests
 		gpu_wait_stats_tests
+		host_import_probe_tests
 		page_manager_tests
 		build_flags_tests
 		archive_file_tests

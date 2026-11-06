@@ -6,6 +6,7 @@
 #include "common/threads.h"
 #include "common/virtualMemory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/hostImportProbe.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
@@ -2609,6 +2610,10 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 	}
 
 	MapGpuRange(out_addr, len);
+	if (g_gpu_resources != nullptr) {
+		Graphics::HostImportProbe::ProbeFirstDirectMapping(g_gpu_resources->GetGraphics(), out_addr,
+		                                                   len);
+	}
 
 	if (g_alloc_callback != nullptr) {
 		g_alloc_callback(out_addr, len);
