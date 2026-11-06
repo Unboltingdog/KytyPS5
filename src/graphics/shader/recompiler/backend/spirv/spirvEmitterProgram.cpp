@@ -450,6 +450,20 @@ void EmitStructuredBlock(ValueEmitContext& ctx, StructuredFunctionState& structu
 	}
 	const auto header = ctx.state.current_label;
 	const auto condition = ctx.Def(region->condition);
+	// The merge phis are U32. With KYTY_TYPED_VGPRS a bitcast or select whose U32 form is
+	// suppressed is defined as its F32 view, so give the phi the raw bits back.
+	const auto raw_u32 = [&](const IR::Value& value) {
+		const auto id = ctx.Def(value);
+		if (!ctx.state.typed_vgprs || ctx.dispatcher_spills != nullptr) return id;
+		const auto* source = value.Resolve().TryInstruction();
+		if (source == nullptr ||
+		    (source->GetOpcode() != IR::ValueOpcode::BitCastU32F32 &&
+		     source->GetOpcode() != IR::ValueOpcode::SelectU32) ||
+		    !SuppressTypedU32(ctx, *source)) {
+			return id;
+		}
+		return Unary(ctx.state, spv::OpBitcast, TypeU32(ctx.state), id);
+	};
 	// On the skipped path a select keeps its old value. When that old value is an earlier select of
 	// the same region, follow the chain to the value from before the region: the earlier select is
 	// only defined inside the branch, which does not dominate the header edge.
@@ -464,7 +478,7 @@ void EmitStructuredBlock(ValueEmitContext& ctx, StructuredFunctionState& structu
 			if (std::ranges::find(region->selects, earlier) == region->selects.end()) break;
 			old_value = earlier->Arg(2);
 		}
-		false_values.push_back(ctx.Def(old_value));
+		false_values.push_back(raw_u32(old_value));
 	}
 	const auto then_label = ctx.state.builder.AllocateId();
 	const auto merge_label = ctx.state.builder.AllocateId();
@@ -476,7 +490,7 @@ void EmitStructuredBlock(ValueEmitContext& ctx, StructuredFunctionState& structu
 	for (size_t index = region->first; index <= region->last; index++) {
 		const auto* inst = instructions[index];
 		if (std::ranges::find(region->selects, inst) != region->selects.end()) {
-			true_values.push_back(ctx.Arg(*inst, 1));
+			true_values.push_back(raw_u32(inst->Arg(1)));
 			ctx.Define(*inst, true_values.back());
 		} else {
 			EmitStructuredInstruction(ctx, structured, *inst);

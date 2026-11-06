@@ -54445,6 +54445,86 @@ void CheckSpirvTypedVgprsControlFlow() {
   std::printf("[host]    %-32s ok\n", name);
 }
 
+// PPSA26344 0x5a27a9665fe15588: with KYTY_TYPED_VGPRS and KYTY_IFCONV_LIMIT together, a branched
+// region's merge phi (U32) took the F32 view of a float result and the AMD driver crashed.
+void CheckSpirvIfConversionTyped() {
+  constexpr const char *name = "SpirvIfConversionTyped";
+  namespace IR = ShaderRecompiler::IR;
+  const auto compile = [] {
+    using namespace ShaderRecompiler;
+    IR::Program program;
+    program.stage = ShaderType::Compute;
+    program.wave_size = 32;
+    program.shader_hash = 0x13a7u;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    program.shader_info_complete = true;
+    program.info.inputs.push_back(
+        {IR::StageInputKind::LocalInvocationId, 0, 3, "gl_LocalInvocationID"});
+    auto *block = program.block_storage.emplace_back(std::make_unique<IR::Block>()).get();
+    program.blocks.push_back(block);
+    block->terminator.kind = ShaderRecompiler::CFG::TerminatorKind::Return;
+    const auto emit = [&](IR::ValueOpcode opcode, std::initializer_list<IR::Value> args) {
+      return IR::Value(&block->AppendNewInst(opcode, args));
+    };
+    const auto raw = emit(IR::ValueOpcode::GetBuiltin,
+                          {IR::Value(static_cast<uint32_t>(IR::StageInputKind::LocalInvocationId)),
+                           IR::Value(0u)});
+    const auto active = emit(IR::ValueOpcode::ULessThan32, {raw, IR::Value(64u)});
+    const auto seed = emit(IR::ValueOpcode::ConvertF32U32, {raw});
+    std::array<IR::Value, 3> olds{};
+    for (auto &old : olds) old = emit(IR::ValueOpcode::BitCastU32F32, {seed});
+    std::array<IR::Value, 3> selects{};
+    for (uint32_t index = 0; index < 3; index++) {
+      const auto product = emit(IR::ValueOpcode::FPMul32, {seed, seed});
+      const auto bits = emit(IR::ValueOpcode::BitCastU32F32, {product});
+      selects[index] = emit(IR::ValueOpcode::SelectU32, {active, bits, olds[index]});
+      if (index + 1 < 3) {
+        // The game's pattern: a later float op inside the region reads the earlier select.
+        const auto as_float = emit(IR::ValueOpcode::BitCastF32U32, {selects[index]});
+        (void)emit(IR::ValueOpcode::FPMul32, {as_float, seed});
+      }
+    }
+    for (const auto &selected : selects) {
+      const auto as_float = emit(IR::ValueOpcode::BitCastF32U32, {selected});
+      (void)emit(IR::ValueOpcode::FPAdd32, {as_float, seed});
+    }
+    ShaderComputeInputInfo compute{};
+    compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
+    return Spirv::EmitProgram(program, {.compute = &compute});
+  };
+  const auto set = [](const char *variable, const char *value) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+    return _putenv((std::string(variable) + "=" + (value != nullptr ? value : "")).c_str()) == 0;
+#else
+    return (value != nullptr ? setenv(variable, value, 1) : unsetenv(variable)) == 0;
+#endif
+  };
+  Require(name, "switches", set("KYTY_TYPED_VGPRS", "1") && set("KYTY_IFCONV_LIMIT", "1"),
+          "could not enable typed VGPRs and if-conversion");
+  ShaderRecompiler::Spirv::IfConversionLimit();
+  const auto both = compile();
+  Require(name, "limit", set("KYTY_IFCONV_LIMIT", "2"), "could not lower the if-conversion limit");
+  const auto branched = compile();
+  Require(name, "restore", set("KYTY_TYPED_VGPRS", nullptr) && set("KYTY_IFCONV_LIMIT", nullptr),
+          "could not restore the switches");
+  const auto merges = [](const std::vector<u32> &spirv) {
+    size_t result = 0;
+    for (size_t offset = 5; offset < spirv.size();) {
+      const auto words = spirv[offset] >> spv::WordCountShift;
+      if (words == 0) break;
+      result += (spirv[offset] & spv::OpCodeMask) == spv::OpSelectionMerge;
+      offset += words;
+    }
+    return result;
+  };
+  std::printf("[host]    %-32s merges=%zu\n", name, merges(branched));
+  ValidateSpirv(name, both);
+  ValidateSpirv(name, branched);
+  Require(name, "branched", merges(branched) != 0, "the typed region was not branched");
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckSpirvIfConversionLimit() {
   constexpr const char *name = "SpirvIfConversionLimit";
   const auto compile = [](uint32_t writes, bool cross_lane) {
@@ -54851,6 +54931,7 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--ifconv-limit-only") == 0) {
+    CheckSpirvIfConversionTyped();
     CheckSpirvIfConversionLimit();
     return 0;
   }
