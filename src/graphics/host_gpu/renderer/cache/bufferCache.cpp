@@ -487,6 +487,8 @@ BufferCache::ReadbackRequest BufferCache::PrepareReadMemory(uint64_t vaddr, uint
 		std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
 		m_readback_hot.Add(start, end - start);
 	}
+	const bool covered_by_proactive =
+	    FastReadbackEnabled() && cpu_fault && m_readback_pending.Contains(vaddr, size);
 	if (FastReadbackEnabled() && cpu_fault && !is_write) {
 		// PPSA26344: each frame the CPU reads ~60 GPU-written pages, one after another, and
 		// each read cost its own submission and full GPU wait. Since this read waits for the
@@ -494,7 +496,11 @@ BufferCache::ReadbackRequest BufferCache::PrepareReadMemory(uint64_t vaddr, uint
 		// in the same submission: the following reads find their data already there.
 		IssueProactiveReadbacks();
 	}
-	return {.buffer = &buffer, .start = start, .end = end, .complete = false};
+	return {.buffer = &buffer,
+	        .start = start,
+	        .end = end,
+	        .covered_by_proactive = covered_by_proactive,
+	        .complete = false};
 }
 
 void BufferCache::CompleteReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
@@ -515,8 +521,18 @@ void BufferCache::ReadMemorySync(uint64_t vaddr, uint64_t size, bool is_write, b
 		if (request.complete) {
 			return;
 		}
-		if (DownloadBufferMemory<false>(*request.buffer, request.start,
-		                               request.end - request.start)) {
+		const bool covered_by_proactive =
+		    request.covered_by_proactive &&
+		    std::any_of(m_readbacks_in_flight.begin(), m_readbacks_in_flight.end(),
+		                [&](const auto& readback) {
+			                return readback.begin < vaddr + size && vaddr < readback.end;
+		                });
+		if (cpu_fault) {
+			GpuWaitStats::RecordEvent(covered_by_proactive ? "rb:fault-covered-by-proactive"
+			                                              : "rb:fault-separate-download");
+		}
+		if (!covered_by_proactive && DownloadBufferMemory<false>(*request.buffer, request.start,
+		                                                         request.end - request.start)) {
 			m_memory_tracker.UnmarkRegionAsGpuModified(request.start, request.end - request.start);
 			if (FastReadbackEnabled()) {
 				RetireProactiveReadbacks();
@@ -556,6 +572,7 @@ void BufferCache::ReadMemoryFault(uint64_t vaddr, uint64_t size, bool is_write,
 		if (!begin.found_readback) {
 			break;
 		}
+		GpuWaitStats::RecordEvent("rb:fault-covered-by-proactive");
 
 		FaultReadback::Wait(begin.waits);
 		bool settled = false;

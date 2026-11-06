@@ -115,10 +115,11 @@ public:
 
 private:
 	struct ReadbackRequest {
-		Buffer*  buffer   = nullptr;
-		uint64_t start    = 0;
-		uint64_t end      = 0;
-		bool     complete = true;
+		Buffer*  buffer               = nullptr;
+		uint64_t start                = 0;
+		uint64_t end                  = 0;
+		bool     covered_by_proactive = false;
+		bool     complete             = true;
 	};
 
 	// The GPU-written run around a faulting range, clamped to the buffer, to read back at once.
