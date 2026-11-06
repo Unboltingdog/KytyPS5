@@ -987,7 +987,7 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
       m_next_driver_cache_save(std::chrono::steady_clock::now() + DriverCacheSaveInterval) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	InitializeDriverCache();
-	m_warm_up_store = shader_store;
+	m_warm_up_store = ShaderStorePathForHeader(graphics, shader_store);
 	if (AsyncGraphicsPipelinesEnabled()) {
 		const auto workers = std::max(1u, std::thread::hardware_concurrency() / 2u);
 		for (uint32_t index = 0; index < workers; ++index) {

@@ -1,5 +1,5 @@
 # Writes kytyShaderCacheVersion.h: a hash of every source that decides what the shader store
-# (_PipelineCache/<title>.shaders) holds and how it is read. The store is reused across emulator
+# (_PipelineCache/<title>.<hash16>.shaders) holds and how it is read. The store is reused across emulator
 # builds while this hash stays the same, and started over when it changes.
 #
 # Inputs: SOURCE_DIR (the repository root), OUTPUT_FILE.

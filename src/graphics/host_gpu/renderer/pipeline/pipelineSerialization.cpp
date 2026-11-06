@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <fmt/format.h>
 #include <ranges>
@@ -77,6 +78,61 @@ template <class S, class Module> void IoModule(S& io, Module& stage) {
 	auto& [id, handle, info, specialization, function_code, vertex_formats, rect_parameters,
 	       mesh_task, spirv_words, spirv_function_instructions] = stage;
 	IoAll(io, id, info, specialization, vertex_formats, rect_parameters, mesh_task);
+}
+
+} // namespace
+
+std::filesystem::path ShaderStorePathForHeader(const GraphicContext& graphics,
+                                               const std::filesystem::path& base) {
+	if (base.empty()) return {};
+	const auto header = StoreHeader(graphics);
+	const auto hash = XXH3_64bits(header.data(), header.size());
+	return base.parent_path() / fmt::format("{}.{:016x}.shaders", base.stem().string(), hash);
+}
+
+namespace {
+
+void PruneShaderStores(const std::filesystem::path& active) {
+	auto title = active.stem().string();
+	if (title.size() < 17) return;
+	title.resize(title.size() - 17);
+	const auto prefix = title + ".";
+	struct Candidate {
+		std::filesystem::path path;
+		std::filesystem::file_time_type write_time;
+	};
+	std::vector<Candidate> candidates;
+	std::error_code error;
+	for (std::filesystem::directory_iterator iter(active.parent_path(), error), end;
+	     !error && iter != end; iter.increment(error)) {
+		if (!iter->is_regular_file(error)) continue;
+		const auto name = iter->path().filename().string();
+		if (!name.starts_with(prefix) || !name.ends_with(".shaders") ||
+		    name.size() != prefix.size() + 16 + 8) {
+			continue;
+		}
+		const auto hash = std::string_view(name).substr(prefix.size(), 16);
+		if (!std::ranges::all_of(hash, [](char c) {
+			    return std::isxdigit(static_cast<unsigned char>(c));
+		    })) {
+			continue;
+		}
+		const auto write_time = iter->last_write_time(error);
+		if (!error) candidates.push_back({iter->path(), write_time});
+	}
+	std::ranges::sort(candidates, [](const auto& left, const auto& right) {
+		return left.write_time != right.write_time ? left.write_time > right.write_time
+		                                          : left.path < right.path;
+	});
+	size_t kept = 0;
+	for (const auto& candidate: candidates) {
+		if (candidate.path == active) continue;
+		if (kept < 3) {
+			++kept;
+			continue;
+		}
+		std::filesystem::remove(candidate.path, error);
+	}
 }
 
 } // namespace
@@ -202,6 +258,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	}
 	// A damaged record ends the store; the records before it stay.
 	m_store.Open(path, header, reusable ? bytes.size() - records.size() : 0);
+	if (m_store) PruneShaderStores(path);
 	std::string reason = bytes.empty() ? "new-store" : "ok";
 	if (!bytes.empty() && !reusable) {
 		uint64_t version = 0;

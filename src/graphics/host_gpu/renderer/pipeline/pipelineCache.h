@@ -349,6 +349,9 @@ private:
 // The shader store of the running title; empty when the shader cache is off (--no-shader-cache),
 // outside a Release build, or with debug dumps, which change the SPIR-V.
 std::filesystem::path ShaderStorePath();
+// Selects the store for the current codegen switches and host capabilities.
+std::filesystem::path ShaderStorePathForHeader(const GraphicContext& graphics,
+                                               const std::filesystem::path& base);
 // Host capabilities that change the emitted SPIR-V.
 ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics);
 

@@ -705,6 +705,10 @@ struct PipelineCacheTestAccess {
 
   static const auto &TessLayouts(const PipelineCache &cache) { return cache.m_tess_layouts; }
 
+  static const std::filesystem::path &StorePath(const PipelineCache &cache) {
+    return cache.m_warm_up_store;
+  }
+
   static std::string GraphicsVariantDiff(
       const GraphicsPipelineKey &key, const std::array<const ShaderModule *, 4> &stages,
       const GraphicsPipelineKey &previous_key,
@@ -48284,10 +48288,12 @@ void CheckShaderStore(VulkanHarness &vulkan) {
               LibKernel::Memory::KernelMapDirectMemory(&mapped, allocation_size, 0x3, 0x10,
                                                        direct_offset, 0x10000) == 0,
           "output allocation or mapping failed");
-  const auto store = std::filesystem::temp_directory_path() /
-                     fmt::format("kyty_shader_store_{}",
-                                 std::chrono::steady_clock::now().time_since_epoch().count()) /
-                     "TEST00000.shaders";
+  const auto store_base = std::filesystem::temp_directory_path() /
+                          fmt::format("kyty_shader_store_{}",
+                                      std::chrono::steady_clock::now().time_since_epoch().count()) /
+                          "TEST00000.shaders";
+  auto store = store_base;
+  std::filesystem::path actual_store;
 
   struct Session {
     std::array<size_t, 2> prewarmed{}, pipelines{};
@@ -48298,8 +48304,9 @@ void CheckShaderStore(VulkanHarness &vulkan) {
   // Dispatches the compute program and creates the graphics pipeline.
   const auto run = [&] {
     std::memset(mapped, 0, allocation_size);
-    RenderContext context(vulkan.RuntimeContext(), store);
+    RenderContext context(vulkan.RuntimeContext(), store_base);
     auto &pipelines = context.GetPipelineCache();
+    actual_store = PipelineCacheTestAccess::StorePath(pipelines);
     Session session{.prewarmed = PipelineCacheTestAccess::Pipelines(pipelines)};
     context.InitializeGpu(nullptr);
     LibKernel::Memory::InstallGpuResources(&context);
@@ -48349,6 +48356,7 @@ void CheckShaderStore(VulkanHarness &vulkan) {
   };
 
   const auto cold = run();
+  store = actual_store;
   const auto size = std::filesystem::file_size(store);
   Require(name, "cold start",
           cold.output == value && cold.prewarmed == std::array<size_t, 2>{} &&
@@ -48358,7 +48366,8 @@ void CheckShaderStore(VulkanHarness &vulkan) {
   auto warm = cold;
   warm.prewarmed = cold.pipelines;
   warm.compiled = {};
-  Require(name, "warm restart", run() == warm && std::filesystem::file_size(store) == size,
+  Require(name, "warm restart",
+          run() == warm && actual_store == store && std::filesystem::file_size(store) == size,
           "a restart compiled a module, created a pipeline late or rewrote the store");
   std::filesystem::resize_file(store, size + 3);
   Require(name, "torn tail", run() == warm && std::filesystem::file_size(store) == size,
@@ -48380,12 +48389,25 @@ void CheckShaderStore(VulkanHarness &vulkan) {
           "a damaged record was loaded or not replaced");
   flip(0);
   Require(name, "stale store", run() == cold && std::filesystem::file_size(store) == size,
-          "a store with another header was reused instead of started over");
+          "a store with a corrupt header was reused instead of started over");
+  std::vector<uint8_t> original(size);
+  Common::File(store, Common::File::Mode::Read).Read(original.data(), static_cast<u32>(size));
+  auto &clock = vulkan.RuntimeContext().device_clock_period_ps;
+  const auto saved_clock = clock++;
+  const auto different_store_run = run();
+  const auto different_store = actual_store;
+  clock = saved_clock;
+  std::vector<uint8_t> preserved(size);
+  Common::File(store, Common::File::Mode::Read).Read(preserved.data(), static_cast<u32>(size));
+  Require(name, "header-specific stores",
+          different_store_run == cold && different_store != store &&
+              std::filesystem::file_size(different_store) == size && preserved == original,
+          "a changed header replaced the old store instead of creating its own store");
   // Reflecting a layout decodes LS and HS, so a restart takes it from the store. Records land
   // while the cache lives; one still queued at its destruction lands before it is gone.
   const ShaderTessellationInputInfo layout{1, 2, 3, 4, 5, 6, 7, 8, 9};
   {
-    RenderContext context(vulkan.RuntimeContext(), store);
+    RenderContext context(vulkan.RuntimeContext(), store_base);
     auto &cache = context.GetPipelineCache();
     PipelineCacheTestAccess::StoreLayout(cache, 1, layout);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -48397,7 +48419,7 @@ void CheckShaderStore(VulkanHarness &vulkan) {
     PipelineCacheTestAccess::StoreLayout(cache, 2, layout);
   }
   {
-    RenderContext context(vulkan.RuntimeContext(), store);
+    RenderContext context(vulkan.RuntimeContext(), store_base);
     const auto &layouts = PipelineCacheTestAccess::TessLayouts(context.GetPipelineCache());
     Require(name, "tessellation layout",
             layouts.contains(1) && std::memcmp(&layouts.at(1), &layout, sizeof(layout)) == 0,
@@ -48405,7 +48427,7 @@ void CheckShaderStore(VulkanHarness &vulkan) {
     Require(name, "drain at exit", layouts.contains(2),
             "a record still queued when the cache was destroyed was dropped");
   }
-  std::filesystem::remove_all(store.parent_path());
+  std::filesystem::remove_all(store_base.parent_path());
   Require(name, "release",
           LibKernel::Memory::KernelMunmap(base, allocation_size) == 0 &&
               LibKernel::Memory::KernelReleaseDirectMemory(direct_offset, allocation_size) == 0,
