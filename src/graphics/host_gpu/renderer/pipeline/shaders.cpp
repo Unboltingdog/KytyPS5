@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
@@ -419,7 +420,16 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		LOGF("PipelineTrace: vkCreateGraphicsPipelines done result=%s pipeline=%p\n",
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess) {
+		for (const auto* stage: stages) {
+			if (stage != nullptr) {
+				DumpFatalShaderSpirv(ShaderRecompiler::StageName(stage->info.stage),
+				                     stage->info.shader_hash, stage->spirv);
+			}
+		}
+		EXIT("Vulkan graphics pipeline creation failed: %s (%d)\n", vk::to_string(result).c_str(),
+		     static_cast<int>(result));
+	}
 
 	graphics.device.destroyShaderModule(tess_control_shader_module, nullptr);
 	graphics.device.destroyShaderModule(tess_eval_shader_module, nullptr);
@@ -459,7 +469,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 	auto result = graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
 	                                                  &pipeline.pipeline_layout);
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess) {
+		DumpFatalShaderSpirv(ShaderRecompiler::StageName(module.info.stage),
+		                     module.info.shader_hash, module.spirv);
+		EXIT("Vulkan compute pipeline layout creation failed: %s (%d)\n",
+		     vk::to_string(result).c_str(), static_cast<int>(result));
+	}
 
 	vk::ComputePipelineCreateInfo info {};
 	if (module.info.info.uses_gds) {
@@ -473,7 +488,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 	result = graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr,
 	                                                &pipeline.pipeline);
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess) {
+		DumpFatalShaderSpirv(ShaderRecompiler::StageName(module.info.stage),
+		                     module.info.shader_hash, module.spirv);
+		EXIT("Vulkan compute pipeline creation failed: %s (%d)\n", vk::to_string(result).c_str(),
+		     static_cast<int>(result));
+	}
 }
 
 } // namespace Libs::Graphics

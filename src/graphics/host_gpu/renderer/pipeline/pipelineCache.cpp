@@ -264,6 +264,22 @@ void DumpShader(std::span<const uint32_t> words, const std::string& name, uint64
 	}
 }
 
+} // namespace
+
+void DumpFatalShaderSpirv(const char* stage, uint64_t shader_hash,
+                          std::span<const uint32_t> spirv) {
+	const auto path = std::filesystem::path("shader-dumps") /
+	                  fmt::format("{}_{:016x}_fatal.spv", stage, shader_hash);
+	Common::File::CreateDirectories(path.parent_path());
+	Common::File file(path);
+	if (file.IsInvalid()) {
+		const auto path_text = Common::PathToString(path);
+		LOGF_COLOR(Log::Color::BrightRed, "Can't create file: %s\n", path_text.c_str());
+		return;
+	}
+	file.Write(spirv.data(), spirv.size_bytes());
+}
+
 void ValidateShaderSpirv(const char* stage, uint64_t shader_hash,
                          const std::vector<uint32_t>& spirv, bool maintenance8_enabled) {
 	if (!Config::ShaderValidationEnabled()) {
@@ -282,6 +298,7 @@ void ValidateShaderSpirv(const char* stage, uint64_t shader_hash,
 	if (tools.Validate(spirv.data(), spirv.size(), validator_options)) {
 		return;
 	}
+	DumpFatalShaderSpirv(stage, shader_hash, spirv);
 	spvtools::SpirvTools disassembler(SPV_ENV_VULKAN_1_2);
 	std::string          text;
 	disassembler.Disassemble(spirv, &text,
@@ -294,6 +311,8 @@ void ValidateShaderSpirv(const char* stage, uint64_t shader_hash,
 	EXIT("ShaderRecompiler %s SPIR-V validation failed hash=0x%016" PRIx64 ":\n%s", stage,
 	     shader_hash, messages.c_str());
 }
+
+namespace {
 
 // Formats with a narrower host variant drop the components the shader does not read.
 vk::Format NarrowInputFormat(vk::Format format, uint32_t used_components) {
@@ -607,6 +626,7 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	if (program.call_source == nullptr) {
 		StoreModule(key, program, module, result.spirv);
 	}
+	module.spirv = std::move(result.spirv);
 	return module;
 }
 

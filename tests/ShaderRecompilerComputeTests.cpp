@@ -90,6 +90,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
 #include <limits>
 #include <map>
@@ -51393,6 +51395,33 @@ void CheckNativeImageDescriptorTypes() {
 
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
 void CheckShaderRecompilerFatalContracts() {
+  constexpr uint64_t validation_hash = 0xdeadbeefu;
+  const std::filesystem::path dump_path =
+      std::filesystem::path("shader-dumps") / "CS_00000000deadbeef_fatal.spv";
+  std::remove("kyty-diag.txt");
+  std::filesystem::remove(dump_path);
+  ExpectFatal("ShaderValidationFatalDiagnostics", [&] {
+    Config::Load({.shader_validation_enabled = true});
+    ValidateShaderSpirv("CS", validation_hash, {spv::MagicNumber}, false);
+  });
+  std::ifstream diag("kyty-diag.txt");
+  const std::string diag_text((std::istreambuf_iterator<char>(diag)),
+                              std::istreambuf_iterator<char>());
+  Require("ShaderValidationFatalDiagnostics", "diag line",
+          diag_text.find("fatal ShaderRecompiler CS SPIR-V validation failed "
+                         "hash=0x00000000deadbeef:") != std::string::npos,
+          "validation failure did not reach kyty-diag.txt");
+  std::ifstream dump(dump_path, std::ios::binary);
+  uint32_t dumped_magic = 0;
+  dump.read(reinterpret_cast<char *>(&dumped_magic), sizeof(dumped_magic));
+  Require("ShaderValidationFatalDiagnostics", "SPIR-V dump",
+          dump.good() && dumped_magic == spv::MagicNumber &&
+              dump.peek() == std::ifstream::traits_type::eof(),
+          "validation failure did not dump the rejected SPIR-V");
+  dump.close();
+  std::filesystem::remove(dump_path);
+  std::remove("kyty-diag.txt");
+
   ExpectFatal("InvalidDescriptorBindingRejection", [] {
     (void)NativeDescriptorType(
         ShaderRecompiler::IR::DescriptorBindingKind::Count);

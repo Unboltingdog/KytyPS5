@@ -76,7 +76,7 @@ template <class S, class Key> void IoKey(S& io, Key& key) {
 template <class S, class Module> void IoModule(S& io, Module& stage) {
 	// The handle comes from the SPIR-V; stored programs have no function code.
 	auto& [id, handle, info, specialization, function_code, vertex_formats, rect_parameters,
-	       mesh_task, spirv_words, spirv_function_instructions] = stage;
+	       mesh_task, spirv_words, spirv_function_instructions, spirv] = stage;
 	IoAll(io, id, info, specialization, vertex_formats, rect_parameters, mesh_task);
 }
 
@@ -382,6 +382,7 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 			if (module.module == nullptr) {
 				return false;
 			}
+			module.spirv = std::move(spirv);
 			program->second.modules.push_back(std::move(module));
 			break;
 		}
