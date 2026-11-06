@@ -56,6 +56,16 @@ inline bool NoTableUnrollEnabled() {
 	const char* value = std::getenv("KYTY_NO_TABLE_UNROLL");
 	return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
+// KYTY_HEAP_ONLY_LARGE_TABLES=N: never inline more than N candidates; 1 selects 64, 0 is off.
+inline uint32_t HeapOnlyLargeTablesLimit() {
+	const char* value = std::getenv("KYTY_HEAP_ONLY_LARGE_TABLES");
+	if (value == nullptr || value[0] == '\0' || value[0] == '0') return 0u;
+	if (value[0] == '1' && value[1] == '\0') return 64u;
+	char*      end = nullptr;
+	const auto parsed = std::strtoul(value, &end, 10);
+	return end != value && *end == '\0' && parsed != 0 && parsed <= UINT32_MAX
+	    ? static_cast<uint32_t>(parsed) : 64u;
+}
 void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg,
                     ShaderStageInputInfo input);
 

@@ -86,6 +86,16 @@ bool SetImageHeapCapacity1M(bool enabled) {
 #endif
 }
 
+bool SetHeapOnlyLargeTables(const char *value) {
+#if defined(_WIN32)
+  const std::string setting = std::string("KYTY_HEAP_ONLY_LARGE_TABLES=") + value;
+  return _putenv(setting.c_str()) == 0;
+#else
+  return value[0] != '\0' ? setenv("KYTY_HEAP_ONLY_LARGE_TABLES", value, 1) == 0
+                          : unsetenv("KYTY_HEAP_ONLY_LARGE_TABLES") == 0;
+#endif
+}
+
 uint32_t CheckKeyCountClamp(const Program &program) {
   std::vector<const Inst *> clamps;
   for (const auto *block : program.blocks) {
@@ -634,6 +644,56 @@ void TestResidentImageHeap() {
             snapshot.images.size() == 2u && !specialization.images[0].heap &&
             snapshot.images[1].dwords == descriptor,
         "a declined heap was not materialized entry by entry");
+}
+
+void TestHeapOnlyLargeImageTable() {
+  constexpr uint32_t candidates = 2639u;
+  auto fixture = MakeIndirectImageFixture(false, 48u, 0u, 16u);
+  fixture->PlanAndTrack();
+  const auto plan = ExtractResourcePlan(fixture->program);
+  std::array<uint32_t, 8> descriptor{};
+  descriptor[0] = 0x20u;
+  descriptor[1] = static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+  descriptor[2] = 3u | (3u << 14u);
+  descriptor[3] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+      (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  std::array<uint32_t, 16> data{0x3000u, 4u << 16u, 0x100000u, 0u,
+                                0x2000u, 16u << 16u, candidates, 0u};
+  std::copy_n(data.begin(), 4u, data.begin() + 12u);
+  LinearTestMemory memory;
+  memory.fail_address = 0x3000u;
+  memory.watched_address = 0x2000u;
+  memory.words.resize((0x2000u + candidates * 16u - memory.base) / 4u);
+  std::copy(descriptor.begin(), descriptor.end(), memory.words.begin() + 0x1010u / 4u);
+  FakeImageHeap heap;
+  heap.kinds = {{descriptor, 8u}};
+  SrtRuntime runtime{.user_data = data, .userdata = &memory,
+                     .read_specialization_memory = ReadLinearTestMemory, .image_heap = &heap};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(SetHeapOnlyLargeTables("1") && HeapOnlyLargeTablesLimit() == 64u,
+        "could not select the default large-table limit");
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            heap.requests.size() == 1u && heap.requests[0].count == candidates &&
+            heap.requests[0].size == candidates * 16u && specialization.images[0].heap &&
+            specialization.images.size() == 2u && snapshot.images.size() == 2u &&
+            memory.watched_reads == 0u,
+        "a 2639-entry image table did not produce one heap binding and its typed kinds");
+  heap.accept = false;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization) &&
+            memory.watched_reads == 0u && snapshot.images.size() == 1u,
+        "a declined large heap was enumerated inline instead of skipped");
+  LargeTableSkip skipped;
+  Check(TakeLargeTableSkip(skipped) && skipped.resource == 0u &&
+            std::string_view(skipped.kind) == "image" && skipped.candidates == candidates &&
+            skipped.limit == 64u && skipped.table_size == candidates * 16u &&
+            !TakeLargeTableSkip(skipped),
+        "large-table skip diagnostics lost its candidate count or table size");
+  Check(SetHeapOnlyLargeTables("") && HeapOnlyLargeTablesLimit() == 0u &&
+            MaterializeResources(plan, runtime, snapshot, specialization) &&
+            memory.watched_reads == 1u && snapshot.images.size() == 2u &&
+            !specialization.images[0].heap,
+        "the default switch state did not preserve inline enumeration");
 }
 
 void TestResidentSamplerHeap() {
@@ -9541,6 +9601,7 @@ int main() {
     Run("invariant indirect images", [] { TestInvariantIndirectImageMaterialization(true); });
     Run("unbounded material image keys", [] { TestInvariantIndirectImageMaterialization(false); });
     Run("resident image heap", TestResidentImageHeap);
+    Run("heap-only large image table", TestHeapOnlyLargeImageTable);
     Run("resident sampler heap", TestResidentSamplerHeap);
     Run("workgroup image heap counts", TestWorkgroupImageHeapSkipsCounts);
     Run("image heap kinds", TestImageHeapKinds);

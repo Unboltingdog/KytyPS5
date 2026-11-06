@@ -44,6 +44,8 @@ thread_local std::string t_no_stall_failure;
 // KYTY_WAIT_STATS: time spent running SRT walkers on this thread (see TakeWalkNanoseconds()).
 thread_local uint64_t t_walk_ns = 0;
 thread_local std::vector<HeapFallback> t_heap_fallbacks;
+thread_local LargeTableSkip t_large_table_skip {};
+thread_local bool t_large_table_skipped = false;
 struct WalkTimer {
 	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 	~WalkTimer() {
@@ -89,6 +91,13 @@ uint64_t TakeWalkNanoseconds() {
 
 std::vector<HeapFallback> TakeHeapFallbacks() {
 	return std::exchange(t_heap_fallbacks, {});
+}
+
+bool TakeLargeTableSkip(LargeTableSkip& skip) {
+	if (!t_large_table_skipped) return false;
+	skip = t_large_table_skip;
+	t_large_table_skipped = false;
+	return true;
 }
 
 std::string ResourceSpecializationDiff(const ResourceSpecialization& before,
@@ -817,6 +826,14 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 			fallback_reason = nullptr;
 		}
 	};
+	const auto reject_large = [&](uint64_t candidates) {
+		const auto limit = HeapOnlyLargeTablesLimit();
+		if (limit == 0u || candidates <= limit) return false;
+		t_large_table_skip = {image_resource ? "image" : sampler_resource ? "sampler" : "buffer",
+		                      resource_index, candidates, limit, table_size};
+		t_large_table_skipped = true;
+		return true;
+	};
 	const auto failed = [&](std::string_view reason, std::string_view details = {}) {
 		const auto* pointer = indirect.pointer_table ? &*indirect.pointer_table : nullptr;
 		return SpecializationFail(fmt::format(
@@ -995,6 +1012,10 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 				}
 			}
 			note_fallback();
+			if (reject_large(count * child_count))
+				return failed("heap-only large table",
+				              fmt::format("rows={} children={} limit={}", count, child_count,
+				                          HeapOnlyLargeTablesLimit()));
 			if (child_count == 0u || (!runtime_heap && count * child_count > MaxIndirectDescriptorProbes))
 				return failed("candidate count", fmt::format("rows={} limit={}", count, MaxIndirectDescriptorProbes));
 			// Affine SMEM offsets wrap in U32 before adding the aligned immediate.
@@ -1106,6 +1127,9 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	                                    : std::span<const uint32_t>(keys);
 	const auto key_count = sources.empty() ? selected_keys.size() : sources.size();
 	note_fallback();
+	if (reject_large(key_count))
+		return failed("heap-only large table",
+		              fmt::format("keys={} limit={}", key_count, HeapOnlyLargeTablesLimit()));
 	snapshot.flattened_srt.resize(mapping_offset + 1u + key_count * 2u);
 	snapshot.flattened_srt[mapping_offset] = static_cast<uint32_t>(key_count);
 	for (uint32_t entry = 0; entry < key_count; ++entry) {
@@ -1923,6 +1947,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	t_specialization_read_deferred = false;
+	t_large_table_skipped = false;
 	(void)TakeHeapFallbacks();
 	for (auto& keys: program.selector_keys) keys.resolved = false;
 	if (!program.resource_tracking_complete) return false;

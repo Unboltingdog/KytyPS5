@@ -81,6 +81,15 @@ struct HeapFallback {
 };
 // Tables materialized inline despite heap eligibility on this thread since the last call.
 std::vector<HeapFallback> TakeHeapFallbacks();
+struct LargeTableSkip {
+	const char* kind;
+	uint32_t    resource;
+	uint64_t    candidates;
+	uint32_t    limit;
+	uint64_t    table_size;
+};
+// The large inline table rejected on this thread since the last call, if any.
+bool TakeLargeTableSkip(LargeTableSkip& skip);
 // The first failure a KYTY_WALKER_NO_STALL materialization reported on this thread, then clears it.
 std::string TakeNoStallFailure();
 // KYTY_WALKER_NO_STALL: whether the read in progress may be refused when the GPU has written its

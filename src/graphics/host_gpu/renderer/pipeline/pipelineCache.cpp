@@ -183,6 +183,19 @@ bool MaterializeTimed(const ShaderRecompiler::IR::ResourcePlan&     plan,
 	(void)ShaderRecompiler::IR::TakeWalkNanoseconds();
 	const bool result = MaterializeWithoutStall(plan, runtime, snapshot, specialization);
 	GpuWaitStats::RecordCpuTime("program:materialize:walker", ShaderRecompiler::IR::TakeWalkNanoseconds());
+	ShaderRecompiler::IR::LargeTableSkip large_table;
+	if (ShaderRecompiler::IR::TakeLargeTableSkip(large_table)) {
+		static std::mutex                   mutex;
+		static std::unordered_set<uint64_t> logged;
+		std::scoped_lock                    lock(mutex);
+		if (logged.insert(plan.shader_hash).second) {
+			PipelineCacheLog(
+			    "shader=0x{:016x} reason=heap-only-large-table kind={} resource={} candidates={} "
+			    "limit={} table_size={}; skipping draw or dispatch",
+			    plan.shader_hash, large_table.kind, large_table.resource, large_table.candidates,
+			    large_table.limit, large_table.table_size);
+		}
+	}
 	if (GpuWaitStats::Enabled()) {
 		static std::mutex                    mutex;
 		static std::unordered_set<std::string> logged;

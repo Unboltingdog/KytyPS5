@@ -52,6 +52,8 @@ std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
 	    (ShaderRecompiler::IR::StableSrtLayoutEnabled() ? uint64_t {0xa54ff53a5f1d36f1} : 0u) ^
 	    (ShaderRecompiler::IR::StableGraphicsSpecEnabled() ? uint64_t {0x1b873593c2b6f35d} : 0u) ^
 	    (ShaderRecompiler::IR::NoTableUnrollEnabled() ? uint64_t {0x243f6a8885a308d3} : 0u) ^
+	    (uint64_t {ShaderRecompiler::IR::HeapOnlyLargeTablesLimit()} *
+	     uint64_t {0x13198a2e03707344}) ^
 	    (ShaderRecompiler::IR::ImageHeapCapacity1MEnabled() ? uint64_t {0xbb67ae8584caa73b} : 0u);
 	Writer         header;
 	IoAll(header, version, SpirvProfile(graphics),
