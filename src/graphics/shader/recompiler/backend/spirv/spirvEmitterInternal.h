@@ -22,6 +22,7 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -92,6 +93,8 @@ struct EmitterState {
 	ShaderStageInputInfo                             input_info;
 	const Profile&                                      profile;
 	bool                                              typed_vgprs = TypedVgprsEnabled();
+	uint32_t                                        ifconv_limit = IfConversionLimit();
+	std::unordered_set<const IR::Inst*>               ifconv_branched_selects;
 	uint32_t                                        debug_source = 0;
 	uint32_t                                        void_type = 0;
 	uint32_t                                        bool_type = 0;

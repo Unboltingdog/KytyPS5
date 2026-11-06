@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include "common/assert.h"
+#include "graphics/shader/recompiler/backend/spirv/IfConversionAnalysis.h"
 
 #include <algorithm>
 #include <bit>
@@ -327,6 +328,156 @@ void EmitBlock(ValueEmitContext& ctx, const IR::Block* block, EmitInstruction&& 
 	}
 }
 
+struct IfConversionRegion {
+	size_t                     first = 0;
+	size_t                     last  = 0;
+	IR::Value                  condition;
+	std::vector<const IR::Inst*> selects;
+};
+
+std::optional<IfConversionRegion> PlanIfConversion(ValueEmitContext& ctx,
+                                                   const IR::Block* block) {
+	if (ctx.state.ifconv_limit == 0u || ctx.state.lane_count != 1u) {
+		return std::nullopt;
+	}
+	std::vector<const IR::Inst*> instructions;
+	for (const auto& inst: *block) {
+		if (inst.GetOpcode() != IR::ValueOpcode::Phi) {
+			instructions.push_back(&inst);
+		}
+	}
+	std::optional<IfConversionRegion> best;
+	const auto consider = [&](std::optional<IfConversionRegion> candidate) {
+		if (!candidate || candidate->selects.size() < 2u ||
+		    candidate->last - candidate->first + 1u <= ctx.state.ifconv_limit) {
+			return;
+		}
+		const auto condition_inst = candidate->condition.Resolve().TryInstruction();
+		if (condition_inst != nullptr && condition_inst->Parent() == block &&
+		    std::ranges::find(instructions.begin() + candidate->first,
+		                      instructions.begin() + candidate->last + 1u, condition_inst) !=
+		        instructions.begin() + candidate->last + 1u) {
+			return;
+		}
+		for (size_t index = candidate->first; index <= candidate->last; index++) {
+			const auto* inst = instructions[index];
+			const bool selected = std::ranges::find(candidate->selects, inst) != candidate->selects.end();
+			if (selected) {
+				const auto* old = inst->Arg(2).Resolve().TryInstruction();
+				if (old != nullptr && old->Parent() == block &&
+				    std::ranges::find(instructions.begin() + candidate->first,
+				                      instructions.begin() + candidate->last + 1u, old) !=
+				        instructions.begin() + candidate->last + 1u &&
+				    std::ranges::find(candidate->selects, old) == candidate->selects.end()) {
+					return;
+				}
+				continue;
+			}
+			if (inst->MayHaveSideEffects() || IfConversionUnsafeOpcode(inst->GetOpcode()) ||
+			    block->condition.Resolve().TryInstruction() == inst ||
+			    block->indirect_target.Resolve().TryInstruction() == inst) {
+				return;
+			}
+			for (const auto& use: inst->Uses()) {
+				const auto* user = use.user;
+				if (user->Parent() != block ||
+				    std::ranges::find(instructions.begin() + candidate->first,
+				                      instructions.begin() + candidate->last + 1u, user) ==
+				        instructions.begin() + candidate->last + 1u) {
+					return;
+				}
+			}
+		}
+		if (!best || candidate->last - candidate->first > best->last - best->first) {
+			best = std::move(candidate);
+		}
+	};
+	IfConversionRegion current;
+	const auto flush = [&] {
+		if (!current.condition.IsEmpty()) {
+			consider(std::move(current));
+		}
+		current = {};
+	};
+	for (size_t index = 0; index < instructions.size(); index++) {
+		const auto* inst = instructions[index];
+		if (inst->GetOpcode() != IR::ValueOpcode::SelectU32) {
+			continue;
+		}
+		const auto condition = inst->Arg(0).Resolve();
+		if (current.condition.IsEmpty() || condition != current.condition) {
+			flush();
+			current.first     = index;
+			current.condition = condition;
+		}
+		current.last = index;
+		current.selects.push_back(inst);
+	}
+	flush();
+	if (best) {
+		ctx.state.ifconv_branched_selects.insert(best->selects.begin(), best->selects.end());
+	}
+	return best;
+}
+
+void EmitStructuredBlock(ValueEmitContext& ctx, StructuredFunctionState& structured,
+                         const IR::Block* block) {
+	const auto region = PlanIfConversion(ctx, block);
+	if (!region) {
+		EmitBlock(ctx, block, [&](ValueEmitContext& lane, const IR::Inst& inst) {
+			EmitStructuredInstruction(lane, structured, inst);
+		});
+		return;
+	}
+	std::vector<const IR::Inst*> instructions;
+	for (const auto& inst: *block) {
+		if (inst.GetOpcode() != IR::ValueOpcode::Phi) {
+			instructions.push_back(&inst);
+		}
+	}
+	ctx.state.current_block = block;
+	EmitLabel(ctx.state, block->Definition());
+	for (const auto& inst: *block) {
+		if (inst.GetOpcode() == IR::ValueOpcode::Phi) {
+			EmitStructuredInstruction(ctx, structured, inst);
+		}
+	}
+	for (size_t index = 0; index < region->first; index++) {
+		EmitStructuredInstruction(ctx, structured, *instructions[index]);
+	}
+	const auto header = ctx.state.current_label;
+	const auto condition = ctx.Def(region->condition);
+	const auto then_label = ctx.state.builder.AllocateId();
+	const auto merge_label = ctx.state.builder.AllocateId();
+	ctx.state.builder.AddFunction(spv::OpSelectionMerge, merge_label, spv::SelectionControlMaskNone);
+	ctx.state.builder.AddFunction(spv::OpBranchConditional, condition, then_label, merge_label);
+	EmitLabel(ctx.state, then_label);
+	std::vector<uint32_t> true_values;
+	true_values.reserve(region->selects.size());
+	for (size_t index = region->first; index <= region->last; index++) {
+		const auto* inst = instructions[index];
+		if (std::ranges::find(region->selects, inst) != region->selects.end()) {
+			true_values.push_back(ctx.Arg(*inst, 1));
+			ctx.Define(*inst, true_values.back());
+		} else {
+			EmitStructuredInstruction(ctx, structured, *inst);
+		}
+	}
+	const auto then_exit = ctx.state.current_label;
+	ctx.state.builder.AddFunction(spv::OpBranch, merge_label);
+	EmitLabel(ctx.state, merge_label);
+	for (size_t index = 0; index < region->selects.size(); index++) {
+		const auto* inst = region->selects[index];
+		const auto phi = ctx.state.builder.AllocateId();
+		ctx.state.builder.AddFunction(spv::OpPhi, TypeU32(ctx.state), phi, true_values[index],
+		                              then_exit, ctx.Arg(*inst, 2), header);
+		inst->SetDefinition(0, phi);
+	}
+	for (size_t index = region->last + 1u; index < instructions.size(); index++) {
+		EmitStructuredInstruction(ctx, structured, *instructions[index]);
+	}
+}
+
 void PatchStructuredPhis(ValueEmitContext& ctx, StructuredFunctionState& structured) {
 	for (const auto& deferred: structured.deferred_phis) {
 		auto& lane = deferred.half == 0 ? ctx : *ctx.other_half;
@@ -348,9 +499,7 @@ void EmitStructuredFunction(ValueEmitContext& ctx) {
 	ctx.state.builder.AddFunction(spv::OpBranch, program.blocks.front()->Definition());
 	for (size_t index = 0; index < program.blocks.size(); index++) {
 		const auto* block = program.blocks[index];
-		EmitBlock(ctx, block, [&](ValueEmitContext& lane, const IR::Inst& inst) {
-			EmitStructuredInstruction(lane, structured, inst);
-		});
+		EmitStructuredBlock(ctx, structured, block);
 		structured.block_exit_labels.emplace(block, ctx.state.current_label);
 		EmitStructuredTerminator(ctx, block);
 	}

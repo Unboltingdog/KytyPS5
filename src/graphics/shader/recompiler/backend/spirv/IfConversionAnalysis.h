@@ -11,6 +11,7 @@ struct IfConversionShape {
 	uint64_t unsafe_regions   = 0;
 };
 
+bool             IfConversionUnsafeOpcode(IR::ValueOpcode opcode);
 IfConversionShape AnalyzeIfConversion(const IR::Program& program);
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv

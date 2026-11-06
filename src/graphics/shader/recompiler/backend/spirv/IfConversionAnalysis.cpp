@@ -27,6 +27,10 @@ bool UnsafeOpcode(IR::ValueOpcode opcode) {
 
 } // namespace
 
+bool IfConversionUnsafeOpcode(IR::ValueOpcode opcode) {
+	return UnsafeOpcode(opcode);
+}
+
 IfConversionShape AnalyzeIfConversion(const IR::Program& program) {
 	IfConversionShape result;
 	for (const auto* block: program.blocks) {

@@ -49,6 +49,7 @@
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvOptions.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
@@ -54087,6 +54088,87 @@ void CheckSpirvTypedVgprs() {
   std::printf("[host]    %-32s ok\n", name);
 }
 
+void CheckSpirvIfConversionLimit() {
+  constexpr const char *name = "SpirvIfConversionLimit";
+  const auto compile = [](uint32_t writes, bool cross_lane) {
+    using namespace ShaderRecompiler;
+    IR::Program program;
+    program.stage = ShaderType::Compute;
+    program.wave_size = 32;
+    program.shader_hash = 0x13a3u;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    program.shader_info_complete = true;
+    program.info.inputs.push_back(
+        {IR::StageInputKind::LocalInvocationId, 0, 3, "gl_LocalInvocationID"});
+    auto *block = program.block_storage.emplace_back(std::make_unique<IR::Block>()).get();
+    program.blocks.push_back(block);
+    block->terminator.kind = ShaderRecompiler::CFG::TerminatorKind::Return;
+    const auto emit = [&](IR::ValueOpcode opcode, std::initializer_list<IR::Value> args) {
+      return IR::Value(&block->AppendNewInst(opcode, args));
+    };
+    const auto raw = emit(IR::ValueOpcode::GetBuiltin,
+                          {IR::Value(static_cast<uint32_t>(IR::StageInputKind::LocalInvocationId)),
+                           IR::Value(0u)});
+    const auto active = emit(IR::ValueOpcode::ULessThan32, {raw, IR::Value(64u)});
+    auto previous = raw;
+    for (uint32_t index = 0; index < writes; index++) {
+      if (cross_lane && index == 1) {
+        emit(IR::ValueOpcode::ReadLane, {previous, IR::Value(0u)});
+      }
+      const auto next = emit(IR::ValueOpcode::IAdd32, {previous, raw});
+      previous = emit(IR::ValueOpcode::SelectU32, {active, next, previous});
+    }
+    ShaderComputeInputInfo compute{};
+    compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
+    return Spirv::EmitProgram(program, {.compute = &compute});
+  };
+  const auto count = [](const std::vector<u32> &spirv, spv::Op opcode) {
+    size_t result = 0;
+    for (size_t offset = 5; offset < spirv.size();) {
+      const auto words = spirv[offset] >> spv::WordCountShift;
+      Require("SpirvIfConversionLimit", "instruction bounds",
+              words != 0 && offset + words <= spirv.size(), "malformed emitted SPIR-V");
+      result += (spirv[offset] & spv::OpCodeMask) == opcode;
+      offset += words;
+    }
+    return result;
+  };
+  const auto set_limit = [&](const char *value) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+    const std::string setting = std::string("KYTY_IFCONV_LIMIT=") + (value != nullptr ? value : "");
+    return _putenv(setting.c_str()) == 0;
+#else
+    return (value != nullptr ? setenv("KYTY_IFCONV_LIMIT", value, 1)
+                             : unsetenv("KYTY_IFCONV_LIMIT")) == 0;
+#endif
+  };
+  Require(name, "disable limit", set_limit(nullptr), "could not disable if-conversion limit");
+  const auto legacy_under = compile(2, false);
+  const auto legacy_over = compile(3, false);
+  Require(name, "explicit limit", set_limit("4"), "could not set if-conversion limit");
+  const auto under = compile(2, false);
+  const auto over = compile(3, false);
+  const auto unsafe = compile(3, true);
+  Require(name, "under limit unchanged", under == legacy_under,
+          "a region under the limit changed its emitted SPIR-V");
+  Require(name, "over limit branch",
+          count(over, spv::OpSelectionMerge) == 1 &&
+              count(over, spv::OpBranchConditional) == 1 && count(over, spv::OpPhi) == 3 &&
+              count(over, spv::OpSelect) == 0 && count(legacy_over, spv::OpSelect) == 3,
+          "the over-limit region did not replace its three selects with phis");
+  Require(name, "cross lane fallback",
+          count(unsafe, spv::OpSelectionMerge) == 0 && count(unsafe, spv::OpSelect) == 3,
+          "a cross-lane region was branched instead of retaining selects");
+  Require(name, "default limit spelling", set_limit("1") && ShaderRecompiler::Spirv::IfConversionLimit() == 32,
+          "KYTY_IFCONV_LIMIT=1 did not select the default of 32");
+  Require(name, "restore limit", set_limit(nullptr), "could not restore if-conversion default");
+  ValidateSpirv(name, legacy_under);
+  ValidateSpirv(name, over);
+  ValidateSpirv(name, unsafe);
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckPm4LodStats(RenderContext &renderer) {
   constexpr const char *name = "Pm4LodStats";
   GraphicsInitJmpTables();
@@ -54298,6 +54380,10 @@ int main(int argc, char **argv) {
   CheckLeastRecentlyUsedCacheOrdering();
   if (argc == 2 && std::strcmp(argv[1], "--typed-vgprs-only") == 0) {
     CheckSpirvTypedVgprs();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--ifconv-limit-only") == 0) {
+    CheckSpirvIfConversionLimit();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--mul-hi24-only") == 0) {

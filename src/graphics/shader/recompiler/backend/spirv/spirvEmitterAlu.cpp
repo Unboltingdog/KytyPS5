@@ -41,7 +41,8 @@ bool HasTypedF32View(ValueEmitContext& ctx, IR::Value value) {
 	}
 	bool available = inst->GetOpcode() == IR::ValueOpcode::BitCastU32F32;
 	if (inst->GetOpcode() == IR::ValueOpcode::SelectU32) {
-		available = HasTypedF32View(ctx, inst->Arg(1)) && HasTypedF32View(ctx, inst->Arg(2));
+		available = !ctx.state.ifconv_branched_selects.contains(inst) &&
+		            HasTypedF32View(ctx, inst->Arg(1)) && HasTypedF32View(ctx, inst->Arg(2));
 	}
 	ctx.typed_f32_availability.insert_or_assign(inst, available);
 	return available;
