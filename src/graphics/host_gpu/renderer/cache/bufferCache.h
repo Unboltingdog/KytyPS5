@@ -114,9 +114,22 @@ public:
 	void               RunGarbageCollector();
 
 private:
+	struct ReadbackRequest {
+		Buffer*  buffer   = nullptr;
+		uint64_t start    = 0;
+		uint64_t end      = 0;
+		bool     complete = true;
+	};
+
 	// The GPU-written run around a faulting range, clamped to the buffer, to read back at once.
 	[[nodiscard]] std::pair<uint64_t, uint64_t> ReadbackRange(const Buffer& buffer, uint64_t vaddr,
 	                                                          uint64_t size) const;
+	[[nodiscard]] ReadbackRequest PrepareReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
+	                                                bool cpu_fault, const char* caller_reason);
+	void CompleteReadMemory(uint64_t vaddr, uint64_t size, bool is_write);
+	void ReadMemorySync(uint64_t vaddr, uint64_t size, bool is_write, bool cpu_fault,
+	                    const char* caller_reason);
+	void ReadMemoryFault(uint64_t vaddr, uint64_t size, bool is_write, const char* caller_reason);
 	friend struct BufferCacheTestAccess;
 
 	bool IsBufferInvalid(BufferId id) const { return !id || m_slot_buffers[id].is_deleted; }

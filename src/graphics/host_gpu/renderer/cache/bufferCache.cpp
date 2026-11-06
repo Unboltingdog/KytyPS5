@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/gpuWaitStats.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/cache/faultReadback.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -445,65 +446,78 @@ bool BufferCache::StaleReadsEnabled() {
 	return enabled;
 }
 
-void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool cpu_fault) {
-	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
-		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
-		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
-		     vaddr, size);
+BufferCache::ReadbackRequest BufferCache::PrepareReadMemory(uint64_t vaddr, uint64_t size,
+                                                            bool is_write, bool cpu_fault,
+                                                            const char* caller_reason) {
+	GpuWaitStats::Scope reason(caller_reason != nullptr ? caller_reason
+	                           : is_write               ? "cpu-write-readback"
+	                                                    : "cpu-read-readback");
+	if (is_write && !IsRegionRegistered(vaddr, size)) {
+		return {};
 	}
-	const char* caller_reason = GpuWaitStats::CurrentReason();
+	if (FastReadbackEnabled()) {
+		RetireProactiveReadbacks();
+		if (!m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
+			GpuWaitStats::RecordEvent("rb:fault-already-read-back");
+			// A proactive readback already brought the data to guest memory.
+			CompleteReadMemory(vaddr, size, is_write);
+			return {};
+		}
+	}
+	auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
+
+	// PPSA26344: the CPU writes across GPU-written memory page by page, and each page fault
+	// cost a submission and a full GPU wait (about 6,000 a second, 3 fps). Download the whole
+	// GPU-written run around the faulting page, up to ReadbackWindow each side, at once.
+	auto [start, end] = ReadbackRange(buffer, vaddr, size);
+	if (cpu_fault) {
+		// Is the byte the CPU touched one the GPU wrote, or does it only share the page?
+		GpuWaitStats::RecordEvent(m_gpu_modified_ranges.Intersects(vaddr, size)
+		                              ? (is_write ? "rb:write-byte-gpu-written"
+		                                          : "rb:read-byte-gpu-written")
+		                              : (is_write ? "rb:write-byte-only-shares-page"
+		                                          : "rb:read-byte-only-shares-page"));
+		GpuWaitStats::RecordFaultPage((vaddr & ~uint64_t {4095}) | (is_write ? 1u : 0u), end - start);
+	}
+	if (FastReadbackEnabled() && cpu_fault && !is_write) {
+		GpuWaitStats::RecordEvent(m_readback_hot.Intersects(vaddr, size)
+		                              ? "rb:read-fault-on-hot-range"
+		                              : "rb:read-fault-new-range");
+		// The CPU reads this memory: read it back ahead of time once the GPU rewrites it.
+		std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
+		m_readback_hot.Add(start, end - start);
+	}
+	if (FastReadbackEnabled() && cpu_fault && !is_write) {
+		// PPSA26344: each frame the CPU reads ~60 GPU-written pages, one after another, and
+		// each read cost its own submission and full GPU wait. Since this read waits for the
+		// GPU anyway, bring back every other page the CPU reads that the GPU has rewritten
+		// in the same submission: the following reads find their data already there.
+		IssueProactiveReadbacks();
+	}
+	return {.buffer = &buffer, .start = start, .end = end, .complete = false};
+}
+
+void BufferCache::CompleteReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
+	if (is_write) {
+		m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
+		QueueBdaSync(vaddr, size);
+	}
+}
+
+void BufferCache::ReadMemorySync(uint64_t vaddr, uint64_t size, bool is_write, bool cpu_fault,
+                                 const char* caller_reason) {
 	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, cpu_fault,
 	                                                caller_reason] {
 		GpuWaitStats::Scope reason(caller_reason != nullptr ? caller_reason
 		                           : is_write               ? "cpu-write-readback"
 		                                                    : "cpu-read-readback");
-		if (is_write && !IsRegionRegistered(vaddr, size)) {
+		auto request = PrepareReadMemory(vaddr, size, is_write, cpu_fault, caller_reason);
+		if (request.complete) {
 			return;
 		}
-		if (FastReadbackEnabled()) {
-			RetireProactiveReadbacks();
-			if (!m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
-				GpuWaitStats::RecordEvent("rb:fault-already-read-back");
-				// A proactive readback already brought the data to guest memory.
-				if (is_write) {
-					m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
-					QueueBdaSync(vaddr, size);
-				}
-				return;
-			}
-		}
-		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
-
-		// PPSA26344: the CPU writes across GPU-written memory page by page, and each page fault
-		// cost a submission and a full GPU wait (about 6,000 a second, 3 fps). Download the whole
-		// GPU-written run around the faulting page, up to ReadbackWindow each side, at once.
-		auto [start, end] = ReadbackRange(buffer, vaddr, size);
-		if (cpu_fault) {
-			// Is the byte the CPU touched one the GPU wrote, or does it only share the page?
-			GpuWaitStats::RecordEvent(m_gpu_modified_ranges.Intersects(vaddr, size)
-			                              ? (is_write ? "rb:write-byte-gpu-written"
-			                                          : "rb:read-byte-gpu-written")
-			                              : (is_write ? "rb:write-byte-only-shares-page"
-			                                          : "rb:read-byte-only-shares-page"));
-			GpuWaitStats::RecordFaultPage((vaddr & ~uint64_t {4095}) | (is_write ? 1u : 0u), end - start);
-		}
-		if (FastReadbackEnabled() && cpu_fault && !is_write) {
-			GpuWaitStats::RecordEvent(m_readback_hot.Intersects(vaddr, size)
-			                              ? "rb:read-fault-on-hot-range"
-			                              : "rb:read-fault-new-range");
-			// The CPU reads this memory: read it back ahead of time once the GPU rewrites it.
-			std::scoped_lock ranges_lock {m_gpu_ranges_mutex};
-			m_readback_hot.Add(start, end - start);
-		}
-		if (FastReadbackEnabled() && cpu_fault && !is_write) {
-			// PPSA26344: each frame the CPU reads ~60 GPU-written pages, one after another, and
-			// each read cost its own submission and full GPU wait. Since this read waits for the
-			// GPU anyway, bring back every other page the CPU reads that the GPU has rewritten
-			// in the same submission: the following reads find their data already there.
-			IssueProactiveReadbacks();
-		}
-		if (DownloadBufferMemory<false>(buffer, start, end - start)) {
-			m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
+		if (DownloadBufferMemory<false>(*request.buffer, request.start,
+		                               request.end - request.start)) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(request.start, request.end - request.start);
 			if (FastReadbackEnabled()) {
 				RetireProactiveReadbacks();
 			}
@@ -514,11 +528,71 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool 
 			                                        : "proactive-readback-wait:non-fault");
 			(void)WaitProactiveReadbacks(vaddr, size);
 		}
-		if (is_write) {
-			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
-			QueueBdaSync(vaddr, size);
-		}
+		CompleteReadMemory(vaddr, size, is_write);
 	});
+}
+
+void BufferCache::ReadMemoryFault(uint64_t vaddr, uint64_t size, bool is_write,
+                                  const char* caller_reason) {
+	constexpr uint32_t MaxAttempts = 3;
+	for (uint32_t attempt = 0; attempt < MaxAttempts; ++attempt) {
+		FaultReadback::BeginResult begin;
+		bool                       complete = false;
+		m_scheduler.Context().GetGpu().SendCommandSync([&] {
+			GpuWaitStats::Scope reason(caller_reason != nullptr ? caller_reason
+			                           : is_write               ? "cpu-write-readback"
+			                                                    : "cpu-read-readback");
+			auto request = PrepareReadMemory(vaddr, size, is_write, true, caller_reason);
+			if (request.complete) {
+				complete = true;
+				return;
+			}
+			begin = FaultReadback::Begin(m_readbacks_in_flight, vaddr, size,
+			                             FaultReadback::WaitMode::OffGpu, m_scheduler);
+		});
+		if (complete) {
+			return;
+		}
+		if (!begin.found_readback) {
+			break;
+		}
+
+		FaultReadback::Wait(begin.waits);
+		bool settled = false;
+		m_scheduler.Context().GetGpu().SendCommandSync([&] {
+			GpuWaitStats::Scope reason(caller_reason != nullptr ? caller_reason
+			                           : is_write               ? "cpu-write-readback"
+			                                                    : "cpu-read-readback");
+			RetireProactiveReadbacks();
+			if (m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
+				return;
+			}
+			CompleteReadMemory(vaddr, size, is_write);
+			settled = true;
+		});
+		if (settled) {
+			return;
+		}
+		GpuWaitStats::RecordEvent("rb:fault-wait-retry");
+	}
+	GpuWaitStats::RecordEvent("rb:fault-wait-fallback");
+	ReadMemorySync(vaddr, size, is_write, true, caller_reason);
+}
+
+void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool cpu_fault) {
+	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
+		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
+		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
+		     vaddr, size);
+	}
+	const char* caller_reason = GpuWaitStats::CurrentReason();
+	const auto  mode = FaultReadback::GetWaitMode(cpu_fault, GuestGpu::IsGpuThread(),
+	                                             CommandScheduler::InDeferredOperation());
+	if (mode == FaultReadback::WaitMode::OffGpu) {
+		ReadMemoryFault(vaddr, size, is_write, caller_reason);
+	} else {
+		ReadMemorySync(vaddr, size, is_write, cpu_fault, caller_reason);
+	}
 }
 
 // KYTY_NO_FAST_READBACK=1 turns proactive readbacks off.
@@ -625,17 +699,11 @@ void BufferCache::RetireProactiveReadbacks() {
 }
 
 bool BufferCache::WaitProactiveReadbacks(uint64_t vaddr, uint64_t size) {
-	uint64_t tick = 0;
-	for (const auto& readback: m_readbacks_in_flight) {
-		if (readback.begin < vaddr + size && vaddr < readback.end) {
-			tick = std::max(tick, readback.tick);
-		}
-	}
-	if (tick == 0) {
+	const auto begin = FaultReadback::Begin(m_readbacks_in_flight, vaddr, size,
+	                                        FaultReadback::WaitMode::Synchronous, m_scheduler);
+	if (begin.wait_tick == 0) {
 		return false;
 	}
-	m_scheduler.Wait(tick);
-	m_scheduler.WaitPriorityOperations(tick);
 	RetireProactiveReadbacks();
 	return true;
 }
