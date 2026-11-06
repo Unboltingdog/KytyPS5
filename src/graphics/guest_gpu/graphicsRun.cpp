@@ -686,6 +686,117 @@ void CommandProcessor::SuspendPm4() {
 	g_current_execution->m_suspended = true;
 }
 
+static uint32_t PipelineLookaheadLimit() {
+	static const uint32_t limit = [] {
+		const char* value = std::getenv("KYTY_PIPELINE_LOOKAHEAD");
+		if (value == nullptr || value[0] == '\0' || value[0] == '0') return 0u;
+		char* end = nullptr;
+		const auto parsed = std::strtoul(value, &end, 10);
+		if (end == value || *end != '\0' || parsed == 0) return 0u;
+		if (parsed == 1) return 256u;
+		return static_cast<uint32_t>(std::min<unsigned long>(parsed, UINT32_MAX));
+	}();
+	return limit;
+}
+
+void CommandProcessor::QueueComputeLookahead(std::span<const uint32_t> commands) {
+	const auto limit = PipelineLookaheadLimit();
+	if (limit == 0) return;
+	auto shader = m_sh_ctx;
+	size_t offset = 0;
+	for (uint32_t scanned = 0; scanned < limit && offset < commands.size(); ++scanned) {
+		const auto header = commands[offset];
+		if (header == 0x80000000u || Pm4::PacketSizeDw(header) == 1u) {
+			++offset;
+			continue;
+		}
+		const auto packet_dw = Pm4::PacketSizeDw(header);
+		if (packet_dw < 2 || packet_dw > commands.size() - offset) break;
+		const auto opcode = (header >> 8u) & 0xffu;
+		if ((header & 1u) != 0 && ShouldSkipPredicatedPackets()) {
+			offset += packet_dw;
+			continue;
+		}
+		if (opcode == Pm4::IT_SET_SH_REG_INDIRECT || opcode == Pm4::IT_CLEAR_STATE ||
+		    opcode == Pm4::IT_INDIRECT_BUFFER || opcode == Pm4::IT_REWIND ||
+		    opcode == Pm4::IT_SET_PREDICATION || opcode == Pm4::IT_COND_EXEC ||
+		    (opcode == Pm4::IT_NOP && (KYTY_PM4_R(header) == Pm4::R_CONTEXT_STATE ||
+		                              KYTY_PM4_R(header) == Pm4::R_DISPATCH_RESET))) {
+			break;
+		}
+		if (opcode == Pm4::IT_SET_SH_REG) {
+			const auto first = commands[offset + 1u];
+			const auto count = packet_dw - 2u;
+			for (uint32_t index = 0; index < count; ++index) {
+				const auto reg = first + index;
+				const auto value = commands[offset + 2u + index];
+				if (reg >= Pm4::COMPUTE_USER_DATA_0 && reg <= Pm4::COMPUTE_USER_DATA_15) {
+					shader.SetCsUserSgpr(reg - Pm4::COMPUTE_USER_DATA_0, value);
+					continue;
+				}
+				switch (reg) {
+					case Pm4::COMPUTE_PGM_LO:
+					case Pm4::COMPUTE_PGM_HI:
+					case Pm4::COMPUTE_PGM_RSRC1:
+					case Pm4::COMPUTE_PGM_RSRC2:
+					case Pm4::COMPUTE_PGM_RSRC3:
+					case Pm4::COMPUTE_NUM_THREAD_X:
+					case Pm4::COMPUTE_NUM_THREAD_Y:
+					case Pm4::COMPUTE_NUM_THREAD_Z:
+						SetCsRegister(shader, reg, value);
+						break;
+					default: break;
+				}
+			}
+			offset += packet_dw;
+			continue;
+		}
+		if (opcode == Pm4::IT_DISPATCH_DIRECT || opcode == Pm4::IT_DISPATCH_INDIRECT) {
+			const auto cmd_id = header & ~1u;
+			const bool direct = opcode == Pm4::IT_DISPATCH_DIRECT;
+			if ((direct && cmd_id != 0xc0031500u) ||
+			    (!direct && cmd_id != 0xc0011600u && cmd_id != 0xc0021600u)) {
+				break;
+			}
+			const auto mode = commands[offset + (direct ? 4u : (cmd_id == 0xc0021600u ? 3u : 2u))];
+			shader.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+			if (shader.GetCs().cs_regs.data_addr == 0) {
+				offset += packet_dw;
+				continue;
+			}
+			ShaderComputeInputInfo input {};
+			input.async_compute = IsAsyncComputeQueue();
+			bool resolvable = true;
+			if (direct) {
+				input.workgroup_counts[0] = commands[offset + 1u];
+				input.workgroup_counts[1] = commands[offset + 2u];
+				input.workgroup_counts[2] = commands[offset + 3u];
+				input.dispatch_thread_dimensions =
+				    (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+				if (input.dispatch_thread_dimensions) {
+					const auto& cs = shader.GetCs().cs_regs;
+					const uint32_t sizes[] = {cs.num_thread_x, cs.num_thread_y, cs.num_thread_z};
+					for (uint32_t axis = 0; axis < 3u; ++axis) {
+						const auto size = std::max(sizes[axis], 1u);
+						const auto threads = input.workgroup_counts[axis];
+						input.workgroup_counts[axis] = threads / size + (threads % size != 0u);
+					}
+				}
+			} else if (cmd_id == 0xc0021600u &&
+			           (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) == 0) {
+				input.indirect_args_address = commands[offset + 1u] |
+				    (static_cast<uint64_t>(commands[offset + 2u]) << 32u);
+			} else {
+				resolvable = false;
+			}
+			if (resolvable) {
+				m_renderer.GetPipelineCache().QueueComputePipelineAhead(shader.GetCs(), input);
+			}
+		}
+		offset += packet_dw;
+	}
+}
+
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	while (!execution.m_buffer_stack.empty()) {
 		if (g_gpu_state != nullptr) {
@@ -764,6 +875,9 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		}
 		cursor.offset_dw += packet_dw;
 		execution.m_made_progress = true;
+		if (opcode == Pm4::IT_DISPATCH_DIRECT || opcode == Pm4::IT_DISPATCH_INDIRECT) {
+			QueueComputeLookahead(cursor.commands.subspan(cursor.offset_dw));
+		}
 		if (!execution.m_next_buffer.empty()) {
 			// Chains and taken branches reuse the fetcher; only calls retain a return cursor.
 			if (execution.m_chain) {

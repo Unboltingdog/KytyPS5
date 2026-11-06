@@ -92,6 +92,7 @@ public:
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z,
 	                    uint32_t mode);
 	void DispatchIndirect(uint64_t args_addr, uint32_t mode);
+	static void SetCsRegister(HW::Shader& shader, uint32_t cmd_offset, uint32_t value);
 	void WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index);
 	void ProcessPssr(const Pssr::Request& request);
 	void TriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address = 0);
@@ -120,7 +121,10 @@ public:
 	[[nodiscard]] bool     IsAsyncComputeQueue() const { return m_interrupt_event_id >= 0x20; }
 
 private:
+	friend struct CommandProcessorTestAccess;
+
 	void ProcessPm4(Pm4Execution& execution);
+	void QueueComputeLookahead(std::span<const uint32_t> commands);
 	void SuspendPm4();
 	uint32_t            NumInstances();
 	const void*         IndexAddress(uint32_t first_index) const;

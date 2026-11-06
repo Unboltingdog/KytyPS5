@@ -719,6 +719,28 @@ struct PipelineCacheTestAccess {
   static std::array<size_t, 2> Pipelines(const PipelineCache &cache) {
     return {cache.m_graphics_pipelines.size(), cache.m_compute_pipelines.size()};
   }
+
+  static void ClearComputePipelines(PipelineCache &cache) {
+    auto &device = cache.m_graphics.device;
+    for (auto &[id, pipeline] : cache.m_compute_pipelines) {
+      device.destroyPipeline(pipeline.pipeline, nullptr);
+      device.destroyPipelineLayout(pipeline.pipeline_layout, nullptr);
+      device.destroyDescriptorSetLayout(pipeline.descriptor_set_layout, nullptr);
+    }
+    cache.m_compute_pipelines.clear();
+  }
+
+  static size_t PendingCompute(PipelineCache &cache) {
+    std::scoped_lock lock(cache.m_async_mutex);
+    return cache.m_compute_async_pending.size();
+  }
+};
+
+struct CommandProcessorTestAccess {
+  static void QueueComputeLookahead(CommandProcessor &processor,
+                                    std::span<const uint32_t> commands) {
+    processor.QueueComputeLookahead(commands);
+  }
 };
 
 namespace {
@@ -48435,6 +48457,66 @@ void CheckShaderStore(VulkanHarness &vulkan) {
   std::printf("[gpu]     %-32s ok\n", name);
 }
 
+void CheckPipelineLookahead(VulkanHarness &vulkan) {
+  constexpr const char *name = "PipelineLookahead";
+  std::array<std::vector<u32>, 3> codes;
+  for (u32 index = 0; index < codes.size(); index++) {
+    AppendVMovU32(&codes[index], 1, 7 + index);
+    AppendEnd(&codes[index]);
+    ShaderMapUserData(reinterpret_cast<uint64_t>(codes[index].data()),
+        {.type = Prospero::ShaderBinaryType::kCs,
+         .code_size_bytes = static_cast<u32>(codes[index].size() * sizeof(u32))});
+  }
+  const auto regs_for = [](const std::vector<u32> &code) {
+    HW::ComputeShaderInfo regs{};
+    regs.cs_regs.data_addr = reinterpret_cast<uint64_t>(code.data());
+    regs.cs_regs.num_thread_x = 1;
+    regs.cs_regs.num_thread_y = 1;
+    regs.cs_regs.num_thread_z = 1;
+    regs.cs_regs.wave_size = 64;
+    return regs;
+  };
+  RenderContext context(vulkan.RuntimeContext());
+  auto &cache = context.GetPipelineCache();
+  for (const auto &code : codes) {
+    ShaderComputeInputInfo input{};
+    Require(name, "seed module", cache.GetComputeProgram(regs_for(code), input) != nullptr,
+            "a simple compute module was not compiled");
+    Require(name, "seed pipeline", cache.GetComputePipeline(input) != nullptr,
+            "a seeded compute pipeline was not created");
+  }
+  PipelineCacheTestAccess::ClearComputePipelines(cache);
+  Require(name, "empty pipelines", PipelineCacheTestAccess::PendingCompute(cache) == 0,
+          "seeded pipeline builds did not drain");
+
+  ShaderComputeInputInfo current{};
+  const auto current_regs = regs_for(codes[0]);
+  Require(name, "current dispatch",
+          cache.GetComputeProgram(current_regs, current) != nullptr &&
+              PipelineCacheTestAccess::PendingCompute(cache) == 1,
+          "the first dispatch did not queue its pipeline");
+  CommandProcessor processor(context, 0);
+  processor.GetShCtx().SetCsShader(current_regs.cs_regs);
+  std::vector<u32> commands{KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, 0), 1, 1, 1, 0x41};
+  const auto append_dispatch = [&commands](const std::vector<u32> &code) {
+    const auto address = reinterpret_cast<uint64_t>(code.data());
+    const std::array<u32, 11> packet{
+        KYTY_PM4(3, Pm4::IT_SET_SH_REG, 0), Pm4::COMPUTE_PGM_LO,
+        static_cast<u32>(address >> 8u),
+        KYTY_PM4(3, Pm4::IT_SET_SH_REG, 0), Pm4::COMPUTE_PGM_HI,
+        static_cast<u32>((address >> 40u) & 0xffu),
+        KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, 0), 1, 1, 1, 0x41};
+    commands.insert(commands.end(), packet.begin(), packet.end());
+  };
+  append_dispatch(codes[1]);
+  append_dispatch(codes[2]);
+  CommandProcessorTestAccess::QueueComputeLookahead(processor,
+      std::span<const u32>(commands).subspan(5));
+  Require(name, "three queued", PipelineCacheTestAccess::PendingCompute(cache) == 3,
+          "look-ahead did not queue both later pipelines with the first dispatch");
+  std::printf("[gpu]     %-32s ok\n", name);
+}
+
 void CheckPs5GameExampleImageClearRuntimeShape() {
   const auto MakeCode = [] {
     std::vector<u32> code;
@@ -54602,6 +54684,15 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--program-id-only") == 0) {
     VulkanHarness vulkan;
     CheckStableProgramIds(vulkan);
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--pipeline-lookahead-only") == 0) {
+    Require("PipelineLookahead", "switches",
+            setenv("KYTY_ASYNC_PIPELINES", "1", 1) == 0 &&
+                setenv("KYTY_PIPELINE_LOOKAHEAD", "1", 1) == 0,
+            "could not enable asynchronous pipelines and look-ahead");
+    VulkanHarness vulkan;
+    CheckPipelineLookahead(vulkan);
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--shader-cache-only") == 0) {

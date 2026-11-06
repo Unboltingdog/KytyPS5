@@ -612,7 +612,7 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 
 template <typename InputInfo>
 const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputInfo& input_info,
-                                              uint32_t& push_data_cursor) {
+                                              uint32_t& push_data_cursor, bool lookahead) {
 	const auto user_data = std::span(params.user_data).first(params.user_data_count);
 	// KYTY_WAIT_STATS: reads of guest memory while resolving this shader's resources (the SRT
 	// walk and specialization reads) are counted under the shader.
@@ -670,7 +670,11 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	const auto bind = [&](const ShaderModule& module) {
 		GpuCrashReport::NoteShader(params.hash, options.stage);
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
-			QueueComputePipeline(module);
+			if (lookahead && QueueComputePipeline(module)) {
+				GpuWaitStats::RecordEvent("pipeline:lookahead-queued");
+			} else if (!lookahead) {
+				QueueComputePipeline(module);
+			}
 		}
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};
 		module.info.bindings.AdvancePushData(push_data_cursor);
@@ -1472,6 +1476,30 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	uint32_t          push_data_cursor = 0;
 	return GetProgram(params, input_info, push_data_cursor);
+}
+
+void PipelineCache::QueueComputePipelineAhead(const HW::ComputeShaderInfo& regs,
+                                              ShaderComputeInputInfo&      input_info) {
+	if (!AsyncGraphicsPipelinesEnabled()) return;
+	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
+	const auto params = PrepareProgram(regs, input_info);
+	input_info.lds_storage = input_info.lds_size_dwords * 4u >
+	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
+	m_lookup_key.stage = ShaderType::Compute;
+	m_lookup_key.hash = params.hash;
+	m_lookup_key.user_data_count = params.user_data_count;
+	BuildStageStaticKey(input_info, m_lookup_key.static_state);
+	const auto entry = m_program_cache.find(m_lookup_key);
+	if (entry == m_program_cache.end()) return;
+	const auto& program = entry->second;
+	if (program.skip_dispatch || program.call_source != nullptr ||
+	    !program.resource_plan.srt_reads.empty() || !program.resource_plan.source_reads.empty() ||
+	    program.resource_plan.capture_specialization_reads ||
+	    !program.resources.specialization_reads.empty()) {
+		return;
+	}
+	uint32_t push_data_cursor = 0;
+	(void)GetProgram(params, input_info, push_data_cursor, true);
 }
 
 std::string PipelineCache::GraphicsVariantDiff(

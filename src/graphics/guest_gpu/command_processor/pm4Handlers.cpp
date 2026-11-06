@@ -948,8 +948,8 @@ KYTY_HW_SH_PARSER(HwShSetRegisters) {
 	return reg_num;
 }
 
-static void HwShSetCsRegister(CommandProcessor& cp, uint32_t cmd_offset, uint32_t value) {
-	auto cs_regs = cp.GetShCtx().GetCs().cs_regs;
+void CommandProcessor::SetCsRegister(HW::Shader& shader, uint32_t cmd_offset, uint32_t value) {
+	auto cs_regs = shader.GetCs().cs_regs;
 
 	switch (cmd_offset) {
 		case Pm4::COMPUTE_PGM_LO:
@@ -1018,7 +1018,7 @@ static void HwShSetCsRegister(CommandProcessor& cp, uint32_t cmd_offset, uint32_
 			     value);
 	}
 
-	cp.GetShCtx().SetCsShader(cs_regs);
+	shader.SetCsShader(cs_regs);
 }
 
 KYTY_HW_SH_PARSER(HwShSetCsRegisters) {
@@ -1026,7 +1026,7 @@ KYTY_HW_SH_PARSER(HwShSetCsRegisters) {
 	EXIT_NOT_IMPLEMENTED(reg_num == 0);
 
 	for (uint32_t i = 0; i < reg_num; i++) {
-		HwShSetCsRegister(cp, cmd_offset + i, buffer[i]);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset + i, buffer[i]);
 	}
 
 	return reg_num;
@@ -3296,46 +3296,46 @@ void GraphicsInitJmpTablesShIndirect() {
 	}
 
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_LO] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_HI] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC1] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC2] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_START_X] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_START_Y] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_START_Z] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_X] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_Y] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_Z] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_RESOURCE_LIMITS] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_TMPRING_SIZE] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC3] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PACE_ID] = [](KYTY_HW_SH_INDIRECT_ARGS) {
-		HwShSetCsRegister(cp, cmd_offset, value);
+		CommandProcessor::SetCsRegister(cp.GetShCtx(), cmd_offset, value);
 	};
 
 	for (uint32_t slot = 0; slot < 16; slot++) {
