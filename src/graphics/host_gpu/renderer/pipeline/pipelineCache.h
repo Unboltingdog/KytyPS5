@@ -160,6 +160,7 @@ public:
 	// Keeps the first `kept` bytes of the store at `path`, or starts it over with `header`. The
 	// thread runs only if that succeeded.
 	void Open(const std::filesystem::path& path, std::span<const uint8_t> header, uint64_t kept);
+	~ShaderStoreWriter();
 	explicit operator bool() const { return m_thread.joinable(); }
 	// Compresses `record` and appends it on the store thread, in call order.
 	void Append(std::vector<uint8_t>&& record);
@@ -173,6 +174,8 @@ private:
 	std::mutex                               m_mutex;
 	std::condition_variable_any              m_ready;
 	std::queue<Common::UniqueFunction<void>> m_jobs;
+	uint64_t m_append_records = 0;
+	uint64_t m_append_bytes = 0;
 	// Declared last, so it drains the queue and joins before the rest is destroyed.
 	std::jthread m_thread;
 };

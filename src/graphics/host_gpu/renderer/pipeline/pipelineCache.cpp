@@ -922,9 +922,6 @@ void PipelineCache::WaitForWarmup() {
 			return !m_async_done.empty() || !m_compute_async_done.empty();
 		});
 	}
-	GpuWaitStats::WriteDiag(fmt::format("pipeline:warmup queued={} done={}\n", m_warmup_queued,
-	                                    m_warmup_queued)
-	                            .c_str());
 }
 
 

@@ -108,6 +108,15 @@ void ShaderStoreWriter::Open(const std::filesystem::path& path, std::span<const 
 	});
 }
 
+ShaderStoreWriter::~ShaderStoreWriter() {
+	if (!m_thread.joinable()) return;
+	Post([this] {
+		GpuWaitStats::WriteDiag(
+		    fmt::format("shader-store append records={} bytes={}\n", m_append_records, m_append_bytes)
+		        .c_str());
+	});
+}
+
 void ShaderStoreWriter::Append(std::vector<uint8_t>&& record) {
 	Post([this, record = std::move(record)] {
 		std::vector<uint8_t> bytes(sizeof(Frame) + ZSTD_compressBound(record.size()));
@@ -119,7 +128,10 @@ void ShaderStoreWriter::Append(std::vector<uint8_t>&& record) {
 		                   .checksum        = XXH3_64bits(bytes.data() + sizeof(Frame), size)};
 		std::memcpy(bytes.data(), &frame, sizeof(frame));
 		// A failed write leaves a partial record; the next run drops it and everything after it.
-		m_file.Write(bytes.data(), static_cast<uint32_t>(sizeof(Frame) + size));
+		uint32_t written = 0;
+		m_file.Write(bytes.data(), static_cast<uint32_t>(sizeof(Frame) + size), &written);
+		++m_append_records;
+		m_append_bytes += written;
 	});
 }
 
@@ -131,12 +143,43 @@ void ShaderStoreWriter::Post(Common::UniqueFunction<void>&& job) {
 	m_ready.notify_one();
 }
 
+namespace {
+
+std::string HeaderMismatchReason(std::span<const uint8_t> bytes, uint64_t version,
+                                 const ShaderRecompiler::Spirv::Profile& profile,
+                                 uint32_t compute_limit) {
+	Reader reader {bytes};
+	uint64_t stored_version = 0;
+	ShaderRecompiler::Spirv::Profile stored_profile {};
+	uint32_t stored_limit = 0;
+	IoAll(reader, stored_version, stored_profile, stored_limit);
+	if (!reader.ok) return "short-header";
+	std::string reason = "header-mismatch:";
+	const auto add = [&reason](std::string_view part) {
+		if (reason.back() != ':') reason += ',';
+		reason += part;
+	};
+	if (stored_version != version) add("version/switches");
+	if (stored_profile.maintenance8 != profile.maintenance8 ||
+	    stored_profile.native_float_min_max != profile.native_float_min_max ||
+	    stored_profile.device_clock_period_ps != profile.device_clock_period_ps ||
+	    stored_profile.robust_buffer_access != profile.robust_buffer_access) {
+		add("profile");
+	}
+	if (stored_limit != compute_limit) add("compute-limit");
+	return reason;
+}
+
+} // namespace
+
 void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	if (path.empty()) {
+		GpuWaitStats::WriteDiag(
+		    "shader-store open path= bytes=0 header_match=no records_loaded=0 reason=disabled\n");
 		return;
 	}
 	const auto header = StoreHeader(m_graphics);
-	const auto           start = std::chrono::steady_clock::now();
+	const auto start = std::chrono::steady_clock::now();
 	std::vector<uint8_t> bytes;
 	if (Common::File file;
 	    Common::File::IsFileExisting(path) && file.Open(path, Common::File::Mode::Read)) {
@@ -149,19 +192,34 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	    "Shader cache: compiling shaders and pipelines from {} ({:.1f} MB) with {} threads\n",
 	    Common::PathToString(path), static_cast<double>(bytes.size()) / 1'000'000.0,
 	    Common::ParallelThreads()));
-	auto       records = std::span<const uint8_t>(bytes);
+	auto records = std::span<const uint8_t>(bytes);
 	const bool reusable =
 	    records.size() >= header.size() && std::ranges::equal(records.first(header.size()), header);
+	uint32_t records_loaded = 0;
 	if (reusable) {
 		records = records.subspan(header.size());
-		while (LoadRecord(records)) {
-		}
+		while (LoadRecord(records)) ++records_loaded;
 	}
 	// A damaged record ends the store; the records before it stay.
 	m_store.Open(path, header, reusable ? bytes.size() - records.size() : 0);
+	std::string reason = bytes.empty() ? "new-store" : "ok";
+	if (!bytes.empty() && !reusable) {
+		uint64_t version = 0;
+		std::memcpy(&version, header.data(), sizeof(version));
+		reason = HeaderMismatchReason(bytes, version, SpirvProfile(m_graphics),
+		                              m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);
+	} else if (reusable && !records.empty()) {
+		reason = "damaged-tail";
+	}
+	if (!m_store) reason = "open-failed";
+	GpuWaitStats::WriteDiag(fmt::format(
+	    "shader-store open path={} bytes={} header_match={} records_loaded={} reason={}\n",
+	    Common::PathToString(path), bytes.size(), reusable ? "yes" : "no", records_loaded, reason)
+	                            .c_str());
 
 	const auto modules = MapModules();
 	const bool async = AsyncGraphicsPipelinesEnabled();
+	uint32_t warmup_queued = 0;
 	for (auto& node: m_graphics_pipelines) {
 		std::array<const ShaderModule*, 4> stages {};
 		bool valid = true;
@@ -175,6 +233,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 			stages[i] = found->second;
 		}
 		if (!valid) continue;
+		++warmup_queued;
 		if (async) {
 			QueueGraphicsPipeline(node.first, stages, true);
 			std::scoped_lock lock(m_async_mutex);
@@ -187,8 +246,9 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	for (const auto* module: modules | std::views::values) {
 		if (module == nullptr || module->info.stage != ShaderType::Compute) continue;
 		if (async) {
-			(void)QueueComputePipeline(*module, true);
+			warmup_queued += QueueComputePipeline(*module, true) ? 1u : 0u;
 		} else {
+			++warmup_queued;
 			CreatePipelineInternal(m_graphics, m_compute_pipelines[module->id], *module,
 			                       m_driver_cache);
 		}
@@ -206,13 +266,16 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	if (!m_graphics_pipelines.empty() || !m_compute_pipelines.empty()) {
 		CheckpointDriverCache();
 	}
+	const auto warmup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                           std::chrono::steady_clock::now() - start)
+	                           .count();
+	GpuWaitStats::WriteDiag(fmt::format("pipeline:warmup queued={} done={} ms={}\n", warmup_queued,
+	                                    warmup_queued, warmup_ms)
+	                            .c_str());
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "Shader cache: loaded {} programs, {} modules, {} pipelines in {} ms\n",
 	    m_program_cache.size(), modules.size() - 1,
-	    m_graphics_pipelines.size() + m_compute_pipelines.size(),
-	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
-	                                                          start)
-	        .count()));
+	    m_graphics_pipelines.size() + m_compute_pipelines.size(), warmup_ms));
 }
 
 bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
