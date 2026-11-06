@@ -122,10 +122,6 @@ uint32_t EmitMulHigh(EmitterState& state, uint32_t lhs, uint32_t rhs, bool signe
 	return signed_value ? Unary(state, spv::OpBitcast, TypeU32(state), high) : high;
 }
 
-uint32_t EmitFMinMax3(EmitterState& state, uint32_t a, uint32_t b, uint32_t c, bool max_value) {
-	return EmitMinMaxF32Value(state, EmitMinMaxF32Value(state, a, b, max_value), c, max_value);
-}
-
 uint32_t EmitExt(EmitterState& state, uint32_t type, uint32_t opcode,
                  std::initializer_list<uint32_t> args) {
 	const auto result = state.builder.AllocateId();
@@ -155,6 +151,19 @@ uint32_t EmitF32ToU32(EmitterState& state, uint32_t src, bool signed_value) {
 
 } // namespace
 
+uint32_t EmitFMinMax3Legacy(EmitterState& state, uint32_t a, uint32_t b, uint32_t c, bool max_value) {
+	return EmitMinMaxF32Inline(state, EmitMinMaxF32Inline(state, a, b, max_value), c, max_value);
+}
+
+uint32_t EmitFMinMax3(EmitterState& state, uint32_t a, uint32_t b, uint32_t c, bool max_value) {
+	if (state.outline_helpers) {
+		return CallOutlinedFloatHelper(state, max_value ? OutlinedFloatHelper::Max3
+		                                                  : OutlinedFloatHelper::Min3,
+		                               {a, b, c});
+	}
+	return EmitFMinMax3Legacy(state, a, b, c, max_value);
+}
+
 bool SuppressTypedU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	return SuppressTypedU32Impl(ctx, inst);
 }
@@ -168,7 +177,8 @@ uint32_t EmitBitCastF32U32(EmitterState& state, uint32_t value) {
 }
 
 uint32_t EmitBitCastF32U32Typed(ValueEmitContext& ctx, const IR::Inst& inst) {
-	if (ctx.state.typed_vgprs && HasTypedF32View(ctx, inst.Arg(0))) {
+	if (ctx.state.typed_vgprs && ctx.dispatcher_spills == nullptr &&
+	    HasTypedF32View(ctx, inst.Arg(0))) {
 		return EmitTypedF32View(ctx, inst.Arg(0));
 	}
 	return EmitBitCastF32U32(ctx.state, ctx.Arg(inst, 0));

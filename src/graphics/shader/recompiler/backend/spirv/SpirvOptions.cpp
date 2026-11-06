@@ -25,4 +25,9 @@ uint32_t IfConversionLimit() {
 	           : 0;
 }
 
+bool OutlineHelpersEnabled() {
+	const char* value = std::getenv("KYTY_OUTLINE_HELPERS");
+	return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv

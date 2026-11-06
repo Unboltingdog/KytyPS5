@@ -93,6 +93,7 @@ struct EmitterState {
 	ShaderStageInputInfo                             input_info;
 	const Profile&                                      profile;
 	bool                                              typed_vgprs = TypedVgprsEnabled();
+	bool                                              outline_helpers = OutlineHelpersEnabled();
 	uint32_t                                        ifconv_limit = IfConversionLimit();
 	std::unordered_set<const IR::Inst*>               ifconv_branched_selects;
 	uint32_t                                        debug_source = 0;
@@ -145,6 +146,7 @@ struct EmitterState {
 	uint32_t                   sampler_type                          = 0;
 	uint32_t                   sampler_pointer_type                  = 0;
 	uint32_t                   main_func                             = 0;
+	std::array<uint32_t, 5>    outlined_float_functions {};
 	uint32_t                   mesh_guest_func                       = 0;
 	uint32_t                   mesh_allocation                       = 0;
 	uint32_t                   mesh_primitive_data                   = 0;
@@ -540,7 +542,16 @@ uint32_t EmitClassMaskBitMatch(EmitterState& state, uint32_t mask, uint32_t bit,
 uint32_t EmitClassMaskF32(EmitterState& state, uint32_t value, uint32_t mask);
 uint32_t EmitClassMaskF16(EmitterState& state, uint32_t bits, uint32_t mask);
 
+enum class OutlinedFloatHelper { Min, Max, Min3, Max3, Med3, Count };
+
+uint32_t EmitMinMaxF32Inline(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value);
 uint32_t EmitMinMaxF32Value(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value);
+uint32_t EmitFMinMax3Legacy(EmitterState& state, uint32_t a, uint32_t b, uint32_t c, bool max_value);
+uint32_t EmitFMinMax3(EmitterState& state, uint32_t a, uint32_t b, uint32_t c, bool max_value);
+uint32_t EmitFPMedTri32Inline(EmitterState& state, uint32_t a, uint32_t b, uint32_t c);
+uint32_t CallOutlinedFloatHelper(EmitterState& state, OutlinedFloatHelper helper,
+                                 std::initializer_list<uint32_t> args);
+void     DefineOutlinedFloatHelpers(EmitterState& state);
 
 uint32_t EmitFlushF32DenormToSignedZero(EmitterState& state, uint32_t value);
 

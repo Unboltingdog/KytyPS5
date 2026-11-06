@@ -54011,11 +54011,12 @@ void CheckPm4WaitResume(RenderContext &renderer) {
 
 void CheckSpirvTypedVgprs() {
   constexpr const char *name = "SpirvTypedVgprs";
-  const auto compile = [] {
+  const auto compile = [](bool dispatcher = false) {
     using namespace ShaderRecompiler;
     IR::Program program;
     program.stage = ShaderType::Compute;
     program.wave_size = 32;
+    program.dispatcher_fallback = dispatcher;
     program.shader_hash = 0x13a2u;
     program.srt_plan_complete = true;
     program.resource_tracking_complete = true;
@@ -54073,13 +54074,17 @@ void CheckSpirvTypedVgprs() {
           "switch-off output changed between identical compiles");
   Require(name, "enable switch", set_switch(true), "could not enable typed VGPRs");
   const auto typed = compile();
+  const auto dispatcher = compile(true);
   Require(name, "clear switch", set_switch(false), "could not restore legacy mode");
   ValidateSpirv(name, legacy);
   ValidateSpirv(name, typed);
+  ValidateSpirv(name, dispatcher);
   Require(name, "legacy bitcasts", count(legacy, spv::OpBitcast) == 7,
           "the synthetic chain no longer has its legacy bitcast count");
   Require(name, "typed bitcasts", count(typed, spv::OpBitcast) == 0,
           "typed F32 views still contain a bitcast round-trip");
+  Require(name, "dispatcher fallback", count(dispatcher, spv::OpBitcast) == 7,
+          "dispatcher spills did not retain the legacy U32 representation");
   Require(name, "arithmetic preserved",
           count(legacy, spv::OpFMul) == count(typed, spv::OpFMul) &&
               count(legacy, spv::OpFAdd) == count(typed, spv::OpFAdd) &&
@@ -54167,6 +54172,114 @@ void CheckSpirvIfConversionLimit() {
   ValidateSpirv(name, over);
   ValidateSpirv(name, unsafe);
   std::printf("[host]    %-32s ok\n", name);
+}
+
+void CheckSpirvOutlineHelpers() {
+  constexpr const char *name = "SpirvOutlineHelpers";
+  const auto compile = [](bool native = false) {
+    using namespace ShaderRecompiler;
+    IR::Program program;
+    program.stage = ShaderType::Compute;
+    program.wave_size = 32;
+    program.shader_hash = 0x13a4u;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    program.shader_info_complete = true;
+    program.info.inputs.push_back(
+        {IR::StageInputKind::LocalInvocationId, 0, 3, "gl_LocalInvocationID"});
+    auto *block = program.block_storage.emplace_back(std::make_unique<IR::Block>()).get();
+    program.blocks.push_back(block);
+    block->terminator.kind = ShaderRecompiler::CFG::TerminatorKind::Return;
+    const auto emit = [&](IR::ValueOpcode opcode, std::initializer_list<IR::Value> args) {
+      return IR::Value(&block->AppendNewInst(opcode, args));
+    };
+    const auto raw = emit(IR::ValueOpcode::GetBuiltin,
+                          {IR::Value(static_cast<uint32_t>(IR::StageInputKind::LocalInvocationId)),
+                           IR::Value(0u)});
+    auto current = emit(IR::ValueOpcode::ConvertF32U32, {raw});
+    for (uint32_t index = 0; index < 21; index++) {
+      current = emit(IR::ValueOpcode::FPMin32, {current, current});
+    }
+    current = emit(IR::ValueOpcode::FPMax32, {current, current});
+    current = emit(IR::ValueOpcode::FPMinTri32, {current, current, current});
+    current = emit(IR::ValueOpcode::FPMaxTri32, {current, current, current});
+    current = emit(IR::ValueOpcode::FPMedTri32, {current, current, current});
+    (void)current;
+    ShaderComputeInputInfo compute{};
+    compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
+    const Spirv::Profile profile{.native_float_min_max = native};
+    return Spirv::EmitProgram(program, {.compute = &compute}, 0, profile);
+  };
+  const auto count = [](const std::vector<u32> &spirv, spv::Op opcode) {
+    size_t result = 0;
+    for (size_t offset = 5; offset < spirv.size();) {
+      const auto words = spirv[offset] >> spv::WordCountShift;
+      Require("SpirvOutlineHelpers", "instruction bounds",
+              words != 0 && offset + words <= spirv.size(), "malformed emitted SPIR-V");
+      result += (spirv[offset] & spv::OpCodeMask) == opcode;
+      offset += words;
+    }
+    return result;
+  };
+  const auto main_instructions = [](const std::vector<u32> &spirv) {
+    size_t current = 0;
+    size_t main = 0;
+    for (size_t offset = 5; offset < spirv.size();) {
+      const auto words = spirv[offset] >> spv::WordCountShift;
+      const auto opcode = static_cast<spv::Op>(spirv[offset] & spv::OpCodeMask);
+      if (opcode == spv::OpFunction) current = 1;
+      else if (current != 0) current++;
+      if (opcode == spv::OpFunctionEnd) {
+        main = current;
+        current = 0;
+      }
+      offset += words;
+    }
+    return main;
+  };
+  const auto dont_inline_count = [](const std::vector<u32> &spirv) {
+    size_t result = 0;
+    for (size_t offset = 5; offset < spirv.size();) {
+      const auto words = spirv[offset] >> spv::WordCountShift;
+      if ((spirv[offset] & spv::OpCodeMask) == spv::OpFunction && words >= 5 &&
+          (spirv[offset + 3] & spv::FunctionControlDontInlineMask) != 0) {
+        result++;
+      }
+      offset += words;
+    }
+    return result;
+  };
+  const auto set_switch = [&](bool enabled) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+    return _putenv(enabled ? "KYTY_OUTLINE_HELPERS=1" : "KYTY_OUTLINE_HELPERS=") == 0;
+#else
+    return (enabled ? setenv("KYTY_OUTLINE_HELPERS", "1", 1)
+                    : unsetenv("KYTY_OUTLINE_HELPERS")) == 0;
+#endif
+  };
+  Require(name, "disable outlining", set_switch(false), "could not disable helper outlining");
+  const auto legacy = compile();
+  Require(name, "repeat legacy", set_switch(false), "could not repeat legacy outlining mode");
+  Require(name, "legacy deterministic", legacy == compile(),
+          "switch-off helper output changed between compiles");
+  Require(name, "enable outlining", set_switch(true), "could not enable helper outlining");
+  const auto outlined = compile();
+  const auto native = compile(true);
+  Require(name, "restore outlining", set_switch(false), "could not restore helper outlining default");
+  const auto before = main_instructions(legacy);
+  const auto after = main_instructions(outlined);
+  Require(name, "main instruction reduction", before > after + 100,
+          "helper calls did not substantially reduce main instruction count");
+  Require(name, "helper functions and calls",
+          dont_inline_count(outlined) == 5 && count(outlined, spv::OpFunctionCall) == 25,
+          "the five helper types were not outlined exactly once with one call per use");
+  Require(name, "native min max unchanged",
+          dont_inline_count(native) == 0 && count(native, spv::OpFunctionCall) == 0,
+          "native NMin/NMax was replaced by outlined compatibility helpers");
+  ValidateSpirv(name, legacy);
+  ValidateSpirv(name, outlined);
+  ValidateSpirv(name, native);
+  std::printf("[host]    %-32s ok (main instructions %zu -> %zu)\n", name, before, after);
 }
 
 void CheckPm4LodStats(RenderContext &renderer) {
@@ -54384,6 +54497,10 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--ifconv-limit-only") == 0) {
     CheckSpirvIfConversionLimit();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--outline-helpers-only") == 0) {
+    CheckSpirvOutlineHelpers();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--mul-hi24-only") == 0) {

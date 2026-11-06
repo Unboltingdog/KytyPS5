@@ -58,7 +58,8 @@ std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
 	    (ShaderRecompiler::IR::ImageHeapCapacity1MEnabled() ? uint64_t {0xbb67ae8584caa73b} : 0u) ^
 	    (ShaderRecompiler::Spirv::TypedVgprsEnabled() ? uint64_t {0x510e527fade682d1} : 0u) ^
 	    (uint64_t {ShaderRecompiler::Spirv::IfConversionLimit()} *
-	     uint64_t {0x1f83d9abfb41bd6b});
+	     uint64_t {0x1f83d9abfb41bd6b}) ^
+	    (ShaderRecompiler::Spirv::OutlineHelpersEnabled() ? uint64_t {0x5be0cd19137e2179} : 0u);
 	Writer         header;
 	IoAll(header, version, SpirvProfile(graphics),
 	      graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);

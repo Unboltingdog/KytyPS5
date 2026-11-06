@@ -7,6 +7,7 @@ namespace Libs::Graphics::ShaderRecompiler::Spirv {
 
 bool     TypedVgprsEnabled();
 uint32_t IfConversionLimit();
+bool     OutlineHelpersEnabled();
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv
 

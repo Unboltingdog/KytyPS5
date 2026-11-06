@@ -13,6 +13,9 @@ bool UnsafeOpcode(IR::ValueOpcode opcode) {
 		case Op::ReadLane:
 		case Op::WriteLane:
 		case Op::Permlane16U32:
+		case Op::PermuteU32:
+		case Op::BpermuteU32:
+		case Op::SwizzleU32:
 		case Op::DppMoveU32:
 		case Op::DppUpdateU32:
 		case Op::SubgroupUMinU32:

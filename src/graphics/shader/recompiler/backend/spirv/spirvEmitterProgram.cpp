@@ -234,8 +234,8 @@ void Invoke(Return (*emit)(Context&, Args...), ValueEmitContext& ctx, const IR::
 void EmitDirectInstruction(ValueEmitContext& ctx, const IR::Inst& inst) {
 	using Op = IR::ValueOpcode;
 	const auto op = inst.GetOpcode();
-	if (ctx.state.typed_vgprs && (op == Op::BitCastU32F32 || op == Op::SelectU32) &&
-	    SuppressTypedU32(ctx, inst)) {
+	if (ctx.state.typed_vgprs && ctx.dispatcher_spills == nullptr &&
+	    (op == Op::BitCastU32F32 || op == Op::SelectU32) && SuppressTypedU32(ctx, inst)) {
 		ctx.Define(inst, DefineTypedF32View(ctx, inst));
 		return;
 	}
@@ -837,6 +837,7 @@ void EmitProgram(EmitterState& state) {
 	DefineIndirectBufferLoads(ctx);
 	DefineBvhIntersect(state);
 	DefineTrinityFunctions(state);
+	DefineOutlinedFloatHelpers(state);
 	if (program.info.uses_swizzle) {
 		ctx.scratch_u32_variable = state.builder.AllocateId();
 		if (state.lane_count == 2) {
