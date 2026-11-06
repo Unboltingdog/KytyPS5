@@ -939,6 +939,10 @@ public:
 			if (stage == nullptr) continue;
 			m_hashes[m_count++] = stage->info.shader_hash;
 			m_words += stage->spirv_words;
+			m_images += stage->specialization.images.size();
+			m_buffers += stage->specialization.buffers.size();
+			m_samplers += stage->specialization.samplers.size();
+			for (const auto& image: stage->specialization.images) m_heap_images += image.heap;
 			for (size_t i = 0; i < stage->spirv_function_instructions.size(); i += 2u) {
 				if (m_functions.size() < 900) {
 					m_functions += fmt::format("{}0x{:x}:{}", m_functions.empty() ? "" : ",",
@@ -959,8 +963,9 @@ public:
 			hashes += fmt::format("{}0x{:016x}", i == 0 ? "" : ",", m_hashes[i]);
 		}
 		GpuWaitStats::WriteDiag(fmt::format(
-		    "slow-pipeline kind={} ms={} shaders={} spirv_words={} functions={}\n",
-		    m_kind, ms, hashes, m_words, m_functions)
+		    "slow-pipeline kind={} ms={} shaders={} spirv_words={} functions={} images={} "
+		    "buffers={} samplers={} heap_images={}\n",
+		    m_kind, ms, hashes, m_words, m_functions, m_images, m_buffers, m_samplers, m_heap_images)
 		                            .c_str());
 	}
 
@@ -970,6 +975,10 @@ private:
 	std::array<uint64_t, 4>               m_hashes {};
 	size_t                                m_count = 0;
 	size_t                                m_words = 0;
+	size_t                                m_images = 0;
+	size_t                                m_buffers = 0;
+	size_t                                m_samplers = 0;
+	size_t                                m_heap_images = 0;
 	std::string                           m_functions;
 };
 } // namespace
