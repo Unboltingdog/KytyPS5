@@ -742,6 +742,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --tessellation-only)
 	add_test(NAME shader_recompiler_float_min_max
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --float-min-max-only)
+	add_test(NAME shader_recompiler_typed_vgprs
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --typed-vgprs-only)
 	add_test(NAME shader_recompiler_vop3_conversions
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --vop3-conversions-only)
 	add_test(NAME shader_recompiler_quadmask

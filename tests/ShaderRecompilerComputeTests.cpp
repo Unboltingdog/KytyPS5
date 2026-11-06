@@ -54008,6 +54008,85 @@ void CheckPm4WaitResume(RenderContext &renderer) {
   std::printf("[host]    %-32s ok\n", "Pm4WaitResume");
 }
 
+void CheckSpirvTypedVgprs() {
+  constexpr const char *name = "SpirvTypedVgprs";
+  const auto compile = [] {
+    using namespace ShaderRecompiler;
+    IR::Program program;
+    program.stage = ShaderType::Compute;
+    program.wave_size = 32;
+    program.shader_hash = 0x13a2u;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    program.shader_info_complete = true;
+    program.info.inputs.push_back(
+        {IR::StageInputKind::LocalInvocationId, 0, 3, "gl_LocalInvocationID"});
+    auto *block = program.block_storage.emplace_back(std::make_unique<IR::Block>()).get();
+    program.blocks.push_back(block);
+    block->terminator.kind = ShaderRecompiler::CFG::TerminatorKind::Return;
+    const auto emit = [&](IR::ValueOpcode opcode, std::initializer_list<IR::Value> args) {
+      return IR::Value(&block->AppendNewInst(opcode, args));
+    };
+    const auto raw = emit(IR::ValueOpcode::GetBuiltin,
+                          {IR::Value(static_cast<uint32_t>(IR::StageInputKind::LocalInvocationId)),
+                           IR::Value(0u)});
+    const auto seed = emit(IR::ValueOpcode::ConvertF32U32, {raw});
+    const auto active = emit(IR::ValueOpcode::ULessThan32, {raw, IR::Value(64u)});
+    auto previous = emit(IR::ValueOpcode::BitCastU32F32, {seed});
+    auto current = seed;
+    for (const auto opcode : {IR::ValueOpcode::FPMul32, IR::ValueOpcode::FPAdd32,
+                              IR::ValueOpcode::FPMul32}) {
+      const auto arithmetic = emit(opcode, {current, seed});
+      const auto bits = emit(IR::ValueOpcode::BitCastU32F32, {arithmetic});
+      previous = emit(IR::ValueOpcode::SelectU32, {active, bits, previous});
+      current = emit(IR::ValueOpcode::BitCastF32U32, {previous});
+    }
+    ShaderComputeInputInfo compute{};
+    compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
+    return Spirv::EmitProgram(program, {.compute = &compute});
+  };
+  const auto count = [](const std::vector<u32> &spirv, spv::Op opcode) {
+    size_t result = 0;
+    for (size_t offset = 5; offset < spirv.size();) {
+      const auto words = spirv[offset] >> spv::WordCountShift;
+      Require("SpirvTypedVgprs", "instruction bounds", words != 0 && offset + words <= spirv.size(),
+              "malformed emitted SPIR-V");
+      result += (spirv[offset] & spv::OpCodeMask) == opcode;
+      offset += words;
+    }
+    return result;
+  };
+  const auto set_switch = [&](bool enabled) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+    return _putenv(enabled ? "KYTY_TYPED_VGPRS=1" : "KYTY_TYPED_VGPRS=") == 0;
+#else
+    return (enabled ? setenv("KYTY_TYPED_VGPRS", "1", 1)
+                    : unsetenv("KYTY_TYPED_VGPRS")) == 0;
+#endif
+  };
+  Require(name, "disable switch", set_switch(false), "could not disable typed VGPRs");
+  const auto legacy = compile();
+  Require(name, "repeat legacy switch", set_switch(false), "could not repeat legacy mode");
+  const auto legacy_again = compile();
+  Require(name, "legacy determinism", legacy == legacy_again,
+          "switch-off output changed between identical compiles");
+  Require(name, "enable switch", set_switch(true), "could not enable typed VGPRs");
+  const auto typed = compile();
+  Require(name, "clear switch", set_switch(false), "could not restore legacy mode");
+  ValidateSpirv(name, legacy);
+  ValidateSpirv(name, typed);
+  Require(name, "legacy bitcasts", count(legacy, spv::OpBitcast) == 7,
+          "the synthetic chain no longer has its legacy bitcast count");
+  Require(name, "typed bitcasts", count(typed, spv::OpBitcast) == 0,
+          "typed F32 views still contain a bitcast round-trip");
+  Require(name, "arithmetic preserved",
+          count(legacy, spv::OpFMul) == count(typed, spv::OpFMul) &&
+              count(legacy, spv::OpFAdd) == count(typed, spv::OpFAdd) &&
+              count(typed, spv::OpFMul) == 2 && count(typed, spv::OpFAdd) == 1,
+          "typed views changed the arithmetic chain");
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckPm4LodStats(RenderContext &renderer) {
   constexpr const char *name = "Pm4LodStats";
   GraphicsInitJmpTables();
@@ -54217,6 +54296,10 @@ int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  if (argc == 2 && std::strcmp(argv[1], "--typed-vgprs-only") == 0) {
+    CheckSpirvTypedVgprs();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--mul-hi24-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, VectorMulHi24(32));

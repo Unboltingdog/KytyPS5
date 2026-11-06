@@ -6,6 +6,7 @@
 #include "common/stringUtils.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvOptions.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "kytyShaderCacheVersion.h"
@@ -54,7 +55,8 @@ std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
 	    (ShaderRecompiler::IR::NoTableUnrollEnabled() ? uint64_t {0x243f6a8885a308d3} : 0u) ^
 	    (uint64_t {ShaderRecompiler::IR::HeapOnlyLargeTablesLimit()} *
 	     uint64_t {0x13198a2e03707344}) ^
-	    (ShaderRecompiler::IR::ImageHeapCapacity1MEnabled() ? uint64_t {0xbb67ae8584caa73b} : 0u);
+	    (ShaderRecompiler::IR::ImageHeapCapacity1MEnabled() ? uint64_t {0xbb67ae8584caa73b} : 0u) ^
+	    (ShaderRecompiler::Spirv::TypedVgprsEnabled() ? uint64_t {0x510e527fade682d1} : 0u);
 	Writer         header;
 	IoAll(header, version, SpirvProfile(graphics),
 	      graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);

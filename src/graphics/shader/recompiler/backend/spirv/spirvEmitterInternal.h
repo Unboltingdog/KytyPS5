@@ -6,6 +6,7 @@
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvOptions.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
@@ -90,6 +91,7 @@ struct EmitterState {
 	IR::Program&                                     program;
 	ShaderStageInputInfo                             input_info;
 	const Profile&                                      profile;
+	bool                                              typed_vgprs = TypedVgprsEnabled();
 	uint32_t                                        debug_source = 0;
 	uint32_t                                        void_type = 0;
 	uint32_t                                        bool_type = 0;
@@ -270,6 +272,10 @@ struct ValueEmitContext {
 	EmitterState&                                                      state;
 	const std::unordered_map<const IR::Inst*, uint32_t>*               dispatcher_spills = nullptr;
 	std::unordered_map<const IR::Inst*, std::pair<uint32_t, uint32_t>> dispatcher_block_loads;
+	std::unordered_map<const IR::Inst*, bool>                          typed_f32_availability;
+	std::unordered_map<const IR::Inst*, bool>                          typed_f32_consumers;
+	std::unordered_map<const IR::Inst*, bool>                          typed_f32_suppression;
+	std::unordered_map<const IR::Inst*, uint32_t>                      typed_f32_values;
 	uint32_t                                                           scratch_u32_variable = 0;
 	ValueEmitContext*                                                  other_half = nullptr;
 	uint32_t                                                           half       = 0;

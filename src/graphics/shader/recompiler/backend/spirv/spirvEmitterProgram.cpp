@@ -233,6 +233,15 @@ void Invoke(Return (*emit)(Context&, Args...), ValueEmitContext& ctx, const IR::
 void EmitDirectInstruction(ValueEmitContext& ctx, const IR::Inst& inst) {
 	using Op = IR::ValueOpcode;
 	const auto op = inst.GetOpcode();
+	if (ctx.state.typed_vgprs && (op == Op::BitCastU32F32 || op == Op::SelectU32) &&
+	    SuppressTypedU32(ctx, inst)) {
+		ctx.Define(inst, DefineTypedF32View(ctx, inst));
+		return;
+	}
+	if (op == Op::BitCastF32U32) {
+		ctx.Define(inst, EmitBitCastF32U32Typed(ctx, inst));
+		return;
+	}
 	if (ctx.half != 0 &&
 	    (op == Op::Ballot || op == Op::ReadFirstLane || op == Op::SubgroupUMinU32 ||
 	     op == Op::SubgroupUMaxU32 || op == Op::SubgroupOrU32 || op == Op::ReadConstBuffer ||

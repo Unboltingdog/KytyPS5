@@ -16,7 +16,10 @@ inline constexpr auto EmitBitCastF16U16 = EmitBitCastU16F16;
 inline constexpr auto EmitConvertU32U16 = EmitBitCastU16F16;
 inline constexpr auto EmitConvertU32U8  = EmitBitCastU16F16;
 EMIT_NATIVE(BitCastU32F32, OpBitcast, U32, uint32_t)
-EMIT_NATIVE(BitCastF32U32, OpBitcast, F32, uint32_t)
+uint32_t EmitBitCastF32U32(EmitterState& state, uint32_t value);
+uint32_t EmitBitCastF32U32Typed(ValueEmitContext& ctx, const IR::Inst& inst);
+bool     SuppressTypedU32(ValueEmitContext& ctx, const IR::Inst& inst);
+uint32_t DefineTypedF32View(ValueEmitContext& ctx, const IR::Inst& inst);
 EMIT_NATIVE(BitCastU64F64, OpBitcast, U64, uint32_t)
 EMIT_NATIVE(BitCastF64U64, OpBitcast, F64, uint32_t)
 uint32_t              EmitConvertU16U32(EmitterState& state, uint32_t arg0);

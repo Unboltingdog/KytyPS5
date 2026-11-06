@@ -1,0 +1,10 @@
+#ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_SPIRVOPTIONS_H_
+#define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_SPIRVOPTIONS_H_
+
+namespace Libs::Graphics::ShaderRecompiler::Spirv {
+
+bool TypedVgprsEnabled();
+
+} // namespace Libs::Graphics::ShaderRecompiler::Spirv
+
+#endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_SPIRVOPTIONS_H_ */

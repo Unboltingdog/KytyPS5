@@ -26,6 +26,84 @@ uint32_t EmitMinMaxF64(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max
 	              lhs, result);
 }
 
+bool HasTypedF32View(ValueEmitContext& ctx, IR::Value value) {
+	value = value.Resolve();
+	if (value.IsImmediate()) {
+		return false;
+	}
+	const auto* inst = value.ResolveInstruction();
+	if (inst == nullptr) {
+		return false;
+	}
+	if (const auto found = ctx.typed_f32_availability.find(inst);
+	    found != ctx.typed_f32_availability.end()) {
+		return found->second;
+	}
+	bool available = inst->GetOpcode() == IR::ValueOpcode::BitCastU32F32;
+	if (inst->GetOpcode() == IR::ValueOpcode::SelectU32) {
+		available = HasTypedF32View(ctx, inst->Arg(1)) && HasTypedF32View(ctx, inst->Arg(2));
+	}
+	ctx.typed_f32_availability.insert_or_assign(inst, available);
+	return available;
+}
+
+uint32_t EmitTypedF32View(ValueEmitContext& ctx, IR::Value value) {
+	value = value.Resolve();
+	const auto* inst = value.ResolveInstruction();
+	if (const auto found = ctx.typed_f32_values.find(inst); found != ctx.typed_f32_values.end()) {
+		return found->second;
+	}
+	uint32_t result = 0;
+	if (inst->GetOpcode() == IR::ValueOpcode::BitCastU32F32) {
+		result = ctx.Arg(*inst, 0);
+	} else {
+		EXIT_IF(inst->GetOpcode() != IR::ValueOpcode::SelectU32);
+		result = Select(ctx.state, TypeF32(ctx.state), ctx.Arg(*inst, 0),
+		                EmitTypedF32View(ctx, inst->Arg(1)), EmitTypedF32View(ctx, inst->Arg(2)));
+	}
+	ctx.typed_f32_values.insert_or_assign(inst, result);
+	return result;
+}
+
+bool HasTypedF32Consumer(ValueEmitContext& ctx, const IR::Inst& inst) {
+	if (const auto found = ctx.typed_f32_consumers.find(&inst);
+	    found != ctx.typed_f32_consumers.end()) {
+		return found->second;
+	}
+	bool result = false;
+	for (const auto& use: inst.Uses()) {
+		const auto& user = *use.user;
+		if (user.GetOpcode() == IR::ValueOpcode::BitCastF32U32 ||
+		    (user.GetOpcode() == IR::ValueOpcode::SelectU32 &&
+		     HasTypedF32View(ctx, IR::Value(const_cast<IR::Inst*>(&user))) &&
+		     HasTypedF32Consumer(ctx, user))) {
+			result = true;
+			break;
+		}
+	}
+	ctx.typed_f32_consumers.insert_or_assign(&inst, result);
+	return result;
+}
+
+bool SuppressTypedU32Impl(ValueEmitContext& ctx, const IR::Inst& inst) {
+	if (const auto found = ctx.typed_f32_suppression.find(&inst);
+	    found != ctx.typed_f32_suppression.end()) {
+		return found->second;
+	}
+	bool result = HasTypedF32View(ctx, IR::Value(const_cast<IR::Inst*>(&inst))) &&
+	              HasTypedF32Consumer(ctx, inst);
+	for (const auto& use: inst.Uses()) {
+		const auto& user = *use.user;
+		if (user.GetOpcode() != IR::ValueOpcode::BitCastF32U32 &&
+		    (user.GetOpcode() != IR::ValueOpcode::SelectU32 || !SuppressTypedU32Impl(ctx, user))) {
+			result = false;
+			break;
+		}
+	}
+	ctx.typed_f32_suppression.insert_or_assign(&inst, result);
+	return result;
+}
+
 uint32_t EmitMulHigh(EmitterState& state, uint32_t lhs, uint32_t rhs, bool signed_value) {
 	const auto operand_type = signed_value ? TypeI32(state) : TypeU32(state);
 	const auto pair_type    = signed_value ? TypeI32Pair(state) : TypeU32Pair(state);
@@ -75,6 +153,25 @@ uint32_t EmitF32ToU32(EmitterState& state, uint32_t src, bool signed_value) {
 }
 
 } // namespace
+
+bool SuppressTypedU32(ValueEmitContext& ctx, const IR::Inst& inst) {
+	return SuppressTypedU32Impl(ctx, inst);
+}
+
+uint32_t DefineTypedF32View(ValueEmitContext& ctx, const IR::Inst& inst) {
+	return EmitTypedF32View(ctx, IR::Value(const_cast<IR::Inst*>(&inst)));
+}
+
+uint32_t EmitBitCastF32U32(EmitterState& state, uint32_t value) {
+	return Unary(state, spv::OpBitcast, TypeF32(state), value);
+}
+
+uint32_t EmitBitCastF32U32Typed(ValueEmitContext& ctx, const IR::Inst& inst) {
+	if (ctx.state.typed_vgprs && HasTypedF32View(ctx, inst.Arg(0))) {
+		return EmitTypedF32View(ctx, inst.Arg(0));
+	}
+	return EmitBitCastF32U32(ctx.state, ctx.Arg(inst, 0));
+}
 
 uint32_t EmitF32BitsToF16RtzBits(EmitterState& state, uint32_t bits) {
 	// Native half conversion causes regressions; use compact integer RTZ conversion.
