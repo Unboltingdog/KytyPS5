@@ -447,6 +447,22 @@ void EmitStructuredBlock(ValueEmitContext& ctx, StructuredFunctionState& structu
 	}
 	const auto header = ctx.state.current_label;
 	const auto condition = ctx.Def(region->condition);
+	// On the skipped path a select keeps its old value. When that old value is an earlier select of
+	// the same region, follow the chain to the value from before the region: the earlier select is
+	// only defined inside the branch, which does not dominate the header edge.
+	std::vector<uint32_t> false_values;
+	false_values.reserve(region->selects.size());
+	for (const auto* inst: region->selects) {
+		auto old_value = inst->Arg(2);
+		for (;;) {
+			const auto resolved = old_value.Resolve();
+			if (resolved.IsImmediate()) break;
+			const auto* earlier = resolved.Instruction();
+			if (std::ranges::find(region->selects, earlier) == region->selects.end()) break;
+			old_value = earlier->Arg(2);
+		}
+		false_values.push_back(ctx.Def(old_value));
+	}
 	const auto then_label = ctx.state.builder.AllocateId();
 	const auto merge_label = ctx.state.builder.AllocateId();
 	ctx.state.builder.AddFunction(spv::OpSelectionMerge, merge_label, spv::SelectionControlMaskNone);
@@ -470,7 +486,7 @@ void EmitStructuredBlock(ValueEmitContext& ctx, StructuredFunctionState& structu
 		const auto* inst = region->selects[index];
 		const auto phi = ctx.state.builder.AllocateId();
 		ctx.state.builder.AddFunction(spv::OpPhi, TypeU32(ctx.state), phi, true_values[index],
-		                              then_exit, ctx.Arg(*inst, 2), header);
+		                              then_exit, false_values[index], header);
 		inst->SetDefinition(0, phi);
 	}
 	for (size_t index = region->last + 1u; index < instructions.size(); index++) {

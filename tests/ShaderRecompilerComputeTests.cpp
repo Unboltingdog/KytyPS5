@@ -54119,6 +54119,8 @@ void CheckSpirvIfConversionLimit() {
     auto previous = raw;
     for (uint32_t index = 0; index < writes; index++) {
       if (cross_lane && index == 1) {
+        // The frontend sets this flag for every lane read; the emitter declares the capability from it.
+        program.info.subgroup_shuffle = true;
         emit(IR::ValueOpcode::ReadLane, {previous, IR::Value(0u)});
       }
       const auto next = emit(IR::ValueOpcode::IAdd32, {previous, raw});
