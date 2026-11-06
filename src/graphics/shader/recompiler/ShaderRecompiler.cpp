@@ -3,7 +3,10 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "graphics/host_gpu/renderer/gpuWaitStats.h"
+#include "graphics/shader/recompiler/backend/spirv/IfConversionAnalysis.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvShape.h"
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/frontend/translate/Translate.h"
@@ -23,7 +26,9 @@
 #include <fmt/format.h>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <span>
+#include <unordered_set>
 #include <utility>
 
 namespace Libs::Graphics::ShaderRecompiler {
@@ -945,6 +950,25 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	     static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
 	                               std::chrono::steady_clock::now() - emit_begin)
 	                               .count()));
+	if (GpuWaitStats::Enabled()) {
+		static std::mutex                  shape_mutex;
+		static std::unordered_set<uint64_t> reported_shapes;
+		std::scoped_lock                   lock(shape_mutex);
+		if (reported_shapes.insert(ir.shader_hash).second) {
+			const auto shape  = Spirv::AnalyzeModuleShape(spirv);
+			const auto ifconv = Spirv::AnalyzeIfConversion(ir);
+			if (shape) {
+				GpuWaitStats::WriteDiag(fmt::format(
+				    "spirv-shape hash=0x{:016x} largest_function_instructions={} bitcasts={} "
+				    "selects={} phis={} ext_insts={} function_calls={} loop_merges={} "
+				    "ifconv_regions={} ifconv_instructions={} ifconv_unsafe={}\n",
+				    ir.shader_hash, shape->largest_function_instructions, shape->bitcasts,
+				    shape->selects, shape->phis, shape->ext_insts, shape->function_calls,
+				    shape->loop_merges, ifconv.regions, ifconv.instructions, ifconv.unsafe_regions)
+				                            .c_str());
+			}
+		}
+	}
 	CompileResult result;
 	result.spirv   = std::move(spirv);
 	result.program = std::move(ir);

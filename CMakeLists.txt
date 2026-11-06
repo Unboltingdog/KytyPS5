@@ -415,6 +415,18 @@ target_include_directories(scalar_provenance_tests PRIVATE ${inc_headers})
 
 add_executable(build_flags_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BuildFlagsTests.cpp")
 
+add_executable(spirv_shape EXCLUDE_FROM_ALL
+	"${CMAKE_CURRENT_SOURCE_DIR}/tools/spirv_shape.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/backend/spirv/SpirvShape.cpp"
+)
+target_include_directories(spirv_shape PRIVATE ${inc_headers})
+
+add_executable(spirv_shape_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SpirvShapeTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/backend/spirv/SpirvShape.cpp"
+)
+target_include_directories(spirv_shape_tests PRIVATE ${inc_headers})
+
 add_executable(page_manager_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PageManagerTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/pageManager.cpp"
@@ -685,6 +697,7 @@ if(BUILD_TESTING)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
+	add_test(NAME spirv_shape COMMAND $<TARGET_FILE:spirv_shape_tests>)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
 	add_test(NAME gpu_wait_stats COMMAND $<TARGET_FILE:gpu_wait_stats_tests>)
@@ -802,6 +815,7 @@ if(BUILD_TESTING)
 		ime_dialog_tests
 		shader_cfg_tests
 		scalar_provenance_tests
+		spirv_shape_tests
 		image_page_table_tests
 		memory_tracker_tests
 		gpu_wait_stats_tests
