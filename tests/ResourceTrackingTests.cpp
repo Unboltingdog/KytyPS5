@@ -689,6 +689,8 @@ void TestHeapOnlyLargeImageTable() {
             skipped.limit == 64u && skipped.table_size == candidates * 16u &&
             !TakeLargeTableSkip(skipped),
         "large-table skip diagnostics lost its candidate count or table size");
+  // The 2,639-entry table spans the fixture's unreadable address; inline enumeration reads it all.
+  memory.fail_address = UINT64_MAX;
   Check(SetHeapOnlyLargeTables("") && HeapOnlyLargeTablesLimit() == 0u &&
             MaterializeResources(plan, runtime, snapshot, specialization) &&
             memory.watched_reads == 1u && snapshot.images.size() == 2u &&
