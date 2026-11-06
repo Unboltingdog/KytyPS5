@@ -20,6 +20,7 @@ uint32_t EmitBitCastF32U32(EmitterState& state, uint32_t value);
 uint32_t EmitBitCastF32U32Typed(ValueEmitContext& ctx, const IR::Inst& inst);
 bool     SuppressTypedU32(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t DefineTypedF32View(ValueEmitContext& ctx, const IR::Inst& inst);
+void     PrepareTypedF32View(ValueEmitContext& ctx, const IR::Inst& inst);
 EMIT_NATIVE(BitCastU64F64, OpBitcast, U64, uint32_t)
 EMIT_NATIVE(BitCastF64U64, OpBitcast, F64, uint32_t)
 uint32_t              EmitConvertU16U32(EmitterState& state, uint32_t arg0);

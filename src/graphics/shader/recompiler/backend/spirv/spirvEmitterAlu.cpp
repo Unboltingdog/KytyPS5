@@ -172,6 +172,12 @@ uint32_t DefineTypedF32View(ValueEmitContext& ctx, const IR::Inst& inst) {
 	return EmitTypedF32View(ctx, IR::Value(const_cast<IR::Inst*>(&inst)));
 }
 
+void PrepareTypedF32View(ValueEmitContext& ctx, const IR::Inst& inst) {
+	if (HasTypedF32Consumer(ctx, inst) && HasTypedF32View(ctx, IR::Value(const_cast<IR::Inst*>(&inst)))) {
+		(void)DefineTypedF32View(ctx, inst);
+	}
+}
+
 uint32_t EmitBitCastF32U32(EmitterState& state, uint32_t value) {
 	return Unary(state, spv::OpBitcast, TypeF32(state), value);
 }

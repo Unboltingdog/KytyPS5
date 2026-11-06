@@ -54226,6 +54226,221 @@ void CheckSpirvTypedVgprs() {
   std::printf("[host]    %-32s ok\n", name);
 }
 
+void CheckSpirvTypedVgprsControlFlow() {
+  constexpr const char *name = "SpirvTypedVgprsControlFlow";
+  const auto branch = [](IR::Block &block, IR::Block &target, IR::Value condition = {},
+                         IR::Block *other = nullptr) {
+    block.terminator.kind = other != nullptr ? ShaderRecompiler::CFG::TerminatorKind::ConditionalBranch
+                                             : ShaderRecompiler::CFG::TerminatorKind::Branch;
+    block.terminator.true_block = &target;
+    block.terminator.false_block = other;
+    block.condition = condition;
+    block.AddBranch(&target);
+    if (other != nullptr) block.AddBranch(other);
+  };
+  const auto compile_if = [&](bool dispatcher = false, bool two_half = false) {
+    using namespace ShaderRecompiler;
+    IR::Program program;
+    program.stage = ShaderType::Compute;
+    program.wave_size = two_half ? 64 : 32;
+    program.dispatcher_fallback = dispatcher;
+    program.shader_hash = 0x13a5u;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    program.shader_info_complete = true;
+    program.info.inputs.push_back(
+        {IR::StageInputKind::LocalInvocationId, 0, 3, "gl_LocalInvocationID"});
+    std::array<IR::Block *, 4> blocks{};
+    for (size_t index = 0; index < blocks.size(); index++) {
+      auto *&block = blocks[index];
+      block = program.block_storage.emplace_back(std::make_unique<IR::Block>()).get();
+      block->id = static_cast<uint32_t>(index);
+      program.blocks.push_back(block);
+    }
+    auto &entry = *blocks[0];
+    auto &left = *blocks[1];
+    auto &right = *blocks[2];
+    auto &merge = *blocks[3];
+    const auto emit = [](IR::Block &block, IR::ValueOpcode opcode,
+                         std::initializer_list<IR::Value> args) {
+      return IR::Value(&block.AppendNewInst(opcode, args));
+    };
+    const auto raw = emit(entry, IR::ValueOpcode::GetBuiltin,
+                          {IR::Value(static_cast<uint32_t>(IR::StageInputKind::LocalInvocationId)),
+                           IR::Value(0u)});
+    const auto seed = emit(entry, IR::ValueOpcode::ConvertF32U32, {raw});
+    const auto other = emit(entry, IR::ValueOpcode::FPAdd32, {seed, seed});
+    const auto active = emit(entry, IR::ValueOpcode::ULessThan32, {raw, IR::Value(64u)});
+    const auto seed_bits = emit(entry, IR::ValueOpcode::BitCastU32F32, {seed});
+    const auto other_bits = emit(entry, IR::ValueOpcode::BitCastU32F32, {other});
+    const auto selected =
+        emit(entry, IR::ValueOpcode::SelectU32, {active, seed_bits, other_bits});
+    const auto raw_write = emit(entry, IR::ValueOpcode::IAdd32, {selected, raw});
+    const auto mixed =
+        emit(entry, IR::ValueOpcode::SelectU32, {active, selected, raw_write});
+    const auto helper = emit(entry, IR::ValueOpcode::FPMinTri32, {seed, other, seed});
+    const auto helper_bits = emit(entry, IR::ValueOpcode::BitCastU32F32, {helper});
+
+    const auto left_float = emit(left, IR::ValueOpcode::BitCastF32U32, {selected});
+    const auto left_value = emit(left, IR::ValueOpcode::FPAdd32, {left_float, seed});
+    const auto left_bits = emit(left, IR::ValueOpcode::BitCastU32F32, {left_value});
+    const auto right_float = emit(right, IR::ValueOpcode::BitCastF32U32, {selected});
+    const auto right_value = emit(right, IR::ValueOpcode::FPMul32, {right_float, other});
+    const auto right_bits = emit(right, IR::ValueOpcode::BitCastU32F32, {right_value});
+    auto &phi = merge.AppendNewInst(IR::ValueOpcode::Phi, {}, uint64_t(IR::Type::U32));
+    phi.AddPhiOperand(&left, left_bits);
+    phi.AddPhiOperand(&right, right_bits);
+    const auto merged = emit(merge, IR::ValueOpcode::BitCastF32U32, {IR::Value(&phi)});
+    const auto mixed_float = emit(merge, IR::ValueOpcode::BitCastF32U32, {mixed});
+    const auto raw_float = emit(merge, IR::ValueOpcode::BitCastF32U32, {raw_write});
+    const auto helper_float = emit(merge, IR::ValueOpcode::BitCastF32U32, {helper_bits});
+    const auto sum = emit(merge, IR::ValueOpcode::FPAdd32, {merged, mixed_float});
+    const auto with_raw = emit(merge, IR::ValueOpcode::FPAdd32, {sum, raw_float});
+    (void)emit(merge, IR::ValueOpcode::FPAdd32, {with_raw, helper_float});
+
+    branch(entry, left, active, &right);
+    entry.terminator.merge_block = &merge;
+    branch(left, merge);
+    branch(right, merge);
+    merge.terminator.kind = ShaderRecompiler::CFG::TerminatorKind::Return;
+    ShaderComputeInputInfo compute{};
+    compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
+    compute.host_subgroup_size = two_half ? 32 : 64;
+    return Spirv::EmitProgram(program, {.compute = &compute});
+  };
+  const auto compile_loop = [&] {
+    using namespace ShaderRecompiler;
+    IR::Program program;
+    program.stage = ShaderType::Compute;
+    program.wave_size = 32;
+    program.shader_hash = 0x13a6u;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    program.shader_info_complete = true;
+    program.info.inputs.push_back(
+        {IR::StageInputKind::LocalInvocationId, 0, 3, "gl_LocalInvocationID"});
+    std::array<IR::Block *, 8> blocks{};
+    for (size_t index = 0; index < blocks.size(); index++) {
+      auto *&block = blocks[index];
+      block = program.block_storage.emplace_back(std::make_unique<IR::Block>()).get();
+      block->id = static_cast<uint32_t>(index);
+      program.blocks.push_back(block);
+    }
+    auto &entry = *blocks[0];
+    auto &header = *blocks[1];
+    auto &body = *blocks[2];
+    auto &left = *blocks[3];
+    auto &right = *blocks[4];
+    auto &merge = *blocks[5];
+    auto &latch = *blocks[6];
+    auto &exit = *blocks[7];
+    const auto emit = [](IR::Block &block, IR::ValueOpcode opcode,
+                         std::initializer_list<IR::Value> args) {
+      return IR::Value(&block.AppendNewInst(opcode, args));
+    };
+    const auto raw = emit(entry, IR::ValueOpcode::GetBuiltin,
+                          {IR::Value(static_cast<uint32_t>(IR::StageInputKind::LocalInvocationId)),
+                           IR::Value(0u)});
+    const auto seed = emit(entry, IR::ValueOpcode::ConvertF32U32, {raw});
+    const auto active = emit(entry, IR::ValueOpcode::ULessThan32, {raw, IR::Value(64u)});
+    const auto initial = emit(entry, IR::ValueOpcode::FPMul32, {seed, seed});
+    const auto initial_bits = emit(entry, IR::ValueOpcode::BitCastU32F32, {initial});
+    auto &current = header.AppendNewInst(IR::ValueOpcode::Phi, {}, uint64_t(IR::Type::U32));
+    auto &counter = header.AppendNewInst(IR::ValueOpcode::Phi, {}, uint64_t(IR::Type::U32));
+    const auto condition =
+        emit(header, IR::ValueOpcode::ULessThan32, {IR::Value(&counter), IR::Value(2u)});
+    const auto left_float = emit(left, IR::ValueOpcode::BitCastF32U32, {IR::Value(&current)});
+    const auto left_value = emit(left, IR::ValueOpcode::FPAdd32, {left_float, seed});
+    const auto left_bits = emit(left, IR::ValueOpcode::BitCastU32F32, {left_value});
+    const auto right_float = emit(right, IR::ValueOpcode::BitCastF32U32, {IR::Value(&current)});
+    const auto right_value = emit(right, IR::ValueOpcode::FPMul32, {right_float, seed});
+    const auto right_bits = emit(right, IR::ValueOpcode::BitCastU32F32, {right_value});
+    auto &next = merge.AppendNewInst(IR::ValueOpcode::Phi, {}, uint64_t(IR::Type::U32));
+    next.AddPhiOperand(&left, left_bits);
+    next.AddPhiOperand(&right, right_bits);
+    const auto next_counter =
+        emit(latch, IR::ValueOpcode::IAdd32, {IR::Value(&counter), IR::Value(1u)});
+    current.AddPhiOperand(&entry, initial_bits);
+    current.AddPhiOperand(&latch, IR::Value(&next));
+    counter.AddPhiOperand(&entry, IR::Value(0u));
+    counter.AddPhiOperand(&latch, next_counter);
+    const auto result = emit(exit, IR::ValueOpcode::BitCastF32U32, {IR::Value(&current)});
+    (void)emit(exit, IR::ValueOpcode::FPAdd32, {result, seed});
+
+    branch(entry, header);
+    branch(header, body, condition, &exit);
+    header.terminator.loop_header = true;
+    header.terminator.continue_block = &latch;
+    header.terminator.merge_block = &exit;
+    branch(body, left, active, &right);
+    body.terminator.merge_block = &merge;
+    branch(left, merge);
+    branch(right, merge);
+    branch(merge, latch);
+    branch(latch, header);
+    exit.terminator.kind = ShaderRecompiler::CFG::TerminatorKind::Return;
+    ShaderComputeInputInfo compute{};
+    compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
+    return Spirv::EmitProgram(program, {.compute = &compute});
+  };
+  const auto count = [](const std::vector<u32> &spirv, spv::Op opcode) {
+    size_t result = 0;
+    for (size_t offset = 5; offset < spirv.size();) {
+      const auto words = spirv[offset] >> spv::WordCountShift;
+      Require(name, "instruction bounds", words != 0 && offset + words <= spirv.size(),
+              "malformed emitted SPIR-V");
+      result += (spirv[offset] & spv::OpCodeMask) == opcode;
+      offset += words;
+    }
+    return result;
+  };
+  const auto set_switch = [](const char *variable, bool enabled) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+    const std::string setting = std::string(variable) + (enabled ? "=1" : "=");
+    return _putenv(setting.c_str()) == 0;
+#else
+    return (enabled ? setenv(variable, "1", 1) : unsetenv(variable)) == 0;
+#endif
+  };
+  Require(name, "disable typed VGPRs", set_switch("KYTY_TYPED_VGPRS", false),
+          "could not disable typed VGPRs");
+  Require(name, "disable outlining", set_switch("KYTY_OUTLINE_HELPERS", false),
+          "could not disable helper outlining");
+  const auto branch_legacy = compile_if();
+  Require(name, "enable typed VGPRs", set_switch("KYTY_TYPED_VGPRS", true),
+          "could not enable typed VGPRs");
+  const auto branch_typed = compile_if();
+  const auto branch_two_half = compile_if(false, true);
+  const auto branch_dispatcher = compile_if(true);
+  const auto loop_typed = compile_loop();
+  Require(name, "enable outlining", set_switch("KYTY_OUTLINE_HELPERS", true),
+          "could not enable helper outlining");
+  const auto outlined = compile_if();
+  Require(name, "restore switches", set_switch("KYTY_TYPED_VGPRS", false) &&
+                                        set_switch("KYTY_OUTLINE_HELPERS", false),
+          "could not restore typed VGPR and outlining defaults");
+  ValidateSpirv(name, branch_legacy);
+  ValidateSpirv(name, branch_typed);
+  ValidateSpirv(name, branch_two_half);
+  ValidateSpirv(name, branch_dispatcher);
+  ValidateSpirv(name, loop_typed);
+  ValidateSpirv(name, outlined);
+  Require(name, "typed and mixed selects",
+          count(branch_typed, spv::OpSelect) == 2 && count(branch_typed, spv::OpBitcast) >= 6,
+          "typed select or conservative raw fallback pattern changed");
+  Require(name, "dispatcher control flow fallback",
+          count(branch_dispatcher, spv::OpBitcast) > count(branch_typed, spv::OpBitcast),
+          "dispatcher control flow did not retain legacy U32 views");
+  Require(name, "outlined helper", count(outlined, spv::OpFunctionCall) == 1,
+          "typed control flow did not use the outlined float helper");
+  Require(name, "loop and if else structure",
+          count(loop_typed, spv::OpLoopMerge) == 1 &&
+              count(loop_typed, spv::OpSelectionMerge) == 1 &&
+              count(loop_typed, spv::OpPhi) >= 3 && count(loop_typed, spv::OpBitcast) >= 4,
+          "loop-carried float writes or phi fallback pattern changed");
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckSpirvIfConversionLimit() {
   constexpr const char *name = "SpirvIfConversionLimit";
   const auto compile = [](uint32_t writes, bool cross_lane) {
@@ -54628,6 +54843,7 @@ int main(int argc, char **argv) {
   CheckLeastRecentlyUsedCacheOrdering();
   if (argc == 2 && std::strcmp(argv[1], "--typed-vgprs-only") == 0) {
     CheckSpirvTypedVgprs();
+    CheckSpirvTypedVgprsControlFlow();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--ifconv-limit-only") == 0) {
