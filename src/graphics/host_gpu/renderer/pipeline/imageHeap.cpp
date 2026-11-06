@@ -157,23 +157,31 @@ ImageHeap::~ImageHeap() {
 	graphics.device.destroyDescriptorSetLayout(m_layout, nullptr);
 }
 
-bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& result) {
+bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& result,
+                        const char** failure_reason) {
 	KYTY_PROFILER_FUNCTION();
+	if (failure_reason != nullptr) *failure_reason = nullptr;
+	const auto fail = [&](const char* reason) {
+		if (failure_reason != nullptr) *failure_reason = reason;
+		return false;
+	};
 	const auto size = request.size & ~uint64_t {3};
 	const bool sampler = request.sampler_root != nullptr;
-	if (request.count == 0u || request.step == 0u || sampler == (request.root != nullptr) ||
-	    ((request.base | request.first | request.step) & 3u) != 0u) {
-		return false;
+	if (request.count == 0u) return fail("empty-table");
+	if (request.step == 0u) return fail("zero-table-step");
+	if (sampler == (request.root != nullptr)) return fail("invalid-root-profile");
+	if (((request.base | request.first | request.step) & 3u) != 0u) {
+		return fail("misaligned-table");
 	}
 	auto memory = std::ranges::find_if(
 	    m_memories, [&](const auto& candidate) { return candidate->base == request.base; });
 	if (memory == m_memories.end() && size < MinTableBytes &&
 	    m_sightings.try_emplace(request.base, m_draw).first->second == m_draw) {
-		return false;
+		return fail("small-table-first-sighting");
 	}
 	// A table follows its descriptor's size, as the first program of a draw acquires it.
 	if (memory == m_memories.end() || ((*memory)->size != size && (*memory)->draw != m_draw)) {
-		if (!m_context.IsMapped(request.base, size)) return false;
+		if (!m_context.IsMapped(request.base, size)) return fail("unmapped-table");
 		if (memory == m_memories.end()) {
 			std::scoped_lock lock {m_mutex};
 			memory = m_memories.insert(m_memories.end(),
@@ -184,7 +192,7 @@ bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& 
 	// A draw refreshes a table and a view takes its changes once, so all programs of the draw see
 	// one snapshot and one set of kinds.
 	if ((*memory)->draw != m_draw) {
-		if (!Refresh(**memory)) return false;
+		if (!Refresh(**memory)) return fail("table-refresh-read");
 		(*memory)->draw = m_draw;
 	}
 	auto&      views   = (*memory)->views;

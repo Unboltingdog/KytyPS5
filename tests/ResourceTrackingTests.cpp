@@ -558,7 +558,8 @@ struct FakeImageHeap final : ImageHeapSource {
   std::vector<DescriptorValue> kinds;
   std::vector<ImageHeapRequest> requests;
   std::vector<SamplerResource> sampler_roots;
-  bool Acquire(const ImageHeapRequest &request, ImageHeapView &view) override {
+  bool Acquire(const ImageHeapRequest &request, ImageHeapView &view,
+               const char ** = nullptr) override {
     requests.push_back(request);
     if (request.sampler_root != nullptr) sampler_roots.push_back(*request.sampler_root);
     if (!accept) return false;

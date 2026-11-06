@@ -73,6 +73,14 @@ bool                 LoadResourcePlan(std::span<const uint8_t> bytes, ResourcePl
 const char* SpecializationReadSite();
 // Nanoseconds spent running SRT walkers on this thread since the last call.
 uint64_t TakeWalkNanoseconds();
+struct HeapFallback {
+	const char* kind;
+	uint32_t    resource;
+	const char* reason;
+	uint64_t    table_size;
+};
+// Tables materialized inline despite heap eligibility on this thread since the last call.
+std::vector<HeapFallback> TakeHeapFallbacks();
 // The first failure a KYTY_WALKER_NO_STALL materialization reported on this thread, then clears it.
 std::string TakeNoStallFailure();
 // KYTY_WALKER_NO_STALL: whether the read in progress may be refused when the GPU has written its

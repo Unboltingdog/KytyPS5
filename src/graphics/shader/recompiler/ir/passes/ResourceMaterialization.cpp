@@ -43,6 +43,7 @@ struct DeferScope {
 thread_local std::string t_no_stall_failure;
 // KYTY_WAIT_STATS: time spent running SRT walkers on this thread (see TakeWalkNanoseconds()).
 thread_local uint64_t t_walk_ns = 0;
+thread_local std::vector<HeapFallback> t_heap_fallbacks;
 struct WalkTimer {
 	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 	~WalkTimer() {
@@ -84,6 +85,10 @@ uint64_t TakeWalkNanoseconds() {
 	const auto ns = t_walk_ns;
 	t_walk_ns     = 0;
 	return ns;
+}
+
+std::vector<HeapFallback> TakeHeapFallbacks() {
+	return std::exchange(t_heap_fallbacks, {});
 }
 
 std::string ResourceSpecializationDiff(const ResourceSpecialization& before,
@@ -796,6 +801,22 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	uint64_t table_size = UINT64_MAX; // Scalar addresses have no buffer descriptor bounds.
 	DescriptorValue table_value;
 	ShaderBufferResource table;
+	const char* fallback_reason = nullptr;
+	if (heap_table && !byte_keys) {
+		const auto* table_source = Source(program, indirect.table_source);
+		fallback_reason = !sources.empty() ? "explicit-sources"
+		    : selector != nullptr && !indirect.table_scalar ? "non-scalar-selector"
+		    : !indirect.key_count.IsEmpty() && !indirect.table_maximum ? "unbounded-key-count"
+		    : table_source == nullptr || table_source->dword_count != 4u ? "table-descriptor-width"
+		    : "table-not-byte-addressable";
+	}
+	const auto note_fallback = [&] {
+		if (heap_table && fallback_reason != nullptr) {
+			t_heap_fallbacks.push_back({image_resource ? "image" : "sampler", resource_index,
+			                            fallback_reason, table_size});
+			fallback_reason = nullptr;
+		}
+	};
 	const auto failed = [&](std::string_view reason, std::string_view details = {}) {
 		const auto* pointer = indirect.pointer_table ? &*indirect.pointer_table : nullptr;
 		return SpecializationFail(fmt::format(
@@ -868,6 +889,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 				}
 			}
 		}
+		if (heap_table && use_selector) fallback_reason = "indexed-selector";
 		if (byte_keys && !use_selector) {
 			if (!runtime_table && !indirect.table_scalar &&
 			    table.Format() == Prospero::BufferFormat::kInvalid) {
@@ -897,6 +919,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 				return failed("indexed pointer geometry", fmt::format("rows={}", domain));
 			const bool affine = indirect.table_stride != 0u || indexed_pointer;
 			const bool runtime_heap = (image_resource || runtime_table) && pointer == nullptr;
+			if (heap_table && !runtime_heap) fallback_reason = "pointer-table";
 			const uint64_t step = indexed_pointer ? table.Stride()
 			    : indirect.table_maximum ? indirect.table_stride
 			    : affine ? std::max(uint64_t {1} << std::countr_zero(indirect.table_stride), uint64_t {4})
@@ -912,6 +935,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 			if constexpr (image_resource || sampler_resource) {
 				// A resident heap maps slot words instead of materializing its entries or keys.
 				ImageHeapView view;
+				const char* acquire_reason = "acquire-declined";
 				bool eligible = runtime_heap && runtime.image_heap != nullptr;
 				if constexpr (image_resource) {
 					const auto& image = program.info.images[resource_index];
@@ -919,7 +943,8 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 					            image.mip_mode != ImageMipMode::Dynamic;
 					if (eligible) {
 						eligible = runtime.image_heap->Acquire(
-						    {table_base, table_size, step, first, count, &image, nullptr}, view);
+						    {table_base, table_size, step, first, count, &image, nullptr}, view,
+						    &acquire_reason);
 					}
 				} else {
 					auto sampler = program.info.samplers[resource_index];
@@ -930,7 +955,8 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 					}
 					if (eligible) {
 						eligible = runtime.image_heap->Acquire(
-						    {table_base, table_size, step, first, count, nullptr, &sampler}, view);
+						    {table_base, table_size, step, first, count, nullptr, &sampler}, view,
+						    &acquire_reason);
 					}
 				}
 				if (eligible) {
@@ -956,9 +982,11 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 					}
 					return true;
 				}
+				if (heap_table && runtime_heap) fallback_reason = acquire_reason;
 			}
 			if constexpr (sampler_resource) {
 				if (runtime_table && selector != nullptr) {
+					note_fallback();
 					auto fallback_runtime = runtime;
 					fallback_runtime.image_heap = nullptr;
 					return MaterializeIndirectDescriptor(
@@ -966,6 +994,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 					    fallback_runtime, snapshot, descriptors, specializations, normalize);
 				}
 			}
+			note_fallback();
 			if (child_count == 0u || (!runtime_heap && count * child_count > MaxIndirectDescriptorProbes))
 				return failed("candidate count", fmt::format("rows={} limit={}", count, MaxIndirectDescriptorProbes));
 			// Affine SMEM offsets wrap in U32 before adding the aligned immediate.
@@ -1076,6 +1105,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	const auto selected_keys = byte_keys ? std::span<const uint32_t>(byte_offsets)
 	                                    : std::span<const uint32_t>(keys);
 	const auto key_count = sources.empty() ? selected_keys.size() : sources.size();
+	note_fallback();
 	snapshot.flattened_srt.resize(mapping_offset + 1u + key_count * 2u);
 	snapshot.flattened_srt[mapping_offset] = static_cast<uint32_t>(key_count);
 	for (uint32_t entry = 0; entry < key_count; ++entry) {
@@ -1893,6 +1923,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	t_specialization_read_deferred = false;
+	(void)TakeHeapFallbacks();
 	for (auto& keys: program.selector_keys) keys.resolved = false;
 	if (!program.resource_tracking_complete) return false;
 	const auto uses_workgroup_count = [](const DescriptorSource& source) {

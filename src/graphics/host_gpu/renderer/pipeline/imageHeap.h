@@ -39,7 +39,8 @@ public:
 		Bury();
 	}
 	bool Acquire(const ShaderRecompiler::IR::ImageHeapRequest& request,
-	             ShaderRecompiler::IR::ImageHeapView&          result) override;
+	             ShaderRecompiler::IR::ImageHeapView&          result,
+	             const char** failure_reason = nullptr) override;
 	// Resource discovery: resolves new elements and rediscovers changed images.
 	void Rebind(RenderExecutor& executor);
 	// Recording: uploads slots, moves resident images to their read layout and binds the arrays.

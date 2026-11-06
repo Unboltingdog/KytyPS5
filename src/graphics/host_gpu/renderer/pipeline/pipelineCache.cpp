@@ -183,6 +183,22 @@ bool MaterializeTimed(const ShaderRecompiler::IR::ResourcePlan&     plan,
 	(void)ShaderRecompiler::IR::TakeWalkNanoseconds();
 	const bool result = MaterializeWithoutStall(plan, runtime, snapshot, specialization);
 	GpuWaitStats::RecordCpuTime("program:materialize:walker", ShaderRecompiler::IR::TakeWalkNanoseconds());
+	if (GpuWaitStats::Enabled()) {
+		static std::mutex                    mutex;
+		static std::unordered_set<std::string> logged;
+		std::scoped_lock                     lock(mutex);
+		for (const auto& fallback: ShaderRecompiler::IR::TakeHeapFallbacks()) {
+			const auto key = fmt::format("{:016x}:{}", plan.shader_hash, fallback.reason);
+			if (!logged.insert(key).second) continue;
+			GpuWaitStats::WriteDiag(fmt::format(
+			    "heap-fallback shader=0x{:016x} kind={} resource={} reason={} table_size={}\n",
+			    plan.shader_hash, fallback.kind, fallback.resource, fallback.reason,
+			    fallback.table_size)
+			                            .c_str());
+		}
+	} else {
+		(void)ShaderRecompiler::IR::TakeHeapFallbacks();
+	}
 	return result;
 }
 

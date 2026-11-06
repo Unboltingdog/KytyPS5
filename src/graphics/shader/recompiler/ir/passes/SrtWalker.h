@@ -31,8 +31,9 @@ struct ImageHeapView {
 
 class ImageHeapSource {
 public:
-	// False when the host does not keep the table resident.
-	virtual bool Acquire(const ImageHeapRequest& request, ImageHeapView& view) = 0;
+	// False when the host does not keep the table resident, with a static reason when requested.
+	virtual bool Acquire(const ImageHeapRequest& request, ImageHeapView& view,
+	                     const char** failure_reason = nullptr) = 0;
 
 protected:
 	~ImageHeapSource() = default;
