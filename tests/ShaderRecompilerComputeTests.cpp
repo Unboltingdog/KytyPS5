@@ -54687,9 +54687,14 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--pipeline-lookahead-only") == 0) {
-    Require("PipelineLookahead", "switches",
-            setenv("KYTY_ASYNC_PIPELINES", "1", 1) == 0 &&
-                setenv("KYTY_PIPELINE_LOOKAHEAD", "1", 1) == 0,
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+    const bool switches = _putenv("KYTY_ASYNC_PIPELINES=1") == 0 &&
+                          _putenv("KYTY_PIPELINE_LOOKAHEAD=1") == 0;
+#else
+    const bool switches = setenv("KYTY_ASYNC_PIPELINES", "1", 1) == 0 &&
+                          setenv("KYTY_PIPELINE_LOOKAHEAD", "1", 1) == 0;
+#endif
+    Require("PipelineLookahead", "switches", switches,
             "could not enable asynchronous pipelines and look-ahead");
     VulkanHarness vulkan;
     CheckPipelineLookahead(vulkan);
