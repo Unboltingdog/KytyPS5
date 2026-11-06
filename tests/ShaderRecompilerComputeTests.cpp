@@ -54228,6 +54228,7 @@ void CheckSpirvTypedVgprs() {
 
 void CheckSpirvTypedVgprsControlFlow() {
   constexpr const char *name = "SpirvTypedVgprsControlFlow";
+  namespace IR = ShaderRecompiler::IR;
   const auto branch = [](IR::Block &block, IR::Block &target, IR::Value condition = {},
                          IR::Block *other = nullptr) {
     block.terminator.kind = other != nullptr ? ShaderRecompiler::CFG::TerminatorKind::ConditionalBranch
@@ -54426,7 +54427,10 @@ void CheckSpirvTypedVgprsControlFlow() {
   ValidateSpirv(name, loop_typed);
   ValidateSpirv(name, outlined);
   Require(name, "typed and mixed selects",
-          count(branch_typed, spv::OpSelect) == 2 && count(branch_typed, spv::OpBitcast) >= 6,
+          // One dominating F32 select is added next to the raw U32 select; the arms and the merge
+          // reuse it, so the module needs fewer bitcasts than the legacy one.
+          count(branch_typed, spv::OpSelect) == count(branch_legacy, spv::OpSelect) + 1 &&
+              count(branch_typed, spv::OpBitcast) < count(branch_legacy, spv::OpBitcast),
           "typed select or conservative raw fallback pattern changed");
   Require(name, "dispatcher control flow fallback",
           count(branch_dispatcher, spv::OpBitcast) > count(branch_typed, spv::OpBitcast),
