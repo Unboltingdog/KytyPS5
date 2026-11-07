@@ -10,6 +10,7 @@
 #include <cinttypes>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -486,6 +487,22 @@ static int KYTY_SYSV_ABI NpEntitlementAccessGetEntitlementKey(
 
 	if (entitlement_label == nullptr || key == nullptr) {
 		return NP_ENTITLEMENT_ACCESS_ERROR_PARAMETER;
+	}
+
+	static const bool report_known_entitlements = [] {
+		const char* value = std::getenv("KYTY_FIX_ADDCONT_ENTITLEMENT_KEY");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (report_known_entitlements) {
+		const bool legacy = std::ranges::any_of(
+		    NP_ENTITLEMENT_ACCESS_ADDON_LIST, [&](const NpEntitlementAccessAddcontEntitlementInfo& info) {
+			    return strncmp(entitlement_label->data, info.entitlement_label.data,
+			                   sizeof(entitlement_label->data)) == 0;
+		    });
+		if (legacy || Loader::AddContentFind(entitlement_label->data, sizeof(entitlement_label->data)) != nullptr) {
+			std::memset(key, 0, sizeof(*key));
+			return 0;
+		}
 	}
 
 	return NP_ENTITLEMENT_ACCESS_ERROR_NO_ENTITLEMENT;
