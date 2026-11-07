@@ -3,6 +3,7 @@
 #include "graphics/presentation/systemOverlay.h"
 #include "kernel/fileSystem.h"
 #include "libs/libs.h"
+#include "libs/npDiagnostics.h"
 #include "loader/symbolDatabase.h"
 #include "loader/systemContent.h"
 
@@ -1260,73 +1261,73 @@ static int KYTY_SYSV_ABI NpUniversalDataSystemTerminate() {
 }
 
 LIB_DEFINE(InitNet_1_NpUniversalDataSystem) {
-	LIB_FUNC("sjaobBgqeB4", LibNpUniversalDataSystem::NpUniversalDataSystemInitialize);
-	LIB_FUNC("5zBnau1uIEo", LibNpUniversalDataSystem::NpUniversalDataSystemCreateContext);
-	LIB_FUNC("hT0IAEvN+M0", LibNpUniversalDataSystem::NpUniversalDataSystemCreateHandle);
-	LIB_FUNC("p+GcLqwpL9M", LibNpUniversalDataSystem::NpUniversalDataSystemCreateEvent);
-	LIB_FUNC("CzkKf7ahIyU", LibNpUniversalDataSystem::NpUniversalDataSystemPostEvent);
-	LIB_FUNC("AUIHb7jUX3I", LibNpUniversalDataSystem::NpUniversalDataSystemDestroyHandle);
-	LIB_FUNC("jZCqWFgMehE", LibNpUniversalDataSystem::NpUniversalDataSystemAbortHandle);
-	LIB_FUNC("wB7IWzGp2v0", LibNpUniversalDataSystem::NpUniversalDataSystemDestroyContext);
-	LIB_FUNC("su7jW3VDDb4", LibNpUniversalDataSystem::NpUniversalDataSystemGetMemoryStat);
-	LIB_FUNC("+s14jq-KGYw", LibNpUniversalDataSystem::NpUniversalDataSystemEventEstimateSize);
-	LIB_FUNC("vj6CQGWtEBg", LibNpUniversalDataSystem::NpUniversalDataSystemEventToString);
-	LIB_FUNC("wG+84pnNIuo", LibNpUniversalDataSystem::NpUniversalDataSystemDestroyEvent);
-	LIB_FUNC("tpFJ8LIKvPw", LibNpUniversalDataSystem::NpUniversalDataSystemRegisterContext);
-	LIB_FUNC("s6W4Zl4Slgk",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemCreateEventPropertyObject);
-	LIB_FUNC("kKUH0Viib3c",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemDestroyEventPropertyObject);
-	LIB_FUNC("MfDb+4Nln64",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetString);
-	LIB_FUNC("YE4dbtbz6OE",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetInt32);
-	LIB_FUNC("AzD4irAcKE4",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetUInt32);
-	LIB_FUNC("56QLTqx911s",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetInt64);
-	LIB_FUNC("xvsP5Yz6FmY",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetUInt64);
-	LIB_FUNC("lbPlT4+QVcE",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetFloat32);
-	LIB_FUNC("4Fu8tHW+u-k",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetFloat64);
-	LIB_FUNC("Fidd8vWgyVE",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetBool);
-	LIB_FUNC("wAcxBDLHj1M",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetBinary);
-	LIB_FUNC("74ASEqxSnkM",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetObject);
-	LIB_FUNC("Wxbg5x3pTXA",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetArray);
-	LIB_FUNC("Hm7qubT3b70",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemCreateEventPropertyArray);
-	LIB_FUNC("W-0xwY0ZMjw",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemDestroyEventPropertyArray);
-	LIB_FUNC("4llLk7YJRTE",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetString);
-	LIB_FUNC("BypQuF113-k",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetInt32);
-	LIB_FUNC("yMi0xAOpmXM",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetUInt32);
-	LIB_FUNC("viVXAwmmYrY",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetInt64);
-	LIB_FUNC("Qo9qR7v5zO4",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetUInt64);
-	LIB_FUNC("JmgwKm96Lq4",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetFloat32);
-	LIB_FUNC("sbSYZLR5AiE",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetFloat64);
-	LIB_FUNC("0+l4QSWCM4E",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetBool);
-	LIB_FUNC("IEdUCV9j2Cw",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetBinary);
-	LIB_FUNC("XY14n3jNIpE",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetObject);
-	LIB_FUNC("rdi9BAfDLq8",
-	         LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetArray);
-	LIB_FUNC("KmN62tT4U8A", LibNpUniversalDataSystem::NpUniversalDataSystemGetStorageStat);
-	LIB_FUNC("47UAEuQl+iI", LibNpUniversalDataSystem::NpUniversalDataSystemTerminate);
+	NP_DIAGNOSTICS_FUNC("sjaobBgqeB4", LibNpUniversalDataSystem::NpUniversalDataSystemInitialize);
+	NP_DIAGNOSTICS_FUNC("5zBnau1uIEo", LibNpUniversalDataSystem::NpUniversalDataSystemCreateContext);
+	NP_DIAGNOSTICS_FUNC("hT0IAEvN+M0", LibNpUniversalDataSystem::NpUniversalDataSystemCreateHandle);
+	NP_DIAGNOSTICS_FUNC("p+GcLqwpL9M", LibNpUniversalDataSystem::NpUniversalDataSystemCreateEvent);
+	NP_DIAGNOSTICS_FUNC("CzkKf7ahIyU", LibNpUniversalDataSystem::NpUniversalDataSystemPostEvent);
+	NP_DIAGNOSTICS_FUNC("AUIHb7jUX3I", LibNpUniversalDataSystem::NpUniversalDataSystemDestroyHandle);
+	NP_DIAGNOSTICS_FUNC("jZCqWFgMehE", LibNpUniversalDataSystem::NpUniversalDataSystemAbortHandle);
+	NP_DIAGNOSTICS_FUNC("wB7IWzGp2v0", LibNpUniversalDataSystem::NpUniversalDataSystemDestroyContext);
+	NP_DIAGNOSTICS_FUNC("su7jW3VDDb4", LibNpUniversalDataSystem::NpUniversalDataSystemGetMemoryStat);
+	NP_DIAGNOSTICS_FUNC("+s14jq-KGYw", LibNpUniversalDataSystem::NpUniversalDataSystemEventEstimateSize);
+	NP_DIAGNOSTICS_FUNC("vj6CQGWtEBg", LibNpUniversalDataSystem::NpUniversalDataSystemEventToString);
+	NP_DIAGNOSTICS_FUNC("wG+84pnNIuo", LibNpUniversalDataSystem::NpUniversalDataSystemDestroyEvent);
+	NP_DIAGNOSTICS_FUNC("tpFJ8LIKvPw", LibNpUniversalDataSystem::NpUniversalDataSystemRegisterContext);
+	NP_DIAGNOSTICS_FUNC("s6W4Zl4Slgk",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemCreateEventPropertyObject);
+	NP_DIAGNOSTICS_FUNC("kKUH0Viib3c",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemDestroyEventPropertyObject);
+	NP_DIAGNOSTICS_FUNC("MfDb+4Nln64",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetString);
+	NP_DIAGNOSTICS_FUNC("YE4dbtbz6OE",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetInt32);
+	NP_DIAGNOSTICS_FUNC("AzD4irAcKE4",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetUInt32);
+	NP_DIAGNOSTICS_FUNC("56QLTqx911s",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetInt64);
+	NP_DIAGNOSTICS_FUNC("xvsP5Yz6FmY",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetUInt64);
+	NP_DIAGNOSTICS_FUNC("lbPlT4+QVcE",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetFloat32);
+	NP_DIAGNOSTICS_FUNC("4Fu8tHW+u-k",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetFloat64);
+	NP_DIAGNOSTICS_FUNC("Fidd8vWgyVE",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetBool);
+	NP_DIAGNOSTICS_FUNC("wAcxBDLHj1M",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetBinary);
+	NP_DIAGNOSTICS_FUNC("74ASEqxSnkM",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetObject);
+	NP_DIAGNOSTICS_FUNC("Wxbg5x3pTXA",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyObjectSetArray);
+	NP_DIAGNOSTICS_FUNC("Hm7qubT3b70",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemCreateEventPropertyArray);
+	NP_DIAGNOSTICS_FUNC("W-0xwY0ZMjw",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemDestroyEventPropertyArray);
+	NP_DIAGNOSTICS_FUNC("4llLk7YJRTE",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetString);
+	NP_DIAGNOSTICS_FUNC("BypQuF113-k",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetInt32);
+	NP_DIAGNOSTICS_FUNC("yMi0xAOpmXM",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetUInt32);
+	NP_DIAGNOSTICS_FUNC("viVXAwmmYrY",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetInt64);
+	NP_DIAGNOSTICS_FUNC("Qo9qR7v5zO4",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetUInt64);
+	NP_DIAGNOSTICS_FUNC("JmgwKm96Lq4",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetFloat32);
+	NP_DIAGNOSTICS_FUNC("sbSYZLR5AiE",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetFloat64);
+	NP_DIAGNOSTICS_FUNC("0+l4QSWCM4E",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetBool);
+	NP_DIAGNOSTICS_FUNC("IEdUCV9j2Cw",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetBinary);
+	NP_DIAGNOSTICS_FUNC("XY14n3jNIpE",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetObject);
+	NP_DIAGNOSTICS_FUNC("rdi9BAfDLq8",
+	                    LibNpUniversalDataSystem::NpUniversalDataSystemEventPropertyArraySetArray);
+	NP_DIAGNOSTICS_FUNC("KmN62tT4U8A", LibNpUniversalDataSystem::NpUniversalDataSystemGetStorageStat);
+	NP_DIAGNOSTICS_FUNC("47UAEuQl+iI", LibNpUniversalDataSystem::NpUniversalDataSystemTerminate);
 }
 
 } // namespace LibNpUniversalDataSystem

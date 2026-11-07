@@ -35,6 +35,7 @@
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "libs/network.h"
+#include "libs/npDiagnostics.h"
 
 #include <algorithm>
 #include <array>
@@ -4188,9 +4189,13 @@ int KYTY_SYSV_ABI NpCheckCallback() {
 		}
 	}
 	for (const auto& entry: pending) {
-		entry.callback(Config::GetUserId(),
-		               IsSignedIn(Config::GetUserId()) ? np_state_signed_in : np_state_signed_out,
-		               entry.userdata);
+		const int user_id = Config::GetUserId();
+		const uint32_t state = IsSignedIn(user_id) ? np_state_signed_in : np_state_signed_out;
+		if (NpDiagnostics::Enabled()) {
+			NpDiagnostics::LogCallback(
+			    "NpStateCallbackA", NpDiagnostics::FormatArguments(user_id, state, entry.userdata));
+		}
+		entry.callback(user_id, state, entry.userdata);
 	}
 
 	return OK;

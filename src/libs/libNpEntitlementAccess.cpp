@@ -1,6 +1,7 @@
 #include "common/abi.h"
 #include "common/logging/log.h"
 #include "libs/libs.h"
+#include "libs/npDiagnostics.h"
 #include "loader/additionalContent.h"
 #include "loader/symbolDatabase.h"
 
@@ -491,24 +492,24 @@ static int KYTY_SYSV_ABI NpEntitlementAccessGetEntitlementKey(
 }
 
 LIB_DEFINE(InitNet_1_NpEntitlementAccess) {
-	LIB_FUNC("jO8DM8oyego", LibNpEntitlementAccess::NpEntitlementAccessInitialize);
-	LIB_FUNC("lPDO62PpJIA", LibNpEntitlementAccess::NpEntitlementAccessGetSkuFlag);
-	LIB_FUNC("TFyU+KFBv54",
-	         LibNpEntitlementAccess::NpEntitlementAccessGetAddcontEntitlementInfoList);
-	LIB_FUNC("xddD23+8TfQ", LibNpEntitlementAccess::NpEntitlementAccessGetAddcontEntitlementInfo);
-	LIB_FUNC("5LiMEPuW0DQ", LibNpEntitlementAccess::NpEntitlementAccessGetEntitlementKey);
-	LIB_FUNC("y7JD1gfwyfA", NpEntitlementAccessGetGameTrialsFlag);
-	LIB_FUNC("IQtb-TaIjSM", NpEntitlementAccessGenerateTransactionId);
-	LIB_FUNC("uCZf2L27th8", NpEntitlementAccessRequestUnifiedEntitlementInfoList);
-	LIB_FUNC("brbRxzr7qyI", NpEntitlementAccessRequestServiceEntitlementInfoList);
-	LIB_FUNC("jautSRs4OdQ", NpEntitlementAccessRequestUnifiedEntitlementInfo);
-	LIB_FUNC("eOxGbG3sPb0", NpEntitlementAccessRequestConsumeUnifiedEntitlement);
-	LIB_FUNC("nAEqawEZG5s", NpEntitlementAccessPollUnifiedEntitlementInfoList);
-	LIB_FUNC("aFv8qms6XTM", NpEntitlementAccessPollServiceEntitlementInfoList);
-	LIB_FUNC("M4XlLFnzQaQ", NpEntitlementAccessPollUnifiedEntitlementInfo);
-	LIB_FUNC("69u+XqsoNd0", NpEntitlementAccessPollConsumeEntitlement);
-	LIB_FUNC("HFcQl9TMcFQ", NpEntitlementAccessAbortRequest);
-	LIB_FUNC("Z0eQj8m7XA8", NpEntitlementAccessDeleteRequest);
+	NP_DIAGNOSTICS_FUNC("jO8DM8oyego", LibNpEntitlementAccess::NpEntitlementAccessInitialize);
+	NP_DIAGNOSTICS_FUNC("lPDO62PpJIA", LibNpEntitlementAccess::NpEntitlementAccessGetSkuFlag);
+	NP_DIAGNOSTICS_FUNC("TFyU+KFBv54",
+	                    LibNpEntitlementAccess::NpEntitlementAccessGetAddcontEntitlementInfoList);
+	NP_DIAGNOSTICS_FUNC("xddD23+8TfQ", LibNpEntitlementAccess::NpEntitlementAccessGetAddcontEntitlementInfo);
+	NP_DIAGNOSTICS_FUNC("5LiMEPuW0DQ", LibNpEntitlementAccess::NpEntitlementAccessGetEntitlementKey);
+	NP_DIAGNOSTICS_FUNC("y7JD1gfwyfA", NpEntitlementAccessGetGameTrialsFlag);
+	NP_DIAGNOSTICS_FUNC("IQtb-TaIjSM", NpEntitlementAccessGenerateTransactionId);
+	NP_DIAGNOSTICS_FUNC("uCZf2L27th8", NpEntitlementAccessRequestUnifiedEntitlementInfoList);
+	NP_DIAGNOSTICS_FUNC("brbRxzr7qyI", NpEntitlementAccessRequestServiceEntitlementInfoList);
+	NP_DIAGNOSTICS_FUNC("jautSRs4OdQ", NpEntitlementAccessRequestUnifiedEntitlementInfo);
+	NP_DIAGNOSTICS_FUNC("eOxGbG3sPb0", NpEntitlementAccessRequestConsumeUnifiedEntitlement);
+	NP_DIAGNOSTICS_FUNC("nAEqawEZG5s", NpEntitlementAccessPollUnifiedEntitlementInfoList);
+	NP_DIAGNOSTICS_FUNC("aFv8qms6XTM", NpEntitlementAccessPollServiceEntitlementInfoList);
+	NP_DIAGNOSTICS_FUNC("M4XlLFnzQaQ", NpEntitlementAccessPollUnifiedEntitlementInfo);
+	NP_DIAGNOSTICS_FUNC("69u+XqsoNd0", NpEntitlementAccessPollConsumeEntitlement);
+	NP_DIAGNOSTICS_FUNC("HFcQl9TMcFQ", NpEntitlementAccessAbortRequest);
+	NP_DIAGNOSTICS_FUNC("Z0eQj8m7XA8", NpEntitlementAccessDeleteRequest);
 }
 
 } // namespace LibNpEntitlementAccess
@@ -530,7 +531,7 @@ static int KYTY_SYSV_ABI NpEntitlementAccessPftUnknowneDXKe9FndlE(uint32_t* stat
 }
 
 LIB_DEFINE(InitNet_1_NpEntitlementAccessPft) {
-	LIB_FUNC("eDXKe9FndlE", NpEntitlementAccessPftUnknowneDXKe9FndlE);
+	NP_DIAGNOSTICS_FUNC("eDXKe9FndlE", NpEntitlementAccessPftUnknowneDXKe9FndlE);
 }
 
 } // namespace LibNpEntitlementAccessPft

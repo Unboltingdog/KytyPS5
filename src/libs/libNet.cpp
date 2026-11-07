@@ -6,6 +6,7 @@
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "libs/network.h"
+#include "libs/npDiagnostics.h"
 #include "loader/symbolDatabase.h"
 
 #include <algorithm>
@@ -1663,34 +1664,34 @@ LIB_VERSION("NpManager", 1, "NpManager", 1, 1);
 namespace NpManager = Network::NpManager;
 
 LIB_DEFINE(InitNet_1_NpManager) {
-	LIB_FUNC("3Zl8BePTh9Y", NpManager::NpCheckCallback);
-	LIB_FUNC("Ec63y59l9tw", NpManager::NpSetNpTitleId);
-	LIB_FUNC("A2CQ3kgSopQ", NpManager::NpSetContentRestriction);
-	LIB_FUNC("VfRSmPmj8Q8", NpManager::NpRegisterStateCallback);
-	LIB_FUNC("qQJfO8HAiaY", NpManager::NpRegisterStateCallbackA);
-	LIB_FUNC("M3wFXbYQtAA", NpManager::NpUnregisterStateCallback);
-	LIB_FUNC("uFJpaKNBAj4", NpManager::NpRegisterGamePresenceCallback);
-	LIB_FUNC("GImICnh+boA", NpManager::NpRegisterPlusEventCallback);
-	LIB_FUNC("+yqjab2fUJA", NpManager::NpRegisterPremiumEventCallback);
-	LIB_FUNC("hw5KNqAAels", NpManager::NpRegisterNpReachabilityStateCallback);
-	LIB_FUNC("p-o74CnoNzY", NpManager::NpGetNpId);
-	LIB_FUNC("XDncXQIJUSk", NpManager::NpGetOnlineId);
-	LIB_FUNC("rbknaUjpqWo", NpManager::NpGetAccountIdA);
-	LIB_FUNC("VgYczPGB5ss", NpManager::NpGetUserIdByAccountId);
-	LIB_FUNC("JT+t00a3TxA", NpManager::NpGetAccountCountryA);
-	LIB_FUNC("+4DegjBqV1g", NpManager::NpGetAccountAge);
-	LIB_FUNC("3Tcz5bNCfZQ", NpManager::NpGetAccountLanguage2);
-	LIB_FUNC("GpLQDNKICac", NpManager::NpCreateRequest);
-	LIB_FUNC("eiqMCt9UshI", NpManager::NpCreateAsyncRequest);
-	LIB_FUNC("S7QTn72PrDw", NpManager::NpDeleteRequest);
-	LIB_FUNC("OzKvTvg3ZYU", NpManager::NpAbortRequest);
-	LIB_FUNC("2rsFmlGWleQ", NpManager::NpCheckNpAvailability);
-	LIB_FUNC("KfGZg2y73oM", NpManager::NpCheckNpReachability);
-	LIB_FUNC("uqcPJLWL08M", NpManager::NpPollAsync);
-	LIB_FUNC("O80NrhUOPGY", NpManager::NpCheckPremium);
-	LIB_FUNC("eQH7nWPcAgc", NpManager::NpGetState);
-	LIB_FUNC("e-ZuhGEoeC4", NpManager::NpGetNpReachabilityState);
-	LIB_FUNC("Oad3rvY-NJQ", NpManager::NpHasSignedUp);
+	NP_DIAGNOSTICS_FUNC("3Zl8BePTh9Y", NpManager::NpCheckCallback);
+	NP_DIAGNOSTICS_FUNC("Ec63y59l9tw", NpManager::NpSetNpTitleId);
+	NP_DIAGNOSTICS_FUNC("A2CQ3kgSopQ", NpManager::NpSetContentRestriction);
+	NP_DIAGNOSTICS_FUNC("VfRSmPmj8Q8", NpManager::NpRegisterStateCallback);
+	NP_DIAGNOSTICS_FUNC("qQJfO8HAiaY", NpManager::NpRegisterStateCallbackA);
+	NP_DIAGNOSTICS_FUNC("M3wFXbYQtAA", NpManager::NpUnregisterStateCallback);
+	NP_DIAGNOSTICS_FUNC("uFJpaKNBAj4", NpManager::NpRegisterGamePresenceCallback);
+	NP_DIAGNOSTICS_FUNC("GImICnh+boA", NpManager::NpRegisterPlusEventCallback);
+	NP_DIAGNOSTICS_FUNC("+yqjab2fUJA", NpManager::NpRegisterPremiumEventCallback);
+	NP_DIAGNOSTICS_FUNC("hw5KNqAAels", NpManager::NpRegisterNpReachabilityStateCallback);
+	NP_DIAGNOSTICS_FUNC("p-o74CnoNzY", NpManager::NpGetNpId);
+	NP_DIAGNOSTICS_FUNC("XDncXQIJUSk", NpManager::NpGetOnlineId);
+	NP_DIAGNOSTICS_FUNC("rbknaUjpqWo", NpManager::NpGetAccountIdA);
+	NP_DIAGNOSTICS_FUNC("VgYczPGB5ss", NpManager::NpGetUserIdByAccountId);
+	NP_DIAGNOSTICS_FUNC("JT+t00a3TxA", NpManager::NpGetAccountCountryA);
+	NP_DIAGNOSTICS_FUNC("+4DegjBqV1g", NpManager::NpGetAccountAge);
+	NP_DIAGNOSTICS_FUNC("3Tcz5bNCfZQ", NpManager::NpGetAccountLanguage2);
+	NP_DIAGNOSTICS_FUNC("GpLQDNKICac", NpManager::NpCreateRequest);
+	NP_DIAGNOSTICS_FUNC("eiqMCt9UshI", NpManager::NpCreateAsyncRequest);
+	NP_DIAGNOSTICS_FUNC("S7QTn72PrDw", NpManager::NpDeleteRequest);
+	NP_DIAGNOSTICS_FUNC("OzKvTvg3ZYU", NpManager::NpAbortRequest);
+	NP_DIAGNOSTICS_FUNC("2rsFmlGWleQ", NpManager::NpCheckNpAvailability);
+	NP_DIAGNOSTICS_FUNC("KfGZg2y73oM", NpManager::NpCheckNpReachability);
+	NP_DIAGNOSTICS_FUNC("uqcPJLWL08M", NpManager::NpPollAsync);
+	NP_DIAGNOSTICS_FUNC("O80NrhUOPGY", NpManager::NpCheckPremium);
+	NP_DIAGNOSTICS_FUNC("eQH7nWPcAgc", NpManager::NpGetState);
+	NP_DIAGNOSTICS_FUNC("e-ZuhGEoeC4", NpManager::NpGetNpReachabilityState);
+	NP_DIAGNOSTICS_FUNC("Oad3rvY-NJQ", NpManager::NpHasSignedUp);
 }
 
 } // namespace LibNpManager
@@ -1841,6 +1842,11 @@ static int KYTY_SYSV_ABI NpSessionSignalingRequestPrepare(uint32_t context_id,
 	}
 
 	if (callback != nullptr) {
+		if (NpDiagnostics::Enabled()) {
+			NpDiagnostics::LogCallback(
+			    "NpSessionSignalingPrepareCallback",
+			    NpDiagnostics::FormatArguments(context_id, *request_id, 0, callback, nullptr, OK, user_data));
+		}
 		callback(context_id, *request_id, 0, nullptr, OK, user_data);
 	}
 	return OK;
@@ -1877,16 +1883,16 @@ static bool NpSignalingStubsEnabled() {
 }
 
 LIB_DEFINE(InitNet_1_NpSessionSignaling) {
-	LIB_FUNC("ysmw6J-P8Ak", NpSessionSignalingInitialize);
+	NP_DIAGNOSTICS_FUNC("ysmw6J-P8Ak", NpSessionSignalingInitialize);
 	if (!NpSignalingStubsEnabled()) {
 		return;
 	}
-	LIB_FUNC("GtuZGmN-tKw", NpSessionSignalingCreateContext);
-	LIB_FUNC("aBuX0PX-T7I", NpSessionSignalingCreateContext2);
-	LIB_FUNC("Z9Q9LzQDXf0", NpSessionSignalingDestroyContext);
-	LIB_FUNC("r8mVMwlafF8", NpSessionSignalingRequestPrepare);
-	LIB_FUNC("OTilStjd9L8", NpSessionSignalingGetLocalNetInfo);
-	LIB_FUNC("CqJuNXo5yiM", NpSessionSignalingTerminate);
+	NP_DIAGNOSTICS_FUNC("GtuZGmN-tKw", NpSessionSignalingCreateContext);
+	NP_DIAGNOSTICS_FUNC("aBuX0PX-T7I", NpSessionSignalingCreateContext2);
+	NP_DIAGNOSTICS_FUNC("Z9Q9LzQDXf0", NpSessionSignalingDestroyContext);
+	NP_DIAGNOSTICS_FUNC("r8mVMwlafF8", NpSessionSignalingRequestPrepare);
+	NP_DIAGNOSTICS_FUNC("OTilStjd9L8", NpSessionSignalingGetLocalNetInfo);
+	NP_DIAGNOSTICS_FUNC("CqJuNXo5yiM", NpSessionSignalingTerminate);
 }
 
 } // namespace LibNpSessionSignaling
@@ -2155,14 +2161,14 @@ static int KYTY_SYSV_ABI NpAuthGetIdTokenV3(int req_id, const NpAuthGetIdTokenPa
 }
 
 LIB_DEFINE(InitNet_1_NpAuth) {
-	LIB_FUNC("6bwFkosYRQg", LibNpAuth::NpAuthCreateRequest);
-	LIB_FUNC("N+mr7GjTvr8", LibNpAuth::NpAuthCreateAsyncRequest);
-	LIB_FUNC("H8wG9Bk-nPc", LibNpAuth::NpAuthDeleteRequest);
-	LIB_FUNC("cE7wIsqXdZ8", LibNpAuth::NpAuthAbortRequest);
-	LIB_FUNC("SK-S7daqJSE", LibNpAuth::NpAuthWaitAsync);
-	LIB_FUNC("gjSyfzSsDcE", LibNpAuth::NpAuthPollAsync);
-	LIB_FUNC("KI4dHLlTNl0", LibNpAuth::NpAuthGetAuthorizationCodeV3);
-	LIB_FUNC("RdsFVsgSpZY", LibNpAuth::NpAuthGetIdTokenV3);
+	NP_DIAGNOSTICS_FUNC("6bwFkosYRQg", LibNpAuth::NpAuthCreateRequest);
+	NP_DIAGNOSTICS_FUNC("N+mr7GjTvr8", LibNpAuth::NpAuthCreateAsyncRequest);
+	NP_DIAGNOSTICS_FUNC("H8wG9Bk-nPc", LibNpAuth::NpAuthDeleteRequest);
+	NP_DIAGNOSTICS_FUNC("cE7wIsqXdZ8", LibNpAuth::NpAuthAbortRequest);
+	NP_DIAGNOSTICS_FUNC("SK-S7daqJSE", LibNpAuth::NpAuthWaitAsync);
+	NP_DIAGNOSTICS_FUNC("gjSyfzSsDcE", LibNpAuth::NpAuthPollAsync);
+	NP_DIAGNOSTICS_FUNC("KI4dHLlTNl0", LibNpAuth::NpAuthGetAuthorizationCodeV3);
+	NP_DIAGNOSTICS_FUNC("RdsFVsgSpZY", LibNpAuth::NpAuthGetIdTokenV3);
 }
 
 } // namespace LibNpAuth
