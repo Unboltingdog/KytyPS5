@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <charconv>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <filesystem>
 #include <string_view>
 #include <vector>
@@ -487,7 +489,44 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 	return show_help || (!options.app0_dir.empty() && !options.elf.empty());
 }
 
+// kyty-env.txt (Unboltingdog): KEY=VALUE lines beside the emulator (or in the working directory) set environment
+// switches such as KYTY_HOST_WAVE32 before anything reads them, so a test configuration can be launched from the
+// launcher without a shell. A variable already set in the environment wins; '#' starts a comment line.
+static void LoadEnvironmentFile(const char* argv0) {
+	std::vector<std::filesystem::path> candidates {"kyty-env.txt"};
+	std::error_code                    error;
+	if (argv0 != nullptr) {
+		const auto exe = std::filesystem::absolute(argv0, error);
+		if (!error) candidates.push_back(exe.parent_path() / "kyty-env.txt");
+	}
+	for (const auto& path: candidates) {
+		std::FILE* file = std::fopen(path.string().c_str(), "r");
+		if (file == nullptr) continue;
+		char line[512];
+		while (std::fgets(line, sizeof(line), file) != nullptr) {
+			std::string_view text(line);
+			while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' ')) text.remove_suffix(1);
+			while (!text.empty() && text.front() == ' ') text.remove_prefix(1);
+			if (text.empty() || text.front() == '#') continue;
+			const auto eq = text.find('=');
+			if (eq == std::string_view::npos || eq == 0) continue;
+			const std::string key(text.substr(0, eq));
+			const std::string value(text.substr(eq + 1));
+			if (std::getenv(key.c_str()) != nullptr) continue;
+#if defined(_WIN32)
+			_putenv_s(key.c_str(), value.c_str());
+#else
+			setenv(key.c_str(), value.c_str(), 0);
+#endif
+			std::fprintf(stderr, "kyty-env.txt: %s=%s\n", key.c_str(), value.c_str());
+		}
+		std::fclose(file);
+		return;
+	}
+}
+
 static int Main(int argc, char* argv[]) {
+	LoadEnvironmentFile(argc > 0 ? argv[0] : nullptr);
 	VirtualMemory::Init();
 	InitializeThreads();
 

@@ -657,11 +657,18 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 	vk::PipelineShaderStageCreateInfo shader_stages[4] {};
 	uint32_t                          shader_stage_count = 0;
+	// KYTY_HOST_WAVE32: 32-lane subgroups for every graphics stage the driver lets us size.
+	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo wave32_size {};
+	wave32_size.requiredSubgroupSize = 32u;
+	const auto with_wave32 = [&](vk::PipelineShaderStageCreateInfo info) {
+		if (graphics.HostWave32RequiredSize(info.stage) != 0u) info.pNext = &wave32_size;
+		return info;
+	};
 	for (uint32_t i = 0; i < vertex_info.size(); i++) {
-		shader_stages[shader_stage_count++] = {.stage =
+		shader_stages[shader_stage_count++] = with_wave32({.stage =
 		                                           NativeShaderStage(vertex_info[i].logical_stage),
 		                                       .module = programs.vertex[i].module,
-		                                       .pName  = "main"};
+		                                       .pName  = "main"});
 	}
 	if (rect_list) {
 		shader_stages[shader_stage_count++] = {.stage =
@@ -674,9 +681,9 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		                                       .pName  = "main"};
 	}
 	if (ps_active) {
-		shader_stages[shader_stage_count++] = {.stage  = vk::ShaderStageFlagBits::eFragment,
+		shader_stages[shader_stage_count++] = with_wave32({.stage  = vk::ShaderStageFlagBits::eFragment,
 		                                       .module = pixel_program.module,
-		                                       .pName  = "main"};
+		                                       .pName  = "main"});
 	}
 
 	vk::VertexInputAttributeDescription input_attr[ShaderVertexInputInfo::RES_MAX] {};
@@ -1066,7 +1073,11 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	comp_shader_stage_info.pName  = "main";
 	EXIT_IF(!input_info.stage);
 	const auto wave_size = input_info.stage.program->wave_size;
-	if (graphics.compute_subgroup_size_control_enabled &&
+	if (const auto wave32 = graphics.HostWave32RequiredSize(vk::ShaderStageFlagBits::eCompute); wave32 != 0u) {
+		// KYTY_HOST_WAVE32: wave64 programs were translated for 32-lane subgroups (two lanes per invocation).
+		comp_subgroup_size.requiredSubgroupSize = wave32;
+		comp_shader_stage_info.pNext            = &comp_subgroup_size;
+	} else if (graphics.compute_subgroup_size_control_enabled &&
 	    wave_size >= graphics.min_subgroup_size && wave_size <= graphics.max_subgroup_size) {
 		comp_subgroup_size.requiredSubgroupSize = wave_size;
 		comp_shader_stage_info.pNext            = &comp_subgroup_size;

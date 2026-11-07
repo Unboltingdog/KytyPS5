@@ -1723,7 +1723,7 @@ static void GraphicsProgramInputs(const GraphicContext& graphics, const HW::Vert
 	if (mesh_active) {
 		EXIT_NOT_IMPLEMENTED(!graphics.mesh_shader_enabled);
 		auto& mesh              = vertex_info[0].mesh;
-		mesh.host_subgroup_size = graphics.subgroup_size;
+		mesh.host_subgroup_size = graphics.HostWave32RequiredSize(vk::ShaderStageFlagBits::eMeshEXT) != 0u ? 32u : graphics.subgroup_size;
 		const auto& limits      = graphics.mesh_shader_properties;
 		const auto  logical_threads =
 		    mesh.threads_num[0] * mesh.threads_num[1] * mesh.threads_num[2];

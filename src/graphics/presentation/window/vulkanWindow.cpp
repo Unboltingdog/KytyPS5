@@ -1,3 +1,6 @@
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <unordered_map>
 #include <mutex>
 #include <SDL3/SDL.h>
@@ -686,6 +689,19 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	    subgroup_size_control.minSubgroupSize <= 64 &&
 	    subgroup_size_control.maxSubgroupSize >= 64;
 
+	{
+		const char* wave32 = std::getenv("KYTY_HOST_WAVE32");
+		graphics.host_wave32 = wave32 != nullptr && std::strcmp(wave32, "0") != 0;
+	}
+	if (graphics.host_wave32 && !(graphics.compute_subgroup_size_control_enabled &&
+	                              graphics.min_subgroup_size <= 32u)) {
+		LOGF("KYTY_HOST_WAVE32: the device cannot run 32-lane subgroups on request; switch ignored\n");
+		graphics.host_wave32 = false;
+	}
+	std::fprintf(stderr, "HOST_WAVE32 %s default=%u min=%u max=%u stages=0x%08x\n",
+	             graphics.host_wave32 ? "on" : "off", graphics.subgroup_size, graphics.min_subgroup_size,
+	             graphics.max_subgroup_size,
+	             static_cast<vk::ShaderStageFlags::MaskType>(graphics.required_subgroup_size_stages));
 	LOGF("Vulkan subgroup: default=%u min=%u max=%u stages=0x%08x size_control=%s wave64=%s\n",
 	     graphics.subgroup_size, graphics.min_subgroup_size, graphics.max_subgroup_size,
 	     static_cast<vk::ShaderStageFlags::MaskType>(graphics.required_subgroup_size_stages),

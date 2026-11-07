@@ -44,6 +44,9 @@ struct GraphicContext {
 	// KYTY_TRACE_PIPELINE_STATS: VK_KHR_pipeline_executable_properties is enabled.
 	bool                               pipeline_stats_enabled                = false;
 	bool                               compute_subgroup_size_control_enabled = false;
+	// KYTY_HOST_WAVE32=1 (Unboltingdog): run every stage in 32-lane subgroups, as on NVIDIA (the tested path): wave64
+	// compute uses the two-lanes pairing, and graphics stages ask the driver for 32 where it lets us choose.
+	bool                               host_wave32                           = false;
 	bool                               sample_rate_shading_enabled           = false;
 	bool                               shader_image_int64_atomics_enabled    = false;
 	// KYTY_FIX_DCC_GPU_CLEAR_CHECK: VK_EXT_conditional_rendering is enabled.
@@ -126,7 +129,15 @@ struct GraphicContext {
 	}
 
 	[[nodiscard]] bool SupportsComputeWave64() const noexcept {
-		return subgroup_size == 64u || compute_subgroup_size_control_enabled;
+		return !host_wave32 && (subgroup_size == 64u || compute_subgroup_size_control_enabled);
+	}
+
+	// The subgroup size a stage must be created with under KYTY_HOST_WAVE32 (0: leave it to the driver).
+	[[nodiscard]] uint32_t HostWave32RequiredSize(vk::ShaderStageFlagBits stage) const noexcept {
+		return host_wave32 && compute_subgroup_size_control_enabled && min_subgroup_size <= 32u &&
+		               max_subgroup_size >= 32u && (required_subgroup_size_stages & stage)
+		           ? 32u
+		           : 0u;
 	}
 
 	[[nodiscard]] vk::DeviceSize StorageMinAlignment() const {
