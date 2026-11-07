@@ -181,8 +181,13 @@ ShaderRecompiler::Spirv::Profile ShaderCompileProfile(const GraphicContext& grap
 	// Upstream 460a196fc (maintenance8: dynamic sample texel offsets); native min/max on AMD (NMin/NMax give the guest's
 	// NaN and signed-zero results); the device clock (77a8f3075); robustBufferAccess2 to the byte (ee034be4b; the
 	// emitter's compute stages rely on it, step K2).
+	static const bool force_nvidia_minmax = [] {
+		const char* value = std::getenv("KYTY_FORCE_NVIDIA_MINMAX");
+		return value != nullptr && value[0] == '1';
+	}();
 	return {.maintenance8           = graphics.maintenance8_enabled,
-	        .native_float_min_max   = graphics.physical_device_properties.vendorID == 0x1002u,
+	        .native_float_min_max   = graphics.physical_device_properties.vendorID == 0x1002u &&
+	                                  !force_nvidia_minmax,
 	        .device_clock_period_ps = graphics.device_clock_period_ps,
 	        .robust_buffer_access   = graphics.robust_buffer_access_enabled};
 }

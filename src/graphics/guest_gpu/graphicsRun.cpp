@@ -510,6 +510,14 @@ static void CopyFromGuest(void* destination, const volatile void* source, size_t
 // touches the journal. Measured lag label -> host completion before this: p50 ~2 ms,
 // p99 ~12 ms in play.
 namespace {
+bool LabelsAtCompletion() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_LABEL_AT_COMPLETION");
+		return value == nullptr || value[0] != '0';
+	}();
+	return on;
+}
+
 struct LabelStats {
 	std::atomic<uint64_t> deferred {0}, published {0}, overlay_hits {0}, lag_ns {0}, max_lag_ns {0}, max_pending {0};
 };
@@ -3117,9 +3125,17 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 	const bool stamped = write == EndOfPipeWrite::Qword && gpu_clock && VirtualGpuClock::Enabled();
 	if (gpu != nullptr && write == EndOfPipeWrite::Dword) {
 		const auto label = static_cast<uint32_t>(data);
-		gpu->NoteDeferredWrite(sequence, destination, sizeof(label), &label);
+		if (LabelsAtCompletion()) {
+			gpu->NoteDeferredWrite(sequence, destination, sizeof(label), &label);
+		} else {
+			gpu->NoteGuestWrite(sequence, destination, sizeof(label), &label);
+		}
 	} else if (gpu != nullptr && write == EndOfPipeWrite::Qword && !stamped) {
-		gpu->NoteDeferredWrite(sequence, destination, sizeof(data), &data);
+		if (LabelsAtCompletion()) {
+			gpu->NoteDeferredWrite(sequence, destination, sizeof(data), &data);
+		} else {
+			gpu->NoteGuestWrite(sequence, destination, sizeof(data), &data);
+		}
 	}
 	EmitCallback([=, this] {
 		ExecuteEndOfPipe(write, sequence, dst_gpu_addr, data, gpu_clock, with_interrupt, interrupt_context_id);
@@ -3221,7 +3237,7 @@ void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence,
 			const auto data = static_cast<uint32_t>(value);
 			EXIT_IF(dst_gpu_addr == nullptr);
 			(void)command.Handle();
-			if (g_gpu_state == nullptr) {
+			if (g_gpu_state == nullptr || !LabelsAtCompletion()) {
 				WriteLabelNow(dst_gpu_addr, &data, sizeof(data), with_interrupt, interrupt_context_id);
 				return;
 			}
@@ -3241,7 +3257,7 @@ void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence,
 				}
 				return;
 			}
-			if (g_gpu_state == nullptr) {
+			if (g_gpu_state == nullptr || !LabelsAtCompletion()) {
 				WriteLabelNow(dst_gpu_addr, &value, sizeof(value), with_interrupt, interrupt_context_id);
 				return;
 			}

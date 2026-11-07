@@ -238,6 +238,13 @@ void BufferCache::LoadFallbackList() {
 // refuses it (remembered and counted: the granule's pages then miss as without the fallback). The direct downloads into
 // the backing take their imports from here (one import of each host range).
 Buffer* BufferCache::FallbackChunk(size_t chunk, bool want) {
+	static const bool disabled = [] {
+		const char* value = std::getenv("KYTY_DISABLE_BDA_FALLBACK");
+		const bool on = value != nullptr && value[0] == '1';
+		if (on) std::fprintf(stderr, "FIX_BDA_FALLBACK disabled: missing pages read zero and stores are dropped\n");
+		return on;
+	}();
+	if (disabled) return nullptr;
 	const uint64_t base  = LibKernel::Memory::GuestBackingBase();
 	const uint64_t total = LibKernel::Memory::GuestBackingSize();
 	if (base == 0 || static_cast<uint64_t>(chunk) * FallbackChunkBytes >= total) return nullptr;

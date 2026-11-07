@@ -643,8 +643,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	{
 		using Independence = vk::ShaderFloatControlsIndependence;
 		constexpr uint32_t VendorNvidia = 0x10deu;
-		const bool         float16 =
-		    properties2.properties.vendorID == VendorNvidia && supported_features12.shaderFloat16 == VK_TRUE &&
+		const bool force_nvidia_f16 = [] {
+			const char* value = std::getenv("KYTY_FORCE_NVIDIA_F16");
+			return value != nullptr && value[0] == '1';
+		}();
+		const bool float16 =
+		    (properties2.properties.vendorID == VendorNvidia || force_nvidia_f16) &&
+		    supported_features12.shaderFloat16 == VK_TRUE &&
 		    float_controls.shaderDenormPreserveFloat16 == VK_TRUE &&
 		    float_controls.shaderRoundingModeRTEFloat16 == VK_TRUE &&
 		    float_controls.shaderSignedZeroInfNanPreserveFloat16 == VK_TRUE &&
@@ -711,7 +716,12 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	graphics.attachment_feedback_loop_enabled =
 	    feedback_extensions && feedback_layout.attachmentFeedbackLoopLayout &&
 	    feedback_dynamic.attachmentFeedbackLoopDynamicState;
-	graphics.maintenance8_enabled = maintenance8_extension && maintenance8.maintenance8;
+	static const bool disable_maintenance8 = [] {
+		const char* value = std::getenv("KYTY_DISABLE_MAINTENANCE8");
+		return value != nullptr && value[0] == '1';
+	}();
+	graphics.maintenance8_enabled =
+	    maintenance8_extension && maintenance8.maintenance8 && !disable_maintenance8;
 	// A coarser alignment rounds the range up past the guest's last byte.
 	graphics.robust_buffer_access_enabled =
 	    supported_robustness2.robustBufferAccess2 &&
