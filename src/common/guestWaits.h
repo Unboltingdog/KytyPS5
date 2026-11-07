@@ -20,7 +20,7 @@ inline bool Enabled() {
 void Initialize();
 void Dump(size_t call_count);
 void SetAddressResolver(std::string (*resolver)(uint64_t address));
-void RegisterCurrentThread(int guest_id, int host_id, const char* name);
+void RegisterCurrentThread(int guest_id, int host_id, const char* name, uint64_t system_id = 0);
 void UnregisterCurrentThread();
 void SetCurrentThreadName(const char* name);
 void RecordLibCall(const char* library, const char* module, const char* function, uint64_t caller);

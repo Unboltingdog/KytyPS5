@@ -1068,8 +1068,8 @@ void PthreadInitSelfForMainThread() {
 #endif
 	g_pthread_self->host_thread_id = os_thread_id;
 	g_pthread_main                 = g_pthread_self;
-	Common::GuestWaits::RegisterCurrentThread(g_pthread_self->guest.thread_id,
-	                                          g_pthread_self->unique_id, g_pthread_self->name.c_str());
+	Common::GuestWaits::RegisterCurrentThread(g_pthread_self->guest.thread_id, g_pthread_self->unique_id,
+	                                          g_pthread_self->name.c_str(), os_thread_id);
 
 	LOGF("\tPthread main self: id = %d, os_thread_id = %" PRIu64 ", stack_addr = 0x%016" PRIx64
 	     ", stack_size = %" PRIu64 "\n",
@@ -3275,8 +3275,6 @@ static void* RunThread(void* arg) {
 	thread->unique_id = Common::Thread::GetThreadIdUnique();
 
 	g_pthread_self = thread;
-	Common::GuestWaits::RegisterCurrentThread(thread->guest.thread_id, thread->unique_id,
-	                                          thread->name.c_str());
 
 	uint64_t os_thread_id = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -3285,6 +3283,8 @@ static void* RunThread(void* arg) {
 	os_thread_id = GetHostThreadId();
 #endif
 	thread->host_thread_id = os_thread_id;
+	Common::GuestWaits::RegisterCurrentThread(thread->guest.thread_id, thread->unique_id, thread->name.c_str(),
+	                                          os_thread_id);
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	if (!thread->name.empty()) {
 #if defined(__APPLE__)
