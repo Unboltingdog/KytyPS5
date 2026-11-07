@@ -106,6 +106,12 @@ jobs:
         run: |
           ctest --test-dir _Build/windows --output-on-failure -R "^(resource_tracking|scalar_provenance|resource_materialization)$"
 
+      - name: Shader shrinking benchmark (no GPU)
+        shell: cmd
+        run: |
+          for /r _Build\windows %%f in (shader_recompiler_compute_tests.exe) do if exist "%%f" ("%%f" --shader-shrink-bench & exit /b %%errorlevel%%)
+          echo shader_recompiler_compute_tests.exe not found & exit /b 1
+
       - name: Install
         shell: cmd
         run: cmake --install _Build/windows --prefix _Build/windows/install
