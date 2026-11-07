@@ -1,0 +1,142 @@
+name: Yotei build
+
+# Test builds of the `yotei` branch (Erlou93's KytyPS5 Yotei fork plus our AMD work).
+# Windows only: kyty_emulator.exe and launcher.exe, released as yotei-<date>-<sha>.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ yotei ]
+
+concurrency:
+  group: yotei-build
+  cancel-in-progress: true
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  KYTY_BUILD_ORIGIN: Fork
+  KYTY_BUILD_REPOSITORY: ${{ github.repository }}
+
+jobs:
+  meta:
+    name: Prepare build metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - id: tag
+        shell: bash
+        run: echo "value=yotei-$(date -u +'%Y-%m-%d')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: Build (Windows)
+    needs: meta
+    runs-on: windows-2025
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Visual Studio environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Locate vcpkg
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $vcpkgRoot = Split-Path (Get-Command vcpkg).Source
+          $portHash = (Get-FileHash "$vcpkgRoot\ports\glslang\vcpkg.json" -Algorithm SHA256).Hash
+          "root=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "port_hash=$($portHash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Cache glslang
+        id: glslang_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.vcpkg.outputs.root }}\installed\x64-windows
+          key: glslang-${{ runner.os }}-${{ runner.arch }}-${{ steps.vcpkg.outputs.port_hash }}-tools-opt
+
+      - name: Install glslang
+        shell: pwsh
+        run: |
+          $vcpkgRoot = "${{ steps.vcpkg.outputs.root }}"
+          if ("${{ steps.glslang_cache.outputs.cache-hit }}" -ne "true") {
+            vcpkg install glslang[tools,opt]:x64-windows
+          }
+          "$vcpkgRoot\installed\x64-windows\tools\glslang" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.10.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Configure
+        shell: cmd
+        run: |
+          cmake -S . -B _Build/windows ^
+            -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON ^
+            "-DCMAKE_C_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /arch:AVX2" ^
+            "-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /arch:AVX2" ^
+            -DKYTY_BUILD_ORIGIN=%KYTY_BUILD_ORIGIN% ^
+            -DKYTY_BUILD_REPOSITORY=%KYTY_BUILD_REPOSITORY% ^
+            -DKYTY_RELEASE_TAG=${{ needs.meta.outputs.tag }} ^
+            -DCMAKE_C_COMPILER=clang-cl ^
+            -DCMAKE_CXX_COMPILER=clang-cl ^
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache ^
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache ^
+            -DCMAKE_PREFIX_PATH="%Qt6_DIR%"
+
+      - name: Build
+        shell: cmd
+        run: |
+          cmake --build _Build/windows --target launcher shader_recompiler_compute_tests resource_tracking_tests scalar_provenance_tests resource_materialization_tests --parallel
+
+      - name: Test
+        shell: cmd
+        run: |
+          ctest --test-dir _Build/windows --output-on-failure -R "^(resource_tracking|scalar_provenance|resource_materialization)$"
+
+      - name: Install
+        shell: cmd
+        run: cmake --install _Build/windows --prefix _Build/windows/install
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Yotei-Windows-x64
+          path: _Build/windows/install/**
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: [meta, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.meta.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Yotei-Windows-x64
+          path: windows
+      - name: Package and publish
+        run: |
+          set -euo pipefail
+          (cd windows && zip -qr "$GITHUB_WORKSPACE/$TAG-Windows-x64.zip" .)
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          notes=$(printf 'Test build of the `yotei` branch (Erlou93 KytyPS5 Yotei fork + our AMD work).\n\nCommit: %s/%s/commit/%s' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_SHA")
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --notes "$notes" --prerelease --latest=false ./*.zip
