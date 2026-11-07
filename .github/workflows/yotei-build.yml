@@ -94,6 +94,7 @@ jobs:
             -DCMAKE_CXX_COMPILER=clang-cl ^
             -DCMAKE_C_COMPILER_LAUNCHER=sccache ^
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache ^
+            "-DCMAKE_EXE_LINKER_FLAGS=/MAP" ^
             -DCMAKE_PREFIX_PATH="%Qt6_DIR%"
 
       - name: Build
@@ -116,6 +117,19 @@ jobs:
         shell: cmd
         run: cmake --install _Build/windows --prefix _Build/windows/install
 
+      - name: Collect linker map (crash offsets -> function names)
+        shell: pwsh
+        run: |
+          $map = Get-ChildItem -Path _Build/windows -Recurse -Filter kyty_emulator.map | Select-Object -First 1
+          if ($map) { Copy-Item $map.FullName _Build/windows/kyty_emulator.map } else { Write-Host "no map produced" }
+
+      - name: Upload linker map
+        uses: actions/upload-artifact@v4
+        with:
+          name: Yotei-Windows-x64-map
+          path: _Build/windows/kyty_emulator.map
+          if-no-files-found: warn
+
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
@@ -137,10 +151,16 @@ jobs:
         with:
           name: Yotei-Windows-x64
           path: windows
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: Yotei-Windows-x64-map
+          path: map
       - name: Package and publish
         run: |
           set -euo pipefail
           (cd windows && zip -qr "$GITHUB_WORKSPACE/$TAG-Windows-x64.zip" .)
+          if [ -f map/kyty_emulator.map ]; then (cd map && zip -q "$GITHUB_WORKSPACE/$TAG-kyty_emulator-map.zip" kyty_emulator.map); fi
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
           notes=$(printf 'Test build of the `yotei` branch (Erlou93 KytyPS5 Yotei fork + our AMD work).\n\nCommit: %s/%s/commit/%s' \
             "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_SHA")
