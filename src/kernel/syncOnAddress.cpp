@@ -1,5 +1,6 @@
 #include "kernel/syncOnAddress.h"
 
+#include "common/guestWaits.h"
 #include "common/threads.h"
 #include "libs/errno.h"
 
@@ -255,11 +256,13 @@ int WakePortable(volatile void* address, int32_t count) {
 
 template <typename T>
 int WaitImpl(volatile T* address, T expected, const WaitDeadline& deadline,
-             signal_poll_func_t signal_poll) {
+             signal_poll_func_t signal_poll, uint64_t caller) {
 	if (!IsValidWaitAddress(address)) {
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	Common::GuestWaits::WaitScope wait("syncaddr", nullptr, reinterpret_cast<uintptr_t>(address), caller);
+	GUEST_WAIT_DETAILS(wait, std::to_string(expected));
 	int result = OK;
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
 	result = WaitLinux(address, expected, deadline, signal_poll);
@@ -273,18 +276,18 @@ int WaitImpl(volatile T* address, T expected, const WaitDeadline& deadline,
 } // namespace
 
 int Wait32(volatile uint32_t* address, uint32_t expected, const uint32_t* timeout_micros,
-           signal_poll_func_t signal_poll) {
-	return WaitImpl(address, expected, MakeDeadline(timeout_micros), signal_poll);
+           signal_poll_func_t signal_poll, uint64_t caller) {
+	return WaitImpl(address, expected, MakeDeadline(timeout_micros), signal_poll, caller);
 }
 
 int Wait64(volatile uint64_t* address, uint64_t expected, const uint32_t* timeout_micros,
-           signal_poll_func_t signal_poll) {
-	return WaitImpl(address, expected, MakeDeadline(timeout_micros), signal_poll);
+           signal_poll_func_t signal_poll, uint64_t caller) {
+	return WaitImpl(address, expected, MakeDeadline(timeout_micros), signal_poll, caller);
 }
 
 int Wait64(volatile uint64_t* address, uint64_t expected, std::chrono::nanoseconds timeout,
-           signal_poll_func_t signal_poll) {
-	return WaitImpl(address, expected, MakeDeadline(timeout), signal_poll);
+           signal_poll_func_t signal_poll, uint64_t caller) {
+	return WaitImpl(address, expected, MakeDeadline(timeout), signal_poll, caller);
 }
 
 int Wake(volatile void* address, int32_t count) {

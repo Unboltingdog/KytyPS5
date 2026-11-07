@@ -1887,7 +1887,8 @@ int KYTY_SYSV_ABI nanosleep(const LibKernel::KernelTimespec* rqtp,
                             LibKernel::KernelTimespec*       rmtp) {
 	PRINT_NAME();
 
-	return POSIX_CALL(LibKernel::KernelNanosleep(rqtp, rmtp));
+	return POSIX_CALL(LibKernel::KernelNanosleep(
+	    rqtp, rmtp, reinterpret_cast<uint64_t>(__builtin_return_address(0))));
 }
 
 int KYTY_SYSV_ABI stat(const char* path, LibKernel::FileSystem::FileStat* sb) {
@@ -2089,24 +2090,30 @@ static void LogExperimentalSyncOnAddress(std::atomic_bool& logged, const char* f
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWait(volatile uint32_t* address, uint32_t expected,
                                           const uint32_t* timeout_micros) {
+	PRINT_NAME();
 	return LibKernel::SyncOnAddress::Wait32(address, expected, timeout_micros,
-	                                        LibKernel::KernelDispatchPendingSignalForCurrentThread);
+	                                        LibKernel::KernelDispatchPendingSignalForCurrentThread,
+	                                        reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 }
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWait32(volatile uint32_t* address, uint32_t expected,
                                             const uint32_t* timeout_micros) {
+	PRINT_NAME();
 	static std::atomic_bool logged {false};
 	LogExperimentalSyncOnAddress(logged, "sceKernelSyncOnAddressWait32");
 	return LibKernel::SyncOnAddress::Wait32(address, expected, timeout_micros,
-	                                        LibKernel::KernelDispatchPendingSignalForCurrentThread);
+	                                        LibKernel::KernelDispatchPendingSignalForCurrentThread,
+	                                        reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 }
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWait64(volatile uint64_t* address, uint64_t expected,
                                             const uint32_t* timeout_micros) {
+	PRINT_NAME();
 	static std::atomic_bool logged {false};
 	LogExperimentalSyncOnAddress(logged, "sceKernelSyncOnAddressWait64");
 	return LibKernel::SyncOnAddress::Wait64(address, expected, timeout_micros,
-	                                        LibKernel::KernelDispatchPendingSignalForCurrentThread);
+	                                        LibKernel::KernelDispatchPendingSignalForCurrentThread,
+	                                        reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 }
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWake(volatile void* address, int32_t count) {
@@ -2115,6 +2122,7 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWake(volatile void* address, int32_t count)
 
 int KYTY_SYSV_ABI UmtxOp(volatile void* address, int operation, uint64_t value,
                            void* uaddr, const void* timeout) {
+	PRINT_NAME();
 	constexpr int UMTX_OP_WAIT = 2;
 	constexpr int UMTX_OP_WAKE = 3;
 
@@ -2135,11 +2143,13 @@ int KYTY_SYSV_ABI UmtxOp(volatile void* address, int operation, uint64_t value,
 				                            : duration.tv_sec * 1000000000 + duration.tv_nsec;
 				return POSIX_CALL(LibKernel::SyncOnAddress::Wait64(
 				    static_cast<volatile uint64_t*>(address), value, std::chrono::nanoseconds(timeout_ns),
-				    LibKernel::KernelDispatchPendingSignalForCurrentThread));
+				    LibKernel::KernelDispatchPendingSignalForCurrentThread,
+				    reinterpret_cast<uint64_t>(__builtin_return_address(0))));
 			}
 			return POSIX_CALL(LibKernel::SyncOnAddress::Wait64(
 			    static_cast<volatile uint64_t*>(address), value, nullptr,
-			    LibKernel::KernelDispatchPendingSignalForCurrentThread));
+			    LibKernel::KernelDispatchPendingSignalForCurrentThread,
+			    reinterpret_cast<uint64_t>(__builtin_return_address(0))));
 		case UMTX_OP_WAKE:
 			return POSIX_CALL(LibKernel::SyncOnAddress::Wake(address, static_cast<int32_t>(value)));
 		default: EXIT("Unsupported _umtx_op operation: %d\n", operation);

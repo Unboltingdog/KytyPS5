@@ -4,6 +4,7 @@
 #include "common/common.h"
 #include "common/dateTime.h"
 #include "common/emulatorConfig.h"
+#include "common/guestWaits.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
 #include "common/singleton.h"
@@ -1024,8 +1025,21 @@ void PthreadDeleteStaticObjects(Loader::Program* program) {
 	pthread_static_objects->DeleteObjects(program);
 }
 
+static std::string DescribeGuestWaitAddress(uint64_t address) {
+	auto* rt = Common::Singleton<Loader::RuntimeLinker>::Instance();
+	auto* program = rt->FindProgramByAddr(address);
+	if (program == nullptr) {
+		return fmt::format("unknown+0x{:x}", address);
+	}
+	return fmt::format("{}+0x{:x}",
+	                   Common::FilenameWithoutDirectory(Common::PathToGenericString(program->file_name)),
+	                   address - program->base_vaddr);
+}
+
 void PthreadInitSelfForMainThread() {
 	EXIT_IF(g_pthread_self != nullptr);
+	Common::GuestWaits::Initialize();
+	Common::GuestWaits::SetAddressResolver(DescribeGuestWaitAddress);
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	if (!Common::HostException::InitializeThreadSignalStack()) {
@@ -1054,6 +1068,8 @@ void PthreadInitSelfForMainThread() {
 #endif
 	g_pthread_self->host_thread_id = os_thread_id;
 	g_pthread_main                 = g_pthread_self;
+	Common::GuestWaits::RegisterCurrentThread(g_pthread_self->guest.thread_id,
+	                                          g_pthread_self->unique_id, g_pthread_self->name.c_str());
 
 	LOGF("\tPthread main self: id = %d, os_thread_id = %" PRIu64 ", stack_addr = 0x%016" PRIx64
 	     ", stack_size = %" PRIu64 "\n",
@@ -1780,8 +1796,8 @@ int KYTY_SYSV_ABI PthreadMutexDestroy(PthreadMutex* mutex) {
 	}
 }
 
-int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex) {
-	// PRINT_NAME();
+int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex, uint64_t caller) {
+	PRINT_NAME();
 
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
 
@@ -1794,6 +1810,8 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex) {
 
 	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
 
+	Common::GuestWaits::WaitScope wait("mutex", (*mutex)->name.c_str(), reinterpret_cast<uintptr_t>(mutex),
+	                                   caller != 0 ? caller : reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	int result = NativeMutexLock(*mutex, nullptr);
 
 	// LOGF("\tmutex lock: %s, %d\n", (*mutex)->name.c_str(), result);
@@ -1834,8 +1852,8 @@ int KYTY_SYSV_ABI PthreadMutexTrylock(PthreadMutex* mutex) {
 	}
 }
 
-int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec) {
-	// PRINT_NAME();
+int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec, uint64_t caller) {
+	PRINT_NAME();
 
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
 
@@ -1848,6 +1866,9 @@ int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec
 
 	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
 
+	Common::GuestWaits::WaitScope wait("mutex", (*mutex)->name.c_str(), reinterpret_cast<uintptr_t>(mutex),
+	                                   caller != 0 ? caller : reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+	GUEST_WAIT_DETAILS(wait, fmt::format("timeout_us={}", usec));
 	int result = NativeMutexLock(*mutex, &usec);
 
 	switch (result) {
@@ -2885,8 +2906,8 @@ int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread) {
 }
 
 int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex,
-                                       KernelUseconds usec) {
-	// PRINT_NAME();
+                                       KernelUseconds usec, uint64_t caller) {
+	PRINT_NAME();
 
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
 
@@ -2913,6 +2934,9 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex,
 	auto*            thread          = g_pthread_self;
 	const auto       thread_sequence = thread->cond_sequence;
 	CondAddWaiter(cond_value, thread);
+	Common::GuestWaits::WaitScope wait("cond", cond_value->name.c_str(), reinterpret_cast<uintptr_t>(cond),
+	                                   caller != 0 ? caller : reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+	GUEST_WAIT_DETAILS(wait, fmt::format("mutex={}@0x{:x}", mutex_value->name, reinterpret_cast<uintptr_t>(mutex)));
 
 	uint32_t recurse = 0;
 	int      result  = NativeMutexUnlock(mutex_value, &recurse);
@@ -2969,8 +2993,8 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex,
 }
 
 int KYTY_SYSV_ABI PthreadCondTimedwaitAbs(PthreadCond* cond, PthreadMutex* mutex,
-                                          const KernelTimespec* abstime) {
-	// PRINT_NAME();
+                                          const KernelTimespec* abstime, uint64_t caller) {
+	PRINT_NAME();
 
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
 
@@ -3002,6 +3026,9 @@ int KYTY_SYSV_ABI PthreadCondTimedwaitAbs(PthreadCond* cond, PthreadMutex* mutex
 	auto*            thread          = g_pthread_self;
 	const auto       thread_sequence = thread->cond_sequence;
 	CondAddWaiter(cond_value, thread);
+	Common::GuestWaits::WaitScope wait("cond", cond_value->name.c_str(), reinterpret_cast<uintptr_t>(cond),
+	                                   caller != 0 ? caller : reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+	GUEST_WAIT_DETAILS(wait, fmt::format("mutex={}@0x{:x}", mutex_value->name, reinterpret_cast<uintptr_t>(mutex)));
 
 	uint32_t recurse = 0;
 	int      result  = NativeMutexUnlock(mutex_value, &recurse);
@@ -3050,7 +3077,7 @@ int KYTY_SYSV_ABI PthreadCondTimedwaitAbs(PthreadCond* cond, PthreadMutex* mutex
 	}
 }
 
-int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex) {
+int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex, uint64_t caller) {
 	PRINT_NAME();
 
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
@@ -3078,6 +3105,9 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex) {
 	auto*            thread          = g_pthread_self;
 	const auto       thread_sequence = thread->cond_sequence;
 	CondAddWaiter(cond_value, thread);
+	Common::GuestWaits::WaitScope wait("cond", cond_value->name.c_str(), reinterpret_cast<uintptr_t>(cond),
+	                                   caller != 0 ? caller : reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+	GUEST_WAIT_DETAILS(wait, fmt::format("mutex={}@0x{:x}", mutex_value->name, reinterpret_cast<uintptr_t>(mutex)));
 
 	uint32_t recurse = 0;
 	int      result  = NativeMutexUnlock(mutex_value, &recurse);
@@ -3228,6 +3258,7 @@ static void CleanupThread(void* arg) {
 	rt->DeleteTlss(thread->unique_id);
 
 	thread->almost_done = true;
+	Common::GuestWaits::UnregisterCurrentThread();
 }
 
 static void* RunThread(void* arg) {
@@ -3244,6 +3275,8 @@ static void* RunThread(void* arg) {
 	thread->unique_id = Common::Thread::GetThreadIdUnique();
 
 	g_pthread_self = thread;
+	Common::GuestWaits::RegisterCurrentThread(thread->guest.thread_id, thread->unique_id,
+	                                          thread->name.c_str());
 
 	uint64_t os_thread_id = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -3381,13 +3414,16 @@ int KYTY_SYSV_ABI PthreadDetach(Pthread thread) {
 	return OK;
 }
 
-int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void** value) {
+int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void** value, uint64_t caller) {
 	PRINT_NAME();
 
 	if (thread == nullptr) {
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	Common::GuestWaits::WaitScope wait("join", thread->name.c_str(), reinterpret_cast<uintptr_t>(thread),
+	                                   caller != 0 ? caller : reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+	GUEST_WAIT_DETAILS(wait, fmt::format("guest_tid={}", thread->guest.thread_id));
 	int result = pthread_join(thread->p, value);
 
 	if (PRINT_NAME_ENABLED) {
@@ -3666,6 +3702,9 @@ int KYTY_SYSV_ABI PthreadRename(Pthread thread, const char* name) {
 	}
 
 	thread->name = std::string(name);
+	if (thread == g_pthread_self) {
+		Common::GuestWaits::SetCurrentThreadName(thread->name.c_str());
+	}
 
 	return OK;
 }
@@ -3902,16 +3941,23 @@ void KYTY_SYSV_ABI KernelSetThreadDtors(thread_dtors_func_t dtors) {
 }
 
 int KYTY_SYSV_ABI KernelUsleep(KernelUseconds microseconds) {
+	PRINT_NAME();
+	Common::GuestWaits::WaitScope wait("usleep", nullptr, 0);
+	GUEST_WAIT_DETAILS(wait, fmt::format("duration_us={}", microseconds));
 	SleepMicroWithSignalPoll(microseconds);
 	return OK;
 }
 
 unsigned int KYTY_SYSV_ABI KernelSleep(unsigned int seconds) {
+	PRINT_NAME();
+	Common::GuestWaits::WaitScope wait("sleep", nullptr, 0);
+	GUEST_WAIT_DETAILS(wait, fmt::format("duration_s={}", seconds));
 	SleepMicroWithSignalPoll(static_cast<uint64_t>(seconds) * 1000000ull);
 	return OK;
 }
 
-int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rmtp) {
+int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rmtp, uint64_t caller) {
+	PRINT_NAME();
 	if (rqtp == nullptr) {
 		return KERNEL_ERROR_EFAULT;
 	}
@@ -3928,6 +3974,8 @@ int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rm
 	uint64_t nanos =
 	    static_cast<uint64_t>(rqtp->tv_sec) * 1000000000ull + static_cast<uint64_t>(rqtp->tv_nsec);
 
+	Common::GuestWaits::WaitScope wait("nanosleep", nullptr, 0, caller);
+	GUEST_WAIT_DETAILS(wait, fmt::format("duration_ns={}", nanos));
 	SleepNanoWithSignalPoll(nanos);
 
 	if (rmtp != nullptr) {
@@ -4179,7 +4227,8 @@ int KYTY_SYSV_ABI sched_get_priority_min(int policy) {
 int KYTY_SYSV_ABI pthread_join(LibKernel::Pthread thread, void** value) {
 	PRINT_NAME();
 
-	return POSIX_PTHREAD_CALL(LibKernel::PthreadJoin(thread, value));
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadJoin(
+	    thread, value, reinterpret_cast<uint64_t>(__builtin_return_address(0))));
 }
 
 int KYTY_SYSV_ABI pthread_attr_init(LibKernel::PthreadAttr* attr) {
@@ -4328,9 +4377,10 @@ int KYTY_SYSV_ABI pthread_condattr_destroy(LibKernel::PthreadCondattr* attr) {
 }
 
 int KYTY_SYSV_ABI pthread_cond_wait(LibKernel::PthreadCond* cond, LibKernel::PthreadMutex* mutex) {
-	// PRINT_NAME();
+	PRINT_NAME();
 
-	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondWait(cond, mutex));
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondWait(
+	    cond, mutex, reinterpret_cast<uint64_t>(__builtin_return_address(0))));
 }
 
 int KYTY_SYSV_ABI pthread_cond_timedwait(LibKernel::PthreadCond*          cond,
@@ -4338,13 +4388,15 @@ int KYTY_SYSV_ABI pthread_cond_timedwait(LibKernel::PthreadCond*          cond,
                                          const LibKernel::KernelTimespec* abstime) {
 	PRINT_NAME();
 
-	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondTimedwaitAbs(cond, mutex, abstime));
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondTimedwaitAbs(
+	    cond, mutex, abstime, reinterpret_cast<uint64_t>(__builtin_return_address(0))));
 }
 
 int KYTY_SYSV_ABI pthread_mutex_lock(LibKernel::PthreadMutex* mutex) {
-	// PRINT_NAME();
+	PRINT_NAME();
 
-	return POSIX_PTHREAD_CALL(LibKernel::PthreadMutexLock(mutex));
+	return POSIX_PTHREAD_CALL(
+	    LibKernel::PthreadMutexLock(mutex, reinterpret_cast<uint64_t>(__builtin_return_address(0))));
 }
 
 int KYTY_SYSV_ABI pthread_mutex_trylock(LibKernel::PthreadMutex* mutex) {
@@ -4382,8 +4434,9 @@ int KYTY_SYSV_ABI pthread_mutex_timedlock(LibKernel::PthreadMutex*         mutex
 		usec = std::min<uint64_t>(UINT32_MAX, usec + static_cast<uint64_t>(nsec_delta / 1000));
 	}
 
-	return POSIX_PTHREAD_CALL(
-	    LibKernel::PthreadMutexTimedlock(mutex, static_cast<LibKernel::KernelUseconds>(usec)));
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadMutexTimedlock(
+	    mutex, static_cast<LibKernel::KernelUseconds>(usec),
+	    reinterpret_cast<uint64_t>(__builtin_return_address(0))));
 }
 
 int KYTY_SYSV_ABI pthread_mutex_unlock(LibKernel::PthreadMutex* mutex) {

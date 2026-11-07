@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/guestWaits.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -37,6 +38,8 @@ public:
 		uint32_t micros = 0;
 		return Wait(bits, wait_mode, clear_mode, result, &micros);
 	}
+
+	[[nodiscard]] const std::string& GetName() const { return m_name; }
 
 private:
 	enum class Status { Set, Canceled, Deleted };
@@ -296,8 +299,12 @@ int KYTY_SYSV_ABI KernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, 
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	const auto mode   = DecodeEventFlagWaitMode(wait_mode);
-	auto       result = ef->Wait(bit_pattern, mode.wait, mode.clear, result_pat, timeout);
+	const auto mode = DecodeEventFlagWaitMode(wait_mode);
+	Common::GuestWaits::WaitScope wait("eventflag", ef->GetName().c_str(), reinterpret_cast<uintptr_t>(ef),
+	                                   reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+	GUEST_WAIT_DETAILS(wait, fmt::format("bits=0x{:x} mode=0x{:x} timeout_us={}", bit_pattern, wait_mode,
+	                            timeout != nullptr ? *timeout : 0));
+	auto result = ef->Wait(bit_pattern, mode.wait, mode.clear, result_pat, timeout);
 
 	int ret = OK;
 

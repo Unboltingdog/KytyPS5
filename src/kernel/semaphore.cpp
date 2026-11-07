@@ -1,6 +1,7 @@
 #include "kernel/semaphore.h"
 
 #include "common/assert.h"
+#include "common/guestWaits.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -287,10 +288,15 @@ int KYTY_SYSV_ABI KernelDeleteSema(KernelSema sem) {
 }
 
 int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time) {
+	PRINT_NAME();
+
 	if (sem == nullptr) {
 		return KERNEL_ERROR_ESRCH;
 	}
 
+	Common::GuestWaits::WaitScope wait("sema", sem->GetName().c_str(), reinterpret_cast<uintptr_t>(sem),
+	                                   reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+	GUEST_WAIT_DETAILS(wait, fmt::format("need={} timeout_us={}", need, time != nullptr ? *time : 0));
 	auto result = sem->Wait(need, time);
 
 	int ret = OK;
@@ -581,6 +587,12 @@ static int SemTimedwaitImpl(void* sem, uint32_t* micros) {
 	return obj->Wait(micros);
 }
 
+static int SemTimedwaitDiagnosed(void* sem, uint32_t* micros, uint64_t caller) {
+	Common::GuestWaits::WaitScope wait("sema", nullptr, reinterpret_cast<uintptr_t>(sem), caller);
+	GUEST_WAIT_DETAILS(wait, fmt::format("timeout_us={}", micros != nullptr ? *micros : 0));
+	return SemTimedwaitImpl(sem, micros);
+}
+
 static bool AbsTimespecToMicros(const LibKernel::KernelTimespec* abstime, uint32_t* micros) {
 	if (abstime == nullptr || micros == nullptr || abstime->tv_sec < 0 || abstime->tv_nsec < 0 ||
 	    abstime->tv_nsec >= 1000000000) {
@@ -624,7 +636,7 @@ int KYTY_SYSV_ABI sem_destroy(void* sem) {
 }
 
 int KYTY_SYSV_ABI sem_wait(void* sem) {
-	const int result = SemTimedwaitImpl(sem, nullptr);
+	const int result = SemTimedwaitDiagnosed(sem, nullptr, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	return (result == OK ? 0 : SetErrnoReturn(result));
 }
 
@@ -639,7 +651,7 @@ int KYTY_SYSV_ABI sem_trywait(void* sem) {
 }
 
 int KYTY_SYSV_ABI sem_reltimedwait_np(void* sem, uint32_t usec) {
-	const int result = SemTimedwaitImpl(sem, &usec);
+	const int result = SemTimedwaitDiagnosed(sem, &usec, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	return (result == OK ? 0 : SetErrnoReturn(result));
 }
 
@@ -649,7 +661,7 @@ int KYTY_SYSV_ABI sem_timedwait(void* sem, const LibKernel::KernelTimespec* abst
 		return SetErrnoReturn(POSIX_EINVAL);
 	}
 
-	const int result = SemTimedwaitImpl(sem, &micros);
+	const int result = SemTimedwaitDiagnosed(sem, &micros, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	return (result == OK ? 0 : SetErrnoReturn(result));
 }
 
@@ -697,7 +709,7 @@ int KYTY_SYSV_ABI PthreadSemDestroy(void* sem) {
 }
 
 int KYTY_SYSV_ABI PthreadSemWait(void* sem) {
-	const int result = Posix::SemTimedwaitImpl(sem, nullptr);
+	const int result = Posix::SemTimedwaitDiagnosed(sem, nullptr, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	return (result == OK ? OK : Posix::PosixToKernel(result));
 }
 
@@ -713,7 +725,7 @@ int KYTY_SYSV_ABI PthreadSemTrywait(void* sem) {
 
 int KYTY_SYSV_ABI PthreadSemTimedwait(void* sem, KernelUseconds usec) {
 	uint32_t  micros = usec;
-	const int result = Posix::SemTimedwaitImpl(sem, &micros);
+	const int result = Posix::SemTimedwaitDiagnosed(sem, &micros, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	return (result == OK ? OK : Posix::PosixToKernel(result));
 }
 

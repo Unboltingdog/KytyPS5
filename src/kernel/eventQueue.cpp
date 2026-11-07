@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/guestWaits.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -52,6 +53,7 @@ public:
 
 	int  GetTriggeredEvents(KernelEvent* ev, int num);
 	int  WaitForEvents(KernelEvent* ev, int num, uint32_t micros);
+	std::string GetWaitDetails();
 	void Close();
 
 private:
@@ -170,6 +172,19 @@ bool KernelEqueuePrivate::GetNextTimerWaitMicros(uint64_t now_ns, uint32_t* wait
 	const auto rounded_us   = std::max<uint64_t>(1, (remaining_ns + 999u) / 1000u);
 	*wait_micros            = static_cast<uint32_t>(std::min<uint64_t>(rounded_us, UINT32_MAX));
 	return true;
+}
+
+std::string KernelEqueuePrivate::GetWaitDetails() {
+	Common::LockGuard lock(m_mutex);
+	std::string details = "events=[";
+	for (const auto& event: m_events) {
+		if (details.size() > 8) {
+			details += ',';
+		}
+		details += fmt::format("0x{:x}/{}", event.event.ident, event.event.filter);
+	}
+	details += ']';
+	return details;
 }
 
 int KernelEqueuePrivate::WaitForEvents(KernelEvent* ev, int num, uint32_t micros) {
@@ -419,6 +434,10 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	     static_cast<uint64_t>(eq), reinterpret_cast<uint64_t>(ev), num,
 	     (timo == nullptr ? "inf" : fmt::format("{}", *timo).c_str()),
 	     Common::Thread::GetThreadIdUnique());
+
+	Common::GuestWaits::WaitScope wait("equeue", owner->GetName().c_str(), static_cast<uintptr_t>(eq),
+	                                   reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+	GUEST_WAIT_DETAILS(wait, owner->GetWaitDetails());
 
 	if (timo == nullptr) {
 		*out = owner->WaitForEvents(ev, num, 0);
