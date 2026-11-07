@@ -1,6 +1,7 @@
 #include "loader/symbolDatabase.h"
 
 #include "common/file.h"
+#include "common/pollCalls.h"
 
 #include <fmt/format.h>
 #include <magic_enum.hpp>
@@ -24,15 +25,17 @@ std::string SymbolDatabase::GenerateName(const SymbolResolve& s) {
 void SymbolDatabase::Add(const SymbolResolve& s, uint64_t vaddr) {
 	SymbolRecord r {};
 	r.name  = GenerateName(s);
-	r.vaddr = vaddr;
+	r.vaddr = s.type == SymbolType::Func ? Common::PollCalls::Wrap(vaddr, s.library.c_str(), s.name.c_str()) : vaddr;
 	m_map.insert_or_assign(r.name, m_symbols.size());
 	m_symbols.push_back(r);
 }
 
 void SymbolDatabase::Add(const SymbolResolve& s, uint64_t vaddr, const std::string& dbg_name) {
 	SymbolRecord r {};
-	r.name     = GenerateName(s);
-	r.vaddr    = vaddr;
+	r.name  = GenerateName(s);
+	r.vaddr = s.type == SymbolType::Func
+	              ? Common::PollCalls::Wrap(vaddr, s.library.c_str(), dbg_name.empty() ? s.name.c_str() : dbg_name.c_str())
+	              : vaddr;
 	r.dbg_name = dbg_name;
 	m_map.insert_or_assign(r.name, m_symbols.size());
 	m_symbols.push_back(r);

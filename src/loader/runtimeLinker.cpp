@@ -8,6 +8,7 @@
 #include "common/hostException.h"
 #include "common/logging/log.h"
 #include "common/platform/sysDbg.h"
+#include "common/pollCalls.h"
 #include "common/profiler.h"
 #include "common/singleton.h"
 #include "common/stringUtils.h"
@@ -223,6 +224,9 @@ static uint64_t RegisterStubbedImport(uint32_t index, const Program* program,
 static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id, uint64_t caller) {
 	constexpr uint64_t return_value = 0;
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::UnresolvedImportCalls);
+	if (record_id < g_stubbed_imports.size()) {
+		Common::PollCalls::RecordUnresolved(g_stubbed_imports[record_id].name.c_str(), caller);
+	}
 	const auto log_index = g_unresolved_stub_call_log_count.fetch_add(1);
 	if (log_index < 1024) {
 		if (record_id < g_stubbed_imports.size()) {

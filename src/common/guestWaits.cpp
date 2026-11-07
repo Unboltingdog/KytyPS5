@@ -1,5 +1,7 @@
 #include "common/guestWaits.h"
 
+#include "common/pollCalls.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -448,17 +450,21 @@ void Initialize() {
 	}
 #endif
 	g_start = Clock::now();
-	EnabledFlag().store(g_periodic || g_once_at_ms >= 0 || g_cpu_sample, std::memory_order_release);
+	PollCalls::Initialize();
+	EnabledFlag().store(g_periodic || g_once_at_ms >= 0 || g_cpu_sample || PollCalls::Enabled(),
+	                    std::memory_order_release);
 }
 
 void SetAddressResolver(std::string (*resolver)(uint64_t address)) {
 	g_address_resolver = resolver;
+	PollCalls::SetAddressResolver(resolver);
 }
 
 void RegisterCurrentThread(int guest_id, int host_id, const char* name, uint64_t system_id) {
 	if (!Enabled()) {
 		return;
 	}
+	PollCalls::RegisterCurrentThread(guest_id, name);
 	auto record = std::make_shared<ThreadRecord>();
 	record->guest_id = guest_id;
 	record->host_id = host_id;
@@ -483,6 +489,7 @@ void UnregisterCurrentThread() {
 	if (g_current_record == nullptr) {
 		return;
 	}
+	PollCalls::UnregisterCurrentThread();
 	std::lock_guard lock(g_registry_mutex);
 	std::erase(g_records, g_current_record);
 	g_current_record.reset();
@@ -492,6 +499,7 @@ void SetCurrentThreadName(const char* name) {
 	if (g_current_record == nullptr) {
 		return;
 	}
+	PollCalls::SetCurrentThreadName(name);
 	std::lock_guard lock(g_current_record->mutex);
 	g_current_record->name = name != nullptr ? name : "";
 }
