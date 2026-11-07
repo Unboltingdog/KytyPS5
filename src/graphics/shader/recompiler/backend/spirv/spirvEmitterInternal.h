@@ -93,6 +93,8 @@ struct ImageDefinition {
 	uint32_t sampled_type = 0;
 };
 
+uint32_t IfConversionLimit();
+
 struct EmitterState {
 	EmitterState(IR::Program& program_, ShaderStageInputInfo input_info_, const Profile& profile_)
 	    : builder(program_.stage == ShaderType::Mesh ? 0x00010400u : 0x00010300u),
@@ -110,6 +112,7 @@ struct EmitterState {
 	IR::Program&                                     program;
 	ShaderStageInputInfo                             input_info;
 	const Profile&                                      profile;
+	uint32_t                                        ifconv_limit = IfConversionLimit();
 	uint32_t                                        debug_source = 0;
 	uint32_t                                        void_type = 0;
 	uint32_t                                        bool_type = 0;

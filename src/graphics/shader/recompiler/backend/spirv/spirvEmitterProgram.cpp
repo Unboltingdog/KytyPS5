@@ -18,6 +18,20 @@
 #include <utility>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
+
+// KYTY_IFCONV_LIMIT (config, default 0): 0 keeps select-based predication; 1 selects a 32-instruction
+// region threshold; any other decimal value N branches regions longer than N instructions.
+uint32_t IfConversionLimit() {
+	const char* value = Common::ShaderEnv::Read("KYTY_IFCONV_LIMIT");
+	if (value == nullptr || value[0] == '\0' || value[0] == '0') return 0;
+	if (value[0] == '1' && value[1] == '\0') return 32;
+	char*      end = nullptr;
+	const auto parsed = std::strtoul(value, &end, 10);
+	return end != value && end != nullptr && *end == '\0' && parsed <= UINT32_MAX
+	           ? static_cast<uint32_t>(parsed)
+	           : 0;
+}
+
 namespace {
 
 void EmitKillIfBoolFalse(EmitterState& state, uint32_t active) {
@@ -440,6 +454,199 @@ void EmitBlock(ValueEmitContext& ctx, const IR::Block* block, EmitInstruction&& 
 	}
 }
 
+bool IfConversionUnsafeOpcode(IR::ValueOpcode opcode) {
+	using Op = IR::ValueOpcode;
+	switch (opcode) {
+		case Op::Ballot:
+		case Op::LiveMask:
+		case Op::ConditionRef:
+		case Op::ReadFirstLane:
+		case Op::ReadLane:
+		case Op::WriteLane:
+		case Op::Permlane16U32:
+		case Op::DppMoveU32:
+		case Op::DppUpdateU32:
+		case Op::SubgroupUMinU32:
+		case Op::SubgroupUMaxU32:
+		case Op::SubgroupOrU32:
+		case Op::SetExec:
+		case Op::SetExecLo:
+		case Op::SetExecHi: return true;
+		default: return false;
+	}
+}
+
+struct IfConversionRegion {
+	size_t                       first = 0;
+	size_t                       last  = 0;
+	IR::Value                    condition;
+	std::vector<const IR::Inst*> selects;
+};
+
+std::optional<IfConversionRegion> PlanIfConversion(ValueEmitContext& ctx, const IR::Block* block) {
+	if (ctx.state.ifconv_limit == 0u) return std::nullopt;
+	std::vector<const IR::Inst*> instructions;
+	for (const auto& inst: *block) {
+		if (inst.GetOpcode() != IR::ValueOpcode::Phi) instructions.push_back(&inst);
+	}
+	const auto in_region = [&](const IfConversionRegion& region, const IR::Inst* inst) {
+		return inst != nullptr && inst->Parent() == block &&
+		       std::ranges::find(instructions.begin() + region.first,
+		                         instructions.begin() + region.last + 1u, inst) !=
+		           instructions.begin() + region.last + 1u;
+	};
+	std::optional<IfConversionRegion> best;
+	const auto consider = [&](std::optional<IfConversionRegion> candidate) {
+		if (!candidate || candidate->selects.size() < 2u ||
+		    candidate->last - candidate->first + 1u <= ctx.state.ifconv_limit) {
+			return;
+		}
+		if (in_region(*candidate, candidate->condition.Resolve().TryInstruction())) return;
+		for (size_t index = candidate->first; index <= candidate->last; index++) {
+			const auto* inst = instructions[index];
+			const bool selected =
+			    std::ranges::find(candidate->selects, inst) != candidate->selects.end();
+			if (selected) {
+				const auto* old = inst->Arg(2).Resolve().TryInstruction();
+				if (in_region(*candidate, old) &&
+				    std::ranges::find(candidate->selects, old) == candidate->selects.end()) {
+					return;
+				}
+				continue;
+			}
+			if (inst->MayHaveSideEffects() || IfConversionUnsafeOpcode(inst->GetOpcode()) ||
+			    block->condition.Resolve().TryInstruction() == inst ||
+			    block->indirect_target.Resolve().TryInstruction() == inst) {
+				return;
+			}
+			if (ctx.state.lane_count == 2u &&
+			    (inst->GetOpcode() == IR::ValueOpcode::ReadConstBuffer ||
+			     inst->GetOpcode() == IR::ValueOpcode::ReadRealtimeClock ||
+			     (inst->GetOpcode() == IR::ValueOpcode::LoadAddressU32 &&
+			      ctx.Memory(*inst).kind == IR::ResourceKind::ScalarAddress))) {
+				return;
+			}
+			for (const auto& use: inst->Uses()) {
+				if (!in_region(*candidate, use.user)) return;
+			}
+		}
+		if (!best || candidate->last - candidate->first > best->last - best->first) {
+			best = std::move(candidate);
+		}
+	};
+	IfConversionRegion current;
+	const auto flush = [&] {
+		if (!current.condition.IsEmpty()) consider(std::move(current));
+		current = {};
+	};
+	for (size_t index = 0; index < instructions.size(); index++) {
+		const auto* inst = instructions[index];
+		if (inst->GetOpcode() != IR::ValueOpcode::SelectU32) continue;
+		const auto condition = inst->Arg(0).Resolve();
+		if (current.condition.IsEmpty() || condition != current.condition) {
+			flush();
+			current.first     = index;
+			current.condition = condition;
+		}
+		current.last = index;
+		current.selects.push_back(inst);
+	}
+	flush();
+	return best;
+}
+
+void EmitIfConversionLane(ValueEmitContext& lane, const IfConversionRegion& region,
+                          const std::vector<const IR::Inst*>& instructions) {
+	auto& state = lane.state;
+	std::vector<uint32_t> false_values;
+	false_values.reserve(region.selects.size());
+	for (const auto* inst: region.selects) {
+		auto old_value = inst->Arg(2);
+		for (;;) {
+			const auto resolved = old_value.Resolve();
+			if (resolved.IsImmediate()) break;
+			const auto* earlier = resolved.Instruction();
+			if (std::ranges::find(region.selects, earlier) == region.selects.end()) break;
+			old_value = earlier->Arg(2);
+		}
+		false_values.push_back(lane.Def(old_value));
+	}
+	const auto header      = state.current_label;
+	const auto condition   = lane.Def(region.condition);
+	const auto then_label  = state.builder.AllocateId();
+	const auto merge_label = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpSelectionMerge, merge_label, spv::SelectionControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, condition, then_label, merge_label);
+	EmitLabel(state, then_label);
+	state.guard_depth++;
+	std::vector<uint32_t> true_values;
+	true_values.reserve(region.selects.size());
+	for (size_t index = region.first; index <= region.last; index++) {
+		const auto* inst = instructions[index];
+		if (std::ranges::find(region.selects, inst) != region.selects.end()) {
+			true_values.push_back(lane.Arg(*inst, 1));
+			lane.Define(*inst, true_values.back());
+		} else {
+			EmitDirectInstruction(lane, *inst);
+		}
+	}
+	state.guard_depth--;
+	const auto then_exit = state.current_label;
+	state.builder.AddFunction(spv::OpBranch, merge_label);
+	EmitLabel(state, merge_label);
+	for (size_t index = 0; index < region.selects.size(); index++) {
+		const auto phi = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpPhi, TypeU32(state), phi, true_values[index], then_exit,
+		                          false_values[index], header);
+		region.selects[index]->SetDefinition(lane.half, phi);
+	}
+}
+
+void EmitStructuredBlock(ValueEmitContext& ctx, StructuredFunctionState& structured,
+                         const IR::Block* block) {
+	const auto region = PlanIfConversion(ctx, block);
+	if (!region) {
+		EmitBlock(ctx, block, [&](ValueEmitContext& lane, const IR::Inst& inst) {
+			EmitStructuredInstruction(lane, structured, inst);
+		});
+		return;
+	}
+	std::vector<const IR::Inst*> instructions;
+	for (const auto& inst: *block) {
+		if (inst.GetOpcode() != IR::ValueOpcode::Phi) instructions.push_back(&inst);
+	}
+	ctx.state.current_block = block;
+	EmitLabel(ctx.state, block->Definition());
+	const auto emit_instruction = [&](const IR::Inst& inst, bool allow_lane_share) {
+		size_t low_words = 0;
+		for (uint32_t half = 0; half < ctx.state.lane_count; half++) {
+			auto& lane = half == 0 ? ctx : *ctx.other_half;
+			ctx.state.lane_half = half;
+			if (allow_lane_share && half != 0 && ctx.state.lane_share.active &&
+			    LaneShareReuse(ctx, lane, inst, low_words)) {
+				continue;
+			}
+			const size_t begin = ctx.state.builder.FunctionWordCount();
+			EmitStructuredInstruction(lane, structured, inst);
+			if (half == 0) low_words = ctx.state.builder.FunctionWordCount() - begin;
+		}
+		ctx.state.lane_half = 0;
+	};
+	for (const auto& inst: *block) {
+		if (inst.GetOpcode() == IR::ValueOpcode::Phi) emit_instruction(inst, true);
+	}
+	for (size_t index = 0; index < region->first; index++) emit_instruction(*instructions[index], true);
+	for (uint32_t half = 0; half < ctx.state.lane_count; half++) {
+		auto& lane = half == 0 ? ctx : *ctx.other_half;
+		ctx.state.lane_half = half;
+		EmitIfConversionLane(lane, *region, instructions);
+	}
+	ctx.state.lane_half = 0;
+	for (size_t index = region->last + 1u; index < instructions.size(); index++) {
+		emit_instruction(*instructions[index], true);
+	}
+}
+
 void PatchStructuredPhis(ValueEmitContext& ctx, StructuredFunctionState& structured) {
 	for (const auto& deferred: structured.deferred_phis) {
 		auto& lane = deferred.half == 0 ? ctx : *ctx.other_half;
@@ -541,9 +748,7 @@ void EmitStructuredFunction(ValueEmitContext& ctx) {
 	ctx.state.builder.AddFunction(spv::OpBranch, program.blocks.front()->Definition());
 	for (size_t index = 0; index < program.blocks.size(); index++) {
 		const auto* block = program.blocks[index];
-		EmitBlock(ctx, block, [&](ValueEmitContext& lane, const IR::Inst& inst) {
-			EmitStructuredInstruction(lane, structured, inst);
-		});
+		EmitStructuredBlock(ctx, structured, block);
 		EmitBackEdgeGuard(ctx, block);
 		EmitWatchdogTripReport(ctx, block); // KYTY_DIAG_RT_TRIPS
 		structured.block_exit_labels.emplace(block, ctx.state.current_label);
