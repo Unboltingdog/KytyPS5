@@ -1580,7 +1580,7 @@ void CheckShaderShrinkBench() {
     for (u32 index = 0; index < iterations; index++) {
       const auto next = emit(IR::ValueOpcode::IAdd32, {previous, raw});
       previous = emit(IR::ValueOpcode::SelectU32, {active, next, previous});
-      current = emit(IR::ValueOpcode::BitCastU32F32, {previous});
+      current = emit(IR::ValueOpcode::BitCastF32U32, {previous});
       current = emit(IR::ValueOpcode::FPMin32, {current, current});
       current = emit(IR::ValueOpcode::FPMax32, {current, current});
       current = emit(IR::ValueOpcode::FPMinTri32, {current, current, current});
