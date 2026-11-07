@@ -1,5 +1,6 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/drawStateObserver.h"
+#include "graphics/guest_gpu/gpuLabels.h"
 #include "graphics/host_gpu/renderer/cleanDraws.h"
 
 #include "common/assert.h"
@@ -551,16 +552,17 @@ void ReportLabelStats() {
 
 // Defers an end-of-pipe label (labels at completion); the journal holds it since its packet. Only on the GPU thread.
 void DeferLabel(CommandScheduler& scheduler, RenderContext& renderer, int event_id, uint64_t sequence, uint64_t dst,
-                uint64_t value, uint32_t size, bool with_interrupt, uint32_t interrupt_context_id) {
+                uint64_t value, uint32_t size, bool with_interrupt, uint32_t interrupt_context_id,
+                const char* packet_kind) {
 	GuestGpu* gpu = g_gpu_state;
 	g_label_stats.deferred.fetch_add(1, std::memory_order_relaxed);
 	const int64_t recorded_ns = LabelNowNs();
 	// Priority thread, once the host GPU finished the open tick: hand the write to the GPU thread.
 	scheduler.DeferPriorityOperation([gpu, &renderer, event_id, sequence, dst, value, size, with_interrupt,
-	                                  interrupt_context_id, recorded_ns] {
+	                                  interrupt_context_id, recorded_ns, packet_kind] {
 		if (gpu->IsStopping()) return;
 		const auto publish = [gpu, &renderer, event_id, sequence, dst, value, size, with_interrupt, interrupt_context_id,
-		                      recorded_ns] {
+		                      recorded_ns, packet_kind] {
 			// The immediate path's write (the write-through or a plain store). In a direct range
 			// (KYTY_PERF_DIRECT_RANGES) a plain store: the work before the label is done, which is when the console's CP
 			// writes it, and an update recorded now would reach guest memory only with a later submit.
@@ -568,6 +570,7 @@ void DeferLabel(CommandScheduler& scheduler, RenderContext& renderer, int event_
 			    !renderer.GetBufferCache().TryCpWriteThrough(dst, &value, size)) {
 				std::memcpy(reinterpret_cast<void*>(dst), &value, size);
 			}
+			GpuLabels::Write(packet_kind, static_cast<uint32_t>(event_id), dst, value, size);
 			if (sequence != 0) gpu->MarkPublished(sequence); // (0: no journal, a test driving a processor here)
 			PublishCpuDirtyRange(dst, size); // BDA sync epoch
 			const auto lag = static_cast<uint64_t>(std::max<int64_t>(LabelNowNs() - recorded_ns, 0));
@@ -1512,6 +1515,8 @@ void CommandProcessor::WriteConstRam(uint32_t offset, const uint32_t* src, uint3
 void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_num) {
 	const auto sequence = EmitCallback([this, dst, offset, dw_num] {
 		memcpy(dst, m_const_ram + offset / 4, static_cast<size_t>(dw_num) * 4);
+		GpuLabels::WriteRange("DUMP_CONST_RAM", GetQueueId(), reinterpret_cast<uint64_t>(dst), dst,
+		                      uint64_t {dw_num} * 4u);
 		// BDA sync epoch: the commands after this one see the GPU thread's own write.
 		PublishCpuDirtyRange(reinterpret_cast<uint64_t>(dst), uint64_t {dw_num} * 4u);
 	});
@@ -1542,7 +1547,14 @@ static int64_t SteadyNowNs() {
 void CommandProcessor::MemSemaphore(uint64_t* counter, bool signal, bool write) {
 	if (signal) {
 		*counter = write ? 1u : *counter + 1u;
-	} else if (*counter == 0) {
+		GpuLabels::Write("AGC_MEM_SEMAPHORE", GetQueueId(), reinterpret_cast<uint64_t>(counter), *counter,
+		                 sizeof(*counter));
+		return;
+	}
+	const uint64_t value = *counter;
+	GpuLabels::Wait("AGC_MEM_SEMAPHORE", GetQueueId(), 3, reinterpret_cast<uint64_t>(counter), 1, ~0ull, value,
+	                value != 0);
+	if (value == 0) {
 		SuspendPm4();
 	} else {
 		(*counter)--;
@@ -1577,6 +1589,8 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 		read();
 	}
 	const bool passed = TestWaitRegMemValue(value, ref, mask, func);
+	GpuLabels::Wait(sizeof(T) == sizeof(uint64_t) ? "WAIT_REG_MEM_64" : "WAIT_REG_MEM", GetQueueId(), func,
+	                reinterpret_cast<uint64_t>(addr), ref, mask, value, passed);
 	if (SyncTimeline::Enabled()) {
 		SyncTimeline::GuestWaitRegMem(reinterpret_cast<uint64_t>(addr), value, ref, passed,
 		                              static_cast<uint32_t>(m_interrupt_event_id));
@@ -1662,6 +1676,8 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 				output[i] = src[i];
 			}
 		}
+		GpuLabels::WriteRange("WRITE_DATA", GetQueueId(), reinterpret_cast<uint64_t>(dst), dst,
+		                      write_one_address ? sizeof(uint32_t) : uint64_t {dw_num} * sizeof(uint32_t));
 		// BDA sync epoch: the commands after this one see the GPU thread's own write.
 		PublishCpuDirtyRange(reinterpret_cast<uint64_t>(dst),
 		                     write_one_address ? sizeof(uint32_t) : uint64_t {dw_num} * sizeof(uint32_t));
@@ -1685,6 +1701,7 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 		if (!m_renderer.GetBufferCache().TryCpWriteThrough(dst_address, &value, num_bytes)) {
 			std::memcpy(reinterpret_cast<void*>(dst_address), &value, num_bytes);
 		}
+		GpuLabels::Write("COPY_DATA", GetQueueId(), dst_address, value, num_bytes);
 		PublishCpuDirtyRange(dst_address, num_bytes); // BDA sync epoch, as WriteData
 		static std::atomic<uint32_t> clock_log_count {0};
 		if (clock_log_count.fetch_add(1) < 64) {
@@ -1701,7 +1718,7 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
                                uint8_t  src_cache_policy,
                                uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes,
                                uint8_t wait_for_previous, uint8_t write_confirm,
-                               uint8_t block_engine) {
+                               uint8_t block_engine, const char* packet_kind) {
 	EXIT_NOT_IMPLEMENTED(engine > 1);
 	if (num_bytes == 0) {
 		return;
@@ -1753,7 +1770,8 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 		}
 	}
 	const auto sequence = EmitCallback([=, this] {
-		ExecuteDmaData(dst_gds, dst_address_or_offset, src_sel, src_gds, src_address_or_offset_or_immediate, num_bytes);
+		ExecuteDmaData(dst_gds, dst_address_or_offset, src_sel, src_gds, src_address_or_offset_or_immediate, num_bytes,
+		               packet_kind);
 	});
 	if (!dst_gds) {
 		NoteGuestWrite(sequence, dst_address_or_offset, num_bytes);
@@ -1761,7 +1779,8 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 }
 
 void CommandProcessor::ExecuteDmaData(bool dst_gds, uint64_t dst_address_or_offset, uint8_t src_sel, bool src_gds,
-                                      uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes) {
+                                      uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes,
+                                      const char* packet_kind) {
 	auto& buffer_cache = m_renderer.GetBufferCache();
 	if (src_sel == 2) {
 		buffer_cache.FillBuffer(
@@ -1774,6 +1793,8 @@ void CommandProcessor::ExecuteDmaData(bool dst_gds, uint64_t dst_address_or_offs
 	// BDA sync epoch: the commands after this one see the fill or copy, also where the GPU thread wrote
 	// guest memory itself (the CPU paths).
 	if (!dst_gds) {
+		GpuLabels::WriteRange(packet_kind, GetQueueId(), dst_address_or_offset,
+		                      reinterpret_cast<const volatile void*>(dst_address_or_offset), num_bytes);
 		PublishCpuDirtyRange(dst_address_or_offset, num_bytes);
 	}
 }
@@ -2326,6 +2347,7 @@ bool CommandProcessor::ResolveAssumedCondBlock(Pm4Execution& execution, uint32_t
 	RunOnExecution(GpuDrain::CondGuard, [&value, predicate = block.predicate] {
 		Libs::LibKernel::Memory::ReadGuestPlain(&value, predicate, sizeof(value));
 	});
+	GpuLabels::Wait("COND_EXEC", queue_id, 4, block.predicate, 0, 0xffffffffu, value, value != 0);
 	// BDA sync epoch: the stream decides on guest memory, as CpOpCondExec does.
 	PublishDirtyRegions();
 	static std::atomic<uint32_t> logged {0};
@@ -3067,7 +3089,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
                                         uint32_t eop_event_type, uint32_t cache_action,
                                         uint32_t event_index, uint32_t event_write_source,
                                         void* dst_gpu_addr, T value, uint32_t interrupt_selector,
-                                        uint32_t interrupt_context_id) {
+                                        uint32_t interrupt_context_id, const char* packet_kind) {
 	static_assert(sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t));
 
 	if (GraphicsRunDebugDumpEnabled()) {
@@ -3138,7 +3160,8 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 		}
 	}
 	EmitCallback([=, this] {
-		ExecuteEndOfPipe(write, sequence, dst_gpu_addr, data, gpu_clock, with_interrupt, interrupt_context_id);
+		ExecuteEndOfPipe(write, sequence, dst_gpu_addr, data, gpu_clock, with_interrupt, interrupt_context_id,
+		                 packet_kind);
 	});
 	if (write == EndOfPipeWrite::Gds) {
 		NoteGuestWrite(sequence, destination, uint64_t {static_cast<uint32_t>(data) >> 16u} * sizeof(uint32_t));
@@ -3218,7 +3241,8 @@ CommandProcessor::EndOfPipeWrite CommandProcessor::ClassifyEndOfPipe(uint32_t ev
 }
 
 void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence, void* dst_gpu_addr, uint64_t value,
-                                        bool gpu_clock, bool with_interrupt, uint32_t interrupt_context_id) {
+                                        bool gpu_clock, bool with_interrupt, uint32_t interrupt_context_id,
+                                        const char* packet_kind) {
 	auto& command = CurrentBuffer();
 	switch (write) {
 		case EndOfPipeWrite::Gds: {
@@ -3226,6 +3250,8 @@ void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence,
 			const auto data = static_cast<uint32_t>(value);
 			GetScheduler().Finish();
 			Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(), dst, data & 0xffffu, data >> 16u);
+			GpuLabels::WriteRange(packet_kind, GetQueueId(), reinterpret_cast<uint64_t>(dst), dst,
+			                      uint64_t {data >> 16u} * sizeof(uint32_t));
 			PublishCpuDirtyRange(reinterpret_cast<uint64_t>(dst), // BDA sync epoch
 			                     uint64_t {data >> 16u} * sizeof(uint32_t));
 			if (with_interrupt) {
@@ -3238,12 +3264,12 @@ void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence,
 			EXIT_IF(dst_gpu_addr == nullptr);
 			(void)command.Handle();
 			if (g_gpu_state == nullptr || !LabelsAtCompletion()) {
-				WriteLabelNow(dst_gpu_addr, &data, sizeof(data), with_interrupt, interrupt_context_id);
+				WriteLabelNow(dst_gpu_addr, &data, sizeof(data), with_interrupt, interrupt_context_id, packet_kind);
 				return;
 			}
 			// Labels at completion: the label (and its interrupt) once the host GPU got here.
 			DeferLabel(GetScheduler(), m_renderer, m_interrupt_event_id, sequence, reinterpret_cast<uint64_t>(dst_gpu_addr),
-			           data, sizeof(data), with_interrupt, interrupt_context_id);
+			           data, sizeof(data), with_interrupt, interrupt_context_id, packet_kind);
 			return;
 		}
 		case EndOfPipeWrite::Qword: {
@@ -3251,20 +3277,20 @@ void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence,
 			(void)command.Handle();
 			// KYTY_FIX_VIRTUAL_GPU_CLOCK: the GPU clock value lands once the GPU got here (virtualGpuClock.h).
 			if (gpu_clock && VirtualGpuClock::Stamp(GetScheduler(), command.Handle(), reinterpret_cast<uint64_t>(dst_gpu_addr),
-			                                        with_interrupt)) {
+			                                        with_interrupt, packet_kind, GetQueueId())) {
 				if (with_interrupt) {
 					DeferEopInterrupt(interrupt_context_id);
 				}
 				return;
 			}
 			if (g_gpu_state == nullptr || !LabelsAtCompletion()) {
-				WriteLabelNow(dst_gpu_addr, &value, sizeof(value), with_interrupt, interrupt_context_id);
+				WriteLabelNow(dst_gpu_addr, &value, sizeof(value), with_interrupt, interrupt_context_id, packet_kind);
 				return;
 			}
 			// labels at completion (as the dword; a clock the virtual GPU clock refused after all has no journal entry: a
 			// wait for it passes when it lands).
 			DeferLabel(GetScheduler(), m_renderer, m_interrupt_event_id, sequence, reinterpret_cast<uint64_t>(dst_gpu_addr),
-			           value, sizeof(value), with_interrupt, interrupt_context_id);
+			           value, sizeof(value), with_interrupt, interrupt_context_id, packet_kind);
 			return;
 		}
 		case EndOfPipeWrite::None: break;
@@ -3273,15 +3299,16 @@ void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence,
 
 // Off the GPU thread (the tests): the label lands when its packet is translated.
 void CommandProcessor::WriteLabelNow(void* dst_gpu_addr, const void* value, uint32_t size, bool with_interrupt,
-                                     uint32_t interrupt_context_id) {
+                                     uint32_t interrupt_context_id, const char* packet_kind) {
 	const auto dst = reinterpret_cast<uint64_t>(dst_gpu_addr);
 	// A GPU-owned page takes the label without a fault when the GPU owns none of its bytes.
 	if (!m_renderer.GetBufferCache().TryCpWriteThrough(dst, value, size)) {
 		std::memcpy(dst_gpu_addr, value, size);
 	}
+	uint64_t label = 0;
+	std::memcpy(&label, value, size);
+	GpuLabels::Write(packet_kind, GetQueueId(), dst, label, size);
 	if (SyncTimeline::Enabled()) {
-		uint64_t label = 0;
-		std::memcpy(&label, value, size);
 		SyncTimeline::GuestLabel(dst, label, IsAsyncComputeQueue(), GetScheduler().CurrentTick(),
 		                         GetScheduler().GetMasterSemaphore().KnownGpuTick());
 	}
@@ -3296,10 +3323,10 @@ void CommandProcessor::WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_
                                           uint32_t event_index, uint32_t event_write_source,
                                           void* dst_gpu_addr, uint32_t value,
                                           uint32_t interrupt_selector,
-                                          uint32_t interrupt_context_id) {
+                                          uint32_t interrupt_context_id, const char* packet_kind) {
 	WriteAtEndOfPipe(cache_policy, event_write_dest, eop_event_type, cache_action, event_index,
 	                 event_write_source, dst_gpu_addr, value, interrupt_selector,
-	                 interrupt_context_id);
+	                 interrupt_context_id, packet_kind);
 }
 
 void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_write_dest,
@@ -3307,10 +3334,10 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
                                           uint32_t event_index, uint32_t event_write_source,
                                           void* dst_gpu_addr, uint64_t value,
                                           uint32_t interrupt_selector,
-                                          uint32_t interrupt_context_id) {
+                                          uint32_t interrupt_context_id, const char* packet_kind) {
 	WriteAtEndOfPipe(cache_policy, event_write_dest, eop_event_type, cache_action, event_index,
 	                 event_write_source, dst_gpu_addr, value, interrupt_selector,
-	                 interrupt_context_id);
+	                 interrupt_context_id, packet_kind);
 }
 
 void CommandProcessor::EmitGlobalBarrier() {
@@ -3442,6 +3469,7 @@ void CommandProcessor::ExecuteTriggerEvent(uint32_t event_type, uint32_t event_i
 			for (uint32_t db = 0; db < 16u; db++) {
 				results[db * 2u] = value;
 			}
+			GpuLabels::WriteRange("EVENT_WRITE", GetQueueId(), event_address, results, 32u * sizeof(uint64_t));
 			PublishCpuDirtyRange(event_address, 32u * sizeof(uint64_t)); // BDA sync epoch
 			m_synthetic_occlusion_counter = (m_synthetic_occlusion_counter + 1u) & counter_mask;
 			break;
@@ -3452,13 +3480,14 @@ void CommandProcessor::ExecuteTriggerEvent(uint32_t event_type, uint32_t event_i
 }
 
 void CommandProcessor::WriteLodStats(void* dst, uint32_t size) {
-	const auto sequence = EmitCallback([dst, size] {
+	const auto sequence = EmitCallback([this, dst, size] {
 		memset(dst, 0, size);
 		// Hack?
 		if (size >= sizeof(uint32_t)) {
 			auto* label = static_cast<uint32_t*>(dst);
 			*label      = 1;
 		}
+		GpuLabels::WriteRange("GET_LOD_STATS", GetQueueId(), reinterpret_cast<uint64_t>(dst), dst, size);
 		// BDA sync epoch: the commands after this one see the GPU thread's own write.
 		PublishCpuDirtyRange(reinterpret_cast<uint64_t>(dst), size);
 	});
@@ -3509,6 +3538,7 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 	EXIT_IF(dst_gpu_addr == nullptr);
 	const auto sequence = EmitCallback([this, flip = m_flip, dst_gpu_addr, value] {
 		std::memcpy(dst_gpu_addr, &value, sizeof(value));
+		GpuLabels::Write("FLIP", GetQueueId(), reinterpret_cast<uint64_t>(dst_gpu_addr), value, sizeof(value));
 		PublishCpuDirtyRange(reinterpret_cast<uint64_t>(dst_gpu_addr), sizeof(value)); // BDA sync epoch
 		auto& command = CurrentBuffer();
 		auto  request = Sync::PrepareVideoOutFlip(command, flip.handle, flip.index, flip.flip_mode, flip.flip_arg);
@@ -3538,6 +3568,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	EXIT_IF(dst_gpu_addr == nullptr);
 	const auto sequence = EmitCallback([this, flip = m_flip, dst_gpu_addr, value] {
 		std::memcpy(dst_gpu_addr, &value, sizeof(value));
+		GpuLabels::Write("FLIP", GetQueueId(), reinterpret_cast<uint64_t>(dst_gpu_addr), value, sizeof(value));
 		PublishCpuDirtyRange(reinterpret_cast<uint64_t>(dst_gpu_addr), sizeof(value)); // BDA sync epoch
 		auto& command = CurrentBuffer();
 		auto  request = Sync::PrepareVideoOutFlip(command, flip.handle, flip.index, flip.flip_mode, flip.flip_arg);

@@ -6,6 +6,7 @@
 #include "common/stringUtils.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
+#include "graphics/guest_gpu/gpuLabels.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/regionManager.h"
@@ -1541,6 +1542,7 @@ KYTY_CP_OP_PARSER(CpOpCondExec) {
 	}
 
 	const uint32_t predicate = cp.ReadDecisionValue<uint32_t>(reinterpret_cast<const volatile void*>(addr));
+	GpuLabels::Wait("COND_EXEC", cp.GetQueueId(), 4, addr, 0, 0xffffffffu, predicate, predicate != 0);
 	// BDA sync epoch: the block depends on guest memory the guest may have written.
 	cp.PublishDirtyRegions();
 	if (predicate == 0) {
@@ -1659,7 +1661,7 @@ KYTY_CP_OP_PARSER(CpOpCopyData) {
 	}
 
 	cp.DmaData(0, CopyDataDstToDma(dst_sel), dst_cache, dst, dma_src, src_cache, src, num_bytes, 1,
-	           write_confirm, 1);
+	           write_confirm, 1, "COPY_DATA");
 
 	return 5;
 }
@@ -1920,7 +1922,7 @@ KYTY_CP_OP_PARSER(CpOpEventWriteEop) {
 	uint64_t value = (buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u));
 
 	cp.WriteAtEndOfPipe64(cache_policy, event_write_dest, eop_event_type, cache_action, event_index,
-	                      event_write_source, dst_gpu_addr, value, interrupt_selector);
+	                      event_write_source, dst_gpu_addr, value, interrupt_selector, 0, "EVENT_WRITE_EOP");
 
 	return 5;
 }
@@ -1943,7 +1945,7 @@ KYTY_CP_OP_PARSER(CpOpEventWriteEos) {
 	uint32_t value = buffer[3];
 
 	cp.WriteAtEndOfPipe32(cache_policy, event_write_dest, eop_event_type, cache_action, event_index,
-	                      event_write_source, dst_gpu_addr, value, interrupt_selector);
+	                      event_write_source, dst_gpu_addr, value, interrupt_selector, 0, "EVENT_WRITE_EOS");
 
 	return 4;
 }
@@ -2441,7 +2443,7 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 
 		cp.WriteAtEndOfPipe32(cache_policy, event_write_dest, eop_event_type, cache_action,
 		                      event_index, event_source, dst_gpu_addr, static_cast<uint32_t>(value),
-		                      interrupt_selector, interrupt_context_id);
+		                      interrupt_selector, interrupt_context_id, "RELEASE_MEM");
 		if (interrupt_selector == 0x01 || interrupt_selector == 0x02) {
 			cp.BufferFlushForInterrupt();
 		}
@@ -2460,7 +2462,7 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 
 		cp.WriteAtEndOfPipe32(cache_policy, event_write_dest, eop_event_type, cache_action,
 		                      event_index, event_source, dst_gpu_addr, static_cast<uint32_t>(value),
-		                      interrupt_selector, interrupt_context_id);
+		                      interrupt_selector, interrupt_context_id, "RELEASE_MEM");
 		if (interrupt_selector == 0x01) {
 			cp.BufferFlushForInterrupt();
 		}
@@ -2485,7 +2487,7 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 	}
 
 	cp.WriteAtEndOfPipe64(cache_policy, event_write_dest, eop_event_type, cache_action, event_index,
-	                      data_sel, dst_gpu_addr, value, interrupt_selector, interrupt_context_id);
+	                      data_sel, dst_gpu_addr, value, interrupt_selector, interrupt_context_id, "RELEASE_MEM");
 
 	return 7;
 }

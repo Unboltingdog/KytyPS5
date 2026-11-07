@@ -48,7 +48,8 @@ void Submitted(vk::CommandBuffer buffer, uint64_t tick);
 // An end-of-pipe GPU-clock event that writes 8 bytes at `dst`, at this point of `buffer` (GPU thread).
 // true: taken; the value is written later (deferred), or was written at once (no room, see above).
 // false: not taken (the feature is off, or `scheduler` is not the renderer's); the caller writes as before.
-[[nodiscard]] bool Stamp(CommandScheduler& scheduler, vk::CommandBuffer buffer, uint64_t dst, bool immediate);
+[[nodiscard]] bool Stamp(CommandScheduler& scheduler, vk::CommandBuffer buffer, uint64_t dst, bool immediate,
+                         const char* packet, uint32_t queue);
 
 } // namespace VirtualGpuClock
 

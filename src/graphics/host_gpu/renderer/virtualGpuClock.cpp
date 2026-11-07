@@ -2,6 +2,7 @@
 
 #include "common/onceValue.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/guest_gpu/gpuLabels.h"
 #include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
@@ -28,8 +29,10 @@ constexpr uint32_t ChunkQueries = 16;
 constexpr uint32_t Chunks       = 4096;
 
 struct Event {
-	uint32_t query = 0;
-	uint64_t dst   = 0;
+	uint32_t    query = 0;
+	uint64_t    dst   = 0;
+	const char* packet = nullptr;
+	uint32_t    queue = 0;
 };
 
 struct Chunk {
@@ -43,9 +46,11 @@ struct Chunk {
 };
 
 struct Write {
-	uint64_t dst     = 0;
-	uint64_t value   = 0;
-	uint32_t retries = 0;
+	uint64_t    dst     = 0;
+	uint64_t    value   = 0;
+	uint32_t    retries = 0;
+	const char* packet = nullptr;
+	uint32_t    queue = 0;
 };
 
 // Attempts before a value that keeps waiting is given up (Retry never ends only for a bad address shape).
@@ -154,7 +159,7 @@ void Resolve(State& s, CommandScheduler& scheduler) {
 			// Its events get the clock as it stands: its own busy time is unknown.
 			s.stats.untimed_cbs++;
 			for (const auto& event: chunk.events) {
-				s.ready.push_back({event.dst, ClockAt(s, s.busy_ns)});
+				s.ready.push_back({event.dst, ClockAt(s, s.busy_ns), 0, event.packet, event.queue});
 			}
 		} else {
 			s.stats.cbs++;
@@ -162,7 +167,7 @@ void Resolve(State& s, CommandScheduler& scheduler) {
 			for (const auto& event: chunk.events) {
 				const uint64_t at = ts(event.query);
 				const double   in = at > from ? static_cast<double>(at - from) * s.ns_per_tick : 0.0;
-				s.ready.push_back({event.dst, ClockAt(s, s.busy_ns + in)});
+				s.ready.push_back({event.dst, ClockAt(s, s.busy_ns + in), 0, event.packet, event.queue});
 			}
 			if (end > from) {
 				const double add = static_cast<double>(end - from) * s.ns_per_tick;
@@ -209,6 +214,7 @@ void Flush(State& s, CommandScheduler& scheduler) {
 			}
 			continue;
 		}
+		GpuLabels::Write(write.packet, write.queue, write.dst, write.value, sizeof(write.value));
 		PublishCpuDirtyRange(write.dst, sizeof(write.value)); // BDA sync epoch, as other GPU-thread writes
 	}
 	s.flushing = false;
@@ -308,7 +314,8 @@ void Submitted(vk::CommandBuffer buffer, uint64_t tick) {
 	s.current = -1;
 }
 
-bool Stamp(CommandScheduler& scheduler, vk::CommandBuffer buffer, uint64_t dst, bool immediate) {
+bool Stamp(CommandScheduler& scheduler, vk::CommandBuffer buffer, uint64_t dst, bool immediate,
+           const char* packet, uint32_t queue) {
 	if (!Enabled() || !IsRenderer(scheduler)) {
 		return false;
 	}
@@ -328,14 +335,14 @@ bool Stamp(CommandScheduler& scheduler, vk::CommandBuffer buffer, uint64_t dst, 
 		} else {
 			s.stats.full++;
 		}
-		s.ready.push_back({dst, ClockAt(s, s.busy_ns)});
+		s.ready.push_back({dst, ClockAt(s, s.busy_ns), 0, packet, queue});
 		Flush(s, scheduler);
 		return true;
 	}
 	auto&      chunk = s.chunks[s.current];
 	const auto query = chunk.used++;
 	buffer.writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, s.pool, ChunkBase(s.current) + query);
-	chunk.events.push_back({query, dst});
+	chunk.events.push_back({query, dst, packet, queue});
 	s.stats.deferred++;
 	// Runs once this command buffer finished (the scheduler runs deferred operations in tick order).
 	scheduler.DeferOperation([&scheduler] {

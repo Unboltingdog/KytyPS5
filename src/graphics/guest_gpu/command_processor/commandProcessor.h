@@ -128,11 +128,13 @@ public:
 	void WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_write_dest,
 	                        uint32_t eop_event_type, uint32_t cache_action, uint32_t event_index,
 	                        uint32_t event_write_source, void* dst_gpu_addr, uint32_t value,
-	                        uint32_t interrupt_selector, uint32_t interrupt_context_id = 0);
+	                        uint32_t interrupt_selector, uint32_t interrupt_context_id = 0,
+	                        const char* packet_kind = "END_OF_PIPE");
 	void WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_write_dest,
 	                        uint32_t eop_event_type, uint32_t cache_action, uint32_t event_index,
 	                        uint32_t event_write_source, void* dst_gpu_addr, uint64_t value,
-	                        uint32_t interrupt_selector, uint32_t interrupt_context_id = 0);
+	                        uint32_t interrupt_selector, uint32_t interrupt_context_id = 0,
+	                        const char* packet_kind = "END_OF_PIPE");
 	void Flip();
 	void Flip(void* dst_gpu_addr, uint32_t value);
 	void FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr,
@@ -198,7 +200,8 @@ public:
 	void DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cache_policy,
 	             uint64_t dst_address_or_offset, uint8_t src_sel, uint8_t src_cache_policy,
 	             uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes,
-	             uint8_t wait_for_previous, uint8_t write_confirm, uint8_t block_engine);
+	             uint8_t wait_for_previous, uint8_t write_confirm, uint8_t block_engine,
+	             const char* packet_kind = "DMA_DATA");
 	void SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
 	                    const volatile void* address, uint32_t count_in_dwords);
 	[[nodiscard]] bool ShouldSkipPredicatedPackets() const { return m_predicate_skip; }
@@ -223,13 +226,14 @@ public:
 	[[nodiscard]] uint64_t GetSubmitId() const { return m_submit_id; }
 	void                   SetSubmitId(uint64_t submit_id) { m_submit_id = submit_id; }
 	[[nodiscard]] bool     IsAsyncComputeQueue() const { return m_interrupt_event_id >= 0x20; }
+	[[nodiscard]] uint32_t GetQueueId() const { return static_cast<uint32_t>(m_interrupt_event_id); }
 
 private:
 	template <typename T>
 	void WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_write_dest, uint32_t eop_event_type,
 	                      uint32_t cache_action, uint32_t event_index, uint32_t event_write_source,
 	                      void* dst_gpu_addr, T value, uint32_t interrupt_selector,
-	                      uint32_t interrupt_context_id);
+	                      uint32_t interrupt_context_id, const char* packet_kind);
 	void ProcessPm4(Pm4Execution& execution);
 	// The queue waits: clears the block of waits once the stream is past it (all its waits passed).
 	static void LeaveCondBlockIfPassed(Pm4Execution& execution);
@@ -255,7 +259,7 @@ private:
 	[[nodiscard]] static EndOfPipeWrite ClassifyEndOfPipe(uint32_t event_write_source, uint32_t eop_event_type,
 	                                                      uint32_t cache_action, uint32_t event_index, bool with_interrupt);
 	void ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence, void* dst_gpu_addr, uint64_t value, bool gpu_clock,
-	                      bool with_interrupt, uint32_t interrupt_context_id);
+	                      bool with_interrupt, uint32_t interrupt_context_id, const char* packet_kind);
 	void WriteIndirectOffsets(const GpuOperation& operation, uint32_t vertex_offset, uint32_t instance_offset,
 	                          uint32_t first_index);
 	void ExecuteDrawIndex(const GpuOperation& operation, DrawIndexArgs args);
@@ -265,12 +269,12 @@ private:
 	                           uint32_t thread_group_z, uint32_t mode);
 	void ExecuteDispatchIndirect(const GpuOperation& operation);
 	void ExecuteDmaData(bool dst_gds, uint64_t dst_address_or_offset, uint8_t src_sel, bool src_gds,
-	                    uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes);
+	                    uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes, const char* packet_kind);
 	void ExecuteTriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address);
 	void RecordGlobalBarrier();
 	void DeferEopInterrupt(uint32_t interrupt_context_id);
 	void WriteLabelNow(void* dst_gpu_addr, const void* value, uint32_t size, bool with_interrupt,
-	                   uint32_t interrupt_context_id);
+	                   uint32_t interrupt_context_id, const char* packet_kind);
 
 	// Copies of the register state for the operations that read registers. A slot is overwritten only after the last
 	// operation that uses it executed. Slots start on cache lines of their own (the resolve and execution threads read them
