@@ -150,7 +150,13 @@ bool IsNetworkConnected() {
 }
 
 bool PsnEmulationEnabled() {
-	return g_config->psn_emulation_enabled;
+	// KYTY_EMULATE_PSN=1 (Unboltingdog): the same simulated sign-in as --emulate-psn, for runs started by the launcher,
+	// which never passes that flag. No network is used; only the NP sign-in answers change.
+	static const bool env_on = [] {
+		const char* value = std::getenv("KYTY_EMULATE_PSN");
+		return value != nullptr && value[0] == '1';
+	}();
+	return g_config->psn_emulation_enabled || env_on;
 }
 
 bool ShaderValidationEnabled() {
