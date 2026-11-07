@@ -121,7 +121,8 @@ jobs:
         shell: pwsh
         run: |
           $map = Get-ChildItem -Path _Build/windows -Recurse -Filter kyty_emulator.map | Select-Object -First 1
-          if ($map) { Copy-Item $map.FullName _Build/windows/kyty_emulator.map } else { Write-Host "no map produced" }
+          $dest = Join-Path (Resolve-Path _Build/windows) 'kyty_emulator.map'
+          if (-not $map) { Write-Host "no map produced" } elseif ($map.FullName -ne $dest) { Copy-Item $map.FullName $dest }
 
       - name: Upload linker map
         uses: actions/upload-artifact@v4
