@@ -131,7 +131,26 @@ static std::vector<uint64_t>            g_unresolved_stub_thunk_pages;
 static uint64_t                         g_unresolved_stub_thunk_offset = 0;
 static constexpr uint64_t               UNRESOLVED_STUB_PAGE_SIZE      = 4096;
 
-static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id);
+static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id, uint64_t caller);
+
+static bool TraceUnresolvedStubs() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_UNRESOLVED_STUBS");
+		return value != nullptr && value[0] == '1';
+	}();
+	return on;
+}
+
+static std::string DescribeUnresolvedCaller(uint64_t caller) {
+	auto* rt = Common::Singleton<RuntimeLinker>::Instance();
+	auto* program = rt->FindProgramByAddr(caller);
+	if (program == nullptr) {
+		return fmt::format("unknown+0x{:x}", caller);
+	}
+	return fmt::format("{}+0x{:x}",
+	                   Common::FilenameWithoutDirectory(Common::PathToGenericString(program->file_name)),
+	                   caller - program->base_vaddr);
+}
 
 static bool PatchGuestMemory64(uint64_t vaddr, uint64_t value) {
 	auto* ptr     = reinterpret_cast<uint64_t*>(vaddr);
@@ -141,7 +160,7 @@ static bool PatchGuestMemory64(uint64_t vaddr, uint64_t value) {
 }
 
 static uint64_t AllocateUnresolvedImportThunk(uint64_t record_id) {
-	constexpr uint64_t thunk_size = 34;
+	constexpr uint64_t thunk_size = 38;
 
 	if (g_unresolved_stub_thunk_pages.empty() ||
 	    g_unresolved_stub_thunk_offset + thunk_size > UNRESOLVED_STUB_PAGE_SIZE) {
@@ -158,6 +177,7 @@ static uint64_t AllocateUnresolvedImportThunk(uint64_t record_id) {
 	g_unresolved_stub_thunk_offset += thunk_size;
 
 	uint8_t bytes[thunk_size] = {
+	    0x48, 0x8b, 0x34, 0x24,               // mov rsi, [rsp] (guest return address)
 	    0x48, 0x83, 0xec, 0x08,               // sub rsp, 8
 	    0x48, 0xbf, 0, 0, 0, 0, 0, 0, 0, 0, // mov rdi, record_id
 	    0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, UnresolvedImportStub
@@ -167,8 +187,8 @@ static uint64_t AllocateUnresolvedImportThunk(uint64_t record_id) {
 	    0xc3,                                 // ret
 	};
 	const auto target = reinterpret_cast<uint64_t>(UnresolvedImportStub);
-	std::memcpy(bytes + 6, &record_id, sizeof(record_id));
-	std::memcpy(bytes + 16, &target, sizeof(target));
+	std::memcpy(bytes + 10, &record_id, sizeof(record_id));
+	std::memcpy(bytes + 20, &target, sizeof(target));
 	std::memcpy(code, bytes, sizeof(bytes));
 	Common::VirtualMemory::FlushInstructionCache(reinterpret_cast<uint64_t>(code), thunk_size);
 	return reinterpret_cast<uint64_t>(code);
@@ -196,7 +216,8 @@ static uint64_t RegisterStubbedImport(uint32_t index, const Program* program,
 	return thunk;
 }
 
-static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id) {
+static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id, uint64_t caller) {
+	constexpr uint64_t return_value = 0;
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::UnresolvedImportCalls);
 	const auto log_index = g_unresolved_stub_call_log_count.fetch_add(1);
 	if (log_index < 1024) {
@@ -208,13 +229,25 @@ static KYTY_SYSV_ABI uint64_t UnresolvedImportStub(uint64_t record_id) {
 			     log_index, record.patch_vaddr, record.index, record.name.c_str(),
 			     magic_enum::enum_name(record.type), magic_enum::enum_name(record.bind),
 			     record.program.c_str());
+			if (TraceUnresolvedStubs()) {
+				const auto caller_text = DescribeUnresolvedCaller(caller);
+				std::fprintf(stderr,
+				             "UNRESOLVED_STUB symbol=%s caller=%s return_value=0x%llx program=%s\n",
+				             record.name.c_str(), caller_text.c_str(),
+				             static_cast<unsigned long long>(return_value), record.program.c_str());
+			}
 		} else {
 			printf("Unresolved import stub called: <bad-record>\n");
 			LOGF("Unresolved import stub called [%u]: record_id=%" PRIu64 " symbol=<bad-record>\n",
 			     log_index, record_id);
+			if (TraceUnresolvedStubs()) {
+				const auto caller_text = DescribeUnresolvedCaller(caller);
+				std::fprintf(stderr, "UNRESOLVED_STUB symbol=<bad-record> caller=%s return_value=0x%llx\n",
+				             caller_text.c_str(), static_cast<unsigned long long>(return_value));
+			}
 		}
 	}
-	return 0;
+	return return_value;
 }
 
 constexpr uint64_t SYSTEM_RESERVED  = 0x800000000u;
