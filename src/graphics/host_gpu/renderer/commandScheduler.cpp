@@ -49,6 +49,10 @@ void ReportVulkanFatal(const char* what, vk::Result result, uint64_t tick, uint3
 	            what, vk::to_string(result).c_str(), static_cast<int>(result), tick, debug_op,
 	            debug_submit, arg0, arg1, arg2, arg3, arg4);
 	std::fflush(stdout);
+	// The launcher's per-run log keeps stderr only: the result code must land there too.
+	std::fprintf(stderr, "VULKAN_FATAL %s failed: %s (%d), tick=%" PRIu64 " debug_op=%u debug_submit=%" PRIu64 "\n", what,
+	             vk::to_string(result).c_str(), static_cast<int>(result), tick, debug_op, debug_submit);
+	std::fflush(stderr);
 }
 
 // One vkQueueSubmit of a render command buffer that signals `tick` (with the waits and signals of `submit`), under
