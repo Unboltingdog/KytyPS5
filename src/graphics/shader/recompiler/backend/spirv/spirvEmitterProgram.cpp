@@ -32,6 +32,13 @@ uint32_t IfConversionLimit() {
 	           : 0;
 }
 
+// KYTY_OUTLINE_HELPERS (config, default 0): 1 emits the shared f32 min/max/median operations
+// as DontInline SPIR-V functions instead of repeating them at every call site.
+bool OutlineHelpersEnabled() {
+	const char* value = Common::ShaderEnv::Read("KYTY_OUTLINE_HELPERS");
+	return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
 namespace {
 
 void EmitKillIfBoolFalse(EmitterState& state, uint32_t active) {
@@ -1211,6 +1218,7 @@ void EmitProgram(EmitterState& state) {
 	DefineIndirectStoreFunctions(ctx);
 	DefineBvhIntersect(state);
 	DefineTrinityFunctions(state); // upstream bfd4c34b8 / 5eab0ec73: BVH stack, BVH8
+	DefineOutlinedFloatHelpers(state);
 	if (program.info.uses_swizzle) {
 		ctx.scratch_u32_variable = state.builder.AllocateId();
 		if (state.lane_count == 2) {

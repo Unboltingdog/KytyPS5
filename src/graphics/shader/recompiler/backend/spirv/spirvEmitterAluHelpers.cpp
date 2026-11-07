@@ -142,21 +142,30 @@ uint32_t EmitClassMaskF16(EmitterState& state, uint32_t bits, uint32_t mask) {
 // variants, 4 x 2^32 pairs): 0 differences on numbers, with one NaN operand and with signed zeros; when both are NaN only
 // the payload differs; a denormal operand is treated as a zero of its sign (the emulation passed its bits through), which
 // is the console's result under the flush mode the game runs with.
-uint32_t EmitMinMaxF32Value(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
+uint32_t EmitMinMaxF32Inline(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
 	const auto result = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpExtInst, TypeF32(state), result, GlslStd450(state),
 	                          max_value ? GLSLstd450NMax : GLSLstd450NMin, lhs, rhs);
 	return result;
 }
 
-uint32_t EmitFPMedTri32(EmitterState& state, uint32_t a, uint32_t b, uint32_t c) {
+uint32_t EmitMinMaxF32Value(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
+	if (state.outline_helpers) {
+		return CallOutlinedFloatHelper(state, max_value ? OutlinedFloatHelper::Max
+		                                                  : OutlinedFloatHelper::Min,
+		                               {lhs, rhs});
+	}
+	return EmitMinMaxF32Inline(state, lhs, rhs, max_value);
+}
+
+uint32_t EmitFPMedTri32Inline(EmitterState& state, uint32_t a, uint32_t b, uint32_t c) {
 	// RDNA2 MED3 (upstream 3c4124daf, defb2f11d). The MIN3/MAX3 steps are host NMin/NMax too, as every V_MIN/MAX_F32 (only
 	// the payload of two NaN sources can differ, see EmitMinMaxF32Value).
 	// The NaN path is RDNA2 MIN3, which keeps the later source when two are NaN.
-	const auto min_ba = EmitMinMaxF32Value(state, b, a, false);
-	const auto min3   = EmitMinMaxF32Value(state, c, min_ba, false);
-	const auto max_ab = EmitMinMaxF32Value(state, a, b, true);
-	const auto max3   = EmitMinMaxF32Value(state, max_ab, c, true);
+	const auto min_ba = EmitMinMaxF32Inline(state, b, a, false);
+	const auto min3   = EmitMinMaxF32Inline(state, c, min_ba, false);
+	const auto max_ab = EmitMinMaxF32Inline(state, a, b, true);
+	const auto max3   = EmitMinMaxF32Inline(state, max_ab, c, true);
 	// RDNA2 compares numerically against MAX3, including ties between signed zeros, then takes
 	// V_MAX_F32 of the other two sources in their original order.
 	const auto a_is_max = Binary(state, spv::OpFOrdEqual, TypeBool(state), max3, a);
@@ -164,13 +173,20 @@ uint32_t EmitFPMedTri32(EmitterState& state, uint32_t a, uint32_t b, uint32_t c)
 	const auto x        = Select(state, TypeF32(state), a_is_max, b, a);
 	const auto y =
 	    Select(state, TypeF32(state), EmitLogicalOrBool(state, a_is_max, b_is_max), c, b);
-	const auto median = EmitMinMaxF32Value(state, x, y, true);
+	const auto median = EmitMinMaxF32Inline(state, x, y, true);
 	const auto is_nan = [&](uint32_t value) {
 		return Unary(state, spv::OpIsNan, TypeBool(state), value);
 	};
 	const auto any_nan =
 	    EmitLogicalOrBool(state, EmitLogicalOrBool(state, is_nan(a), is_nan(b)), is_nan(c));
 	return Select(state, TypeF32(state), any_nan, min3, median);
+}
+
+uint32_t EmitFPMedTri32(EmitterState& state, uint32_t a, uint32_t b, uint32_t c) {
+	if (state.outline_helpers) {
+		return CallOutlinedFloatHelper(state, OutlinedFloatHelper::Med3, {a, b, c});
+	}
+	return EmitFPMedTri32Inline(state, a, b, c);
 }
 
 // GPU time cloth 4.62 -> 4.47, FSR3 2.50 -> 2.31, volfog 1.33 -> 1.21 ms: the emulator flushes a denormal f32 input of
@@ -662,6 +678,83 @@ uint32_t EmitF32ToHalfArith(EmitterState& state, uint32_t f32) {
 	const auto pair = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 2), pair, f32, ConstantF32(state, 0));
 	return Unary(state, spv::OpBitcast, TypeU32(state), Unary(state, spv::OpFConvert, TypeF16Pair(state), pair)); // high half 0
+}
+
+uint32_t CallOutlinedFloatHelper(EmitterState& state, OutlinedFloatHelper helper,
+                                 const std::vector<uint32_t>& args) {
+	const auto index    = static_cast<size_t>(helper);
+	const auto function = state.outlined_float_functions[index];
+	if (function == 0) {
+		switch (helper) {
+			case OutlinedFloatHelper::Min: return EmitMinMaxF32Inline(state, args[0], args[1], false);
+			case OutlinedFloatHelper::Max: return EmitMinMaxF32Inline(state, args[0], args[1], true);
+			case OutlinedFloatHelper::Min3: return EmitFMinMax3Legacy(state, args[0], args[1], args[2], false);
+			case OutlinedFloatHelper::Max3: return EmitFMinMax3Legacy(state, args[0], args[1], args[2], true);
+			case OutlinedFloatHelper::Med3: return EmitFPMedTri32Inline(state, args[0], args[1], args[2]);
+			default: break;
+		}
+	}
+	EXIT_IF(function == 0);
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpFunctionCall, TypeF32(state), result, function, std::span(args));
+	return result;
+}
+
+void DefineOutlinedFloatHelpers(EmitterState& state) {
+	if (!state.outline_helpers) return;
+	std::array<bool, static_cast<size_t>(OutlinedFloatHelper::Count)> needed {};
+	for (const auto* block: state.program.blocks) {
+		for (const auto& inst: *block) {
+			switch (inst.GetOpcode()) {
+				case IR::ValueOpcode::FPMin32: needed[static_cast<size_t>(OutlinedFloatHelper::Min)] = true; break;
+				case IR::ValueOpcode::FPMax32: needed[static_cast<size_t>(OutlinedFloatHelper::Max)] = true; break;
+				case IR::ValueOpcode::FPMinTri32: needed[static_cast<size_t>(OutlinedFloatHelper::Min3)] = true; break;
+				case IR::ValueOpcode::FPMaxTri32: needed[static_cast<size_t>(OutlinedFloatHelper::Max3)] = true; break;
+				case IR::ValueOpcode::FPMedTri32: needed[static_cast<size_t>(OutlinedFloatHelper::Med3)] = true; break;
+				default: break;
+			}
+		}
+	}
+	constexpr std::array names {"kyty_f32_min", "kyty_f32_max", "kyty_f32_min3", "kyty_f32_max3",
+	                            "kyty_f32_med3"};
+	for (size_t index = 0; index < needed.size(); index++) {
+		if (!needed[index]) continue;
+		const auto helper   = static_cast<OutlinedFloatHelper>(index);
+		const auto function = state.builder.AllocateId();
+		state.outlined_float_functions[index] = function;
+		const uint32_t parameter_count = index <= static_cast<size_t>(OutlinedFloatHelper::Max) ? 2u : 3u;
+		std::vector<uint32_t> parameter_types(parameter_count, TypeF32(state));
+		const auto function_type =
+		    state.builder.Type(spv::OpTypeFunction, TypeF32(state), std::span(parameter_types));
+		state.builder.AddFunction(spv::OpFunction, TypeF32(state), function,
+		                          spv::FunctionControlDontInlineMask, function_type);
+		state.builder.AddName(function, names[index]);
+		std::vector<uint32_t> parameters;
+		for (uint32_t parameter = 0; parameter < parameter_count; parameter++) {
+			parameters.push_back(state.builder.AllocateId());
+			state.builder.AddFunction(spv::OpFunctionParameter, TypeF32(state), parameters.back());
+		}
+		EmitLabel(state, state.builder.AllocateId());
+		uint32_t result = 0;
+		switch (helper) {
+			case OutlinedFloatHelper::Min:
+			case OutlinedFloatHelper::Max:
+				result = EmitMinMaxF32Inline(state, parameters[0], parameters[1],
+				                             helper == OutlinedFloatHelper::Max);
+				break;
+			case OutlinedFloatHelper::Min3:
+			case OutlinedFloatHelper::Max3:
+				result = EmitFMinMax3Legacy(state, parameters[0], parameters[1], parameters[2],
+				                            helper == OutlinedFloatHelper::Max3);
+				break;
+			case OutlinedFloatHelper::Med3:
+				result = EmitFPMedTri32Inline(state, parameters[0], parameters[1], parameters[2]);
+				break;
+			default: break;
+		}
+		state.builder.AddFunction(spv::OpReturnValue, result);
+		state.builder.AddFunction(spv::OpFunctionEnd);
+	}
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter

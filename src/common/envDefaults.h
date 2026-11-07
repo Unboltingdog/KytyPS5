@@ -38,6 +38,7 @@ inline constexpr EnvDefault EnvDefaults[] = {
     {"KYTY_SHADER_PRECOMPILE", "1", "config", ""},
     {"KYTY_SHADER_PRECOMPILE_THREADS", "6", "config", ""},
     {"KYTY_IFCONV_LIMIT", "0", "config", ""},
+    {"KYTY_OUTLINE_HELPERS", "0", "config", ""},
     {"KYTY_VRAM_GC_FIX", "1", "config", ""},
     {"KYTY_VRAM_BUDGET", "1", "config", ""},
     {"KYTY_BINDLESS", "1", "config", ""},
