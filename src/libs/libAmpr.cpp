@@ -1305,7 +1305,180 @@ struct Submission {
 	uint32_t                                 id     = 0;
 	// KYTY_TRACE_STARTUP: when an APR submission was queued (unset otherwise).
 	std::chrono::steady_clock::time_point    queued {};
+	uint64_t                                 diagnostic_id = 0;
+	uint64_t                                 event_eq = 0;
+	int32_t                                  event_id = 0;
+	bool                                     event_triggered = false;
+	bool                                     diagnostic_started = false;
 };
+
+static bool AmprDiagEnabled() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_AMPR");
+		return value != nullptr && value[0] == '1';
+	}();
+	return on;
+}
+
+static uint64_t AmprDiagNowMs() {
+	static const auto started = std::chrono::steady_clock::now();
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+	                                 std::chrono::steady_clock::now() - started)
+	                                 .count());
+}
+
+struct AmprDiagPending {
+	uint64_t bytes = 0;
+	uint64_t submitted_ms = 0;
+	const char* kind = "empty";
+	bool started = false;
+	bool stuck_logged = false;
+};
+
+struct AmprDiagState {
+	std::mutex mutex;
+	std::unordered_map<uint64_t, AmprDiagPending> pending;
+	uint64_t next_id = 1;
+	uint64_t submitted = 0;
+	uint64_t started = 0;
+	uint64_t completed = 0;
+	uint64_t triggered = 0;
+	std::chrono::steady_clock::time_point summary_at = std::chrono::steady_clock::now();
+	std::atomic<int64_t> next_check_ns {0};
+};
+
+static AmprDiagState& AmprDiagGetState() {
+	static auto* state = new AmprDiagState;
+	return *state;
+}
+
+static uint64_t AmprDiagSubmit(uint64_t bytes, const char* kind) {
+	if (!AmprDiagEnabled()) {
+		return 0;
+	}
+	auto& state = AmprDiagGetState();
+	std::scoped_lock lock(state.mutex);
+	const auto id = state.next_id++;
+	state.pending[id] = AmprDiagPending {bytes, AmprDiagNowMs(), kind};
+	state.submitted++;
+	return id;
+}
+
+static void AmprDiagStart(uint64_t id) {
+	auto& state = AmprDiagGetState();
+	std::scoped_lock lock(state.mutex);
+	const auto it = state.pending.find(id);
+	if (it != state.pending.end() && !it->second.started) {
+		it->second.started = true;
+		state.started++;
+	}
+}
+
+static void AmprDiagComplete(uint64_t id, uint64_t event_eq, int32_t event_id, bool triggered) {
+	if (id == 0) {
+		return;
+	}
+	auto& state = AmprDiagGetState();
+	std::scoped_lock lock(state.mutex);
+	const auto it = state.pending.find(id);
+	if (it == state.pending.end()) {
+		return;
+	}
+	const auto pending = it->second;
+	state.pending.erase(it);
+	state.completed++;
+	state.triggered += triggered ? 1u : 0u;
+	const auto done_ms = AmprDiagNowMs();
+	if (state.completed <= 50) {
+		std::fprintf(stderr,
+		             "AMPR_CMD id=%llu kind=%s bytes=%llu submit_ms=%llu done_ms=%llu event=0x%llx@%d triggered=%u\n",
+		             static_cast<unsigned long long>(id), pending.kind,
+		             static_cast<unsigned long long>(pending.bytes),
+		             static_cast<unsigned long long>(pending.submitted_ms),
+		             static_cast<unsigned long long>(done_ms), static_cast<unsigned long long>(event_eq),
+		             event_id, triggered ? 1u : 0u);
+	}
+}
+
+static void AmprDiagReport() {
+	if (!AmprDiagEnabled()) {
+		return;
+	}
+	const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                        std::chrono::steady_clock::now().time_since_epoch())
+	                        .count();
+	auto& state = AmprDiagGetState();
+	if (now_ns < state.next_check_ns.load(std::memory_order_relaxed)) {
+		return;
+	}
+	state.next_check_ns.store(now_ns + 100000000, std::memory_order_relaxed);
+	std::scoped_lock lock(state.mutex);
+	const auto now_ms = AmprDiagNowMs();
+	for (auto& [id, pending]: state.pending) {
+		const auto age_ms = now_ms - pending.submitted_ms;
+		if (age_ms > 5000 && !pending.stuck_logged) {
+			pending.stuck_logged = true;
+			std::fprintf(stderr, "AMPR_STUCK id=%llu kind=%s bytes=%llu age_ms=%llu started=%u\n",
+			             static_cast<unsigned long long>(id), pending.kind,
+			             static_cast<unsigned long long>(pending.bytes),
+			             static_cast<unsigned long long>(age_ms), pending.started ? 1u : 0u);
+		}
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (now - state.summary_at < std::chrono::seconds(20)) {
+		return;
+	}
+	state.summary_at = now;
+	uint64_t oldest_id = 0;
+	uint64_t oldest_age_ms = 0;
+	for (const auto& [id, pending]: state.pending) {
+		const auto age_ms = now_ms - pending.submitted_ms;
+		if (oldest_id == 0 || age_ms > oldest_age_ms) {
+			oldest_id = id;
+			oldest_age_ms = age_ms;
+		}
+	}
+	std::fprintf(stderr,
+	             "AMPR_SUM submitted=%llu started=%llu completed=%llu triggered=%llu pending=%zu oldest_id=%llu oldest_age_ms=%llu\n",
+	             static_cast<unsigned long long>(state.submitted),
+	             static_cast<unsigned long long>(state.started),
+	             static_cast<unsigned long long>(state.completed),
+	             static_cast<unsigned long long>(state.triggered), state.pending.size(),
+	             static_cast<unsigned long long>(oldest_id),
+	             static_cast<unsigned long long>(oldest_age_ms));
+}
+
+static const char* AmprDiagCommandKind(const std::vector<CommandBufferState::Command>& commands) {
+	const char* kind = nullptr;
+	for (const auto& command: commands) {
+		const char* current = nullptr;
+		if (std::holds_alternative<CommandBufferState::ReadFileCommand>(command.data)) {
+			current = "read";
+		} else if (std::holds_alternative<CommandBufferState::KernelEventCommand>(command.data)) {
+			current = "event";
+		} else if (std::holds_alternative<CommandBufferState::WriteAddressCommand>(command.data)) {
+			current = "write_address";
+		} else if (std::holds_alternative<CommandBufferState::WriteCounterCommand>(command.data)) {
+			current = "write_counter";
+		} else if (std::holds_alternative<CommandBufferState::WaitCommand>(command.data)) {
+			current = "wait";
+		} else if (const auto* map = std::get_if<CommandBufferState::AmmMapCommand>(&command.data)) {
+			switch (map->kind) {
+				case AmmCommandKind::MapAuto: current = "map_auto"; break;
+				case AmmCommandKind::MapDirect: current = "map_direct"; break;
+				case AmmCommandKind::Unmap: current = "unmap"; break;
+			}
+		}
+		if (current == nullptr) {
+			current = "unknown";
+		}
+		if (kind != nullptr && std::strcmp(kind, current) != 0) {
+			return "mixed";
+		}
+		kind = current;
+	}
+	return kind != nullptr ? kind : "empty";
+}
 
 static bool IsWaitSatisfied(const CommandBufferState::WaitCommand& wait) {
 	const uint64_t value = wait.is_counter
@@ -1345,6 +1518,7 @@ private:
 	void Run(std::stop_token stop) {
 		std::unique_lock lock(m_mutex);
 		while (!stop.stop_requested()) {
+			AmprDiagReport();
 			std::deque<Submission>* ready   = nullptr;
 			bool                    pending = false;
 			for (auto& queue: m_queues) {
@@ -1374,6 +1548,10 @@ private:
 			}
 
 			auto& submission = ready->front();
+			if (!submission.diagnostic_started && submission.diagnostic_id != 0) {
+				AmprDiagStart(submission.diagnostic_id);
+				submission.diagnostic_started = true;
+			}
 			lock.unlock();
 			int      result       = OK;
 			uint32_t error_offset = 0;
@@ -1382,6 +1560,11 @@ private:
 				result              = ExecuteCommand(command);
 				if (result != OK) {
 					error_offset = static_cast<uint32_t>(command.record_offset);
+				} else if (const auto* event =
+				               std::get_if<CommandBufferState::KernelEventCommand>(&command.data)) {
+					submission.event_eq = event->eq;
+					submission.event_id = event->id;
+					submission.event_triggered = true;
 				}
 			}
 			const bool complete = result != OK || submission.cursor == submission.commands.size();
@@ -1392,6 +1575,8 @@ private:
 					Common::StartupTrace::Add(Common::StartupTrace::Counter::AprLatency,
 					                          Common::StartupTrace::NanosSince(submission.queued));
 				}
+				AmprDiagComplete(submission.diagnostic_id, submission.event_eq, submission.event_id,
+				                 submission.event_triggered);
 			}
 			lock.lock();
 			if (complete) {
@@ -1444,6 +1629,16 @@ static int QueueCommandBuffer(Engine engine, uint64_t command_buffer, uint32_t b
 	static CommandEngine apr_engine(7);
 	static CommandEngine amm_engine(3);
 	Submission submission {std::move(state.commands), 0, result, id};
+	if (AmprDiagEnabled()) {
+		submission.diagnostic_id =
+		    AmprDiagSubmit(end, AmprDiagCommandKind(submission.commands));
+		for (const auto& command: submission.commands) {
+			if (const auto* event = std::get_if<CommandBufferState::KernelEventCommand>(&command.data)) {
+				submission.event_eq = event->eq;
+				submission.event_id = event->id;
+			}
+		}
+	}
 	if (!amm && Common::StartupTrace::Enabled()) {
 		submission.queued = std::chrono::steady_clock::now(); // KYTY_TRACE_STARTUP: submit-to-complete latency
 	}
