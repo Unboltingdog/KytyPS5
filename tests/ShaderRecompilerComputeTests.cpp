@@ -1520,6 +1520,138 @@ size_t CountText(const std::string &text, const std::string &needle) {
   return count;
 }
 
+size_t CountSpirvOpcode(const std::vector<u32> &spirv, spv::Op opcode) {
+  size_t count = 0;
+  for (size_t offset = 5; offset < spirv.size();) {
+    const auto words = spirv[offset] >> spv::WordCountShift;
+    Require("ShaderShrinkBench", "instruction bounds",
+            words != 0 && offset + words <= spirv.size(),
+            "malformed emitted SPIR-V");
+    count += (spirv[offset] & spv::OpCodeMask) == opcode;
+    offset += words;
+  }
+  return count;
+}
+
+bool SetShaderShrinkEnv(const char *name, const char *value) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+  const std::string setting = std::string(name) + "=" + value;
+  return _putenv(setting.c_str()) == 0;
+#else
+  return setenv(name, value, 1) == 0;
+#endif
+}
+
+void CheckShaderShrinkBench() {
+  constexpr const char *name = "ShaderShrinkBench";
+  constexpr u32 iterations = 256;
+  struct Stats {
+    std::vector<u32> spirv;
+    size_t selects = 0;
+    size_t calls = 0;
+    size_t phis = 0;
+    size_t functions = 0;
+  };
+  const auto compile = [](bool pair_mode) {
+    using namespace ShaderRecompiler;
+    IR::Program program;
+    program.stage = ShaderType::Compute;
+    program.wave_size = pair_mode ? 64u : 32u;
+    program.shader_hash = pair_mode ? 0x18b1u : 0x18b0u;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    program.shader_info_complete = true;
+    program.info.inputs.push_back(
+        {IR::StageInputKind::LocalInvocationId, 0, 3, "gl_LocalInvocationID"});
+    auto *block = program.block_storage.emplace_back(std::make_unique<IR::Block>()).get();
+    program.blocks.push_back(block);
+    block->terminator.kind = CFG::TerminatorKind::Return;
+    const auto emit = [&](IR::ValueOpcode opcode,
+                          std::initializer_list<IR::Value> args) {
+      return IR::Value(&block->AppendNewInst(opcode, args));
+    };
+    const auto raw = emit(IR::ValueOpcode::GetBuiltin,
+                          {IR::Value(static_cast<u32>(IR::StageInputKind::LocalInvocationId)),
+                           IR::Value(0u)});
+    const auto active = emit(IR::ValueOpcode::ULessThan32, {raw, IR::Value(64u)});
+    auto previous = raw;
+    auto current = emit(IR::ValueOpcode::ConvertF32U32, {raw});
+    (void)current;
+    for (u32 index = 0; index < iterations; index++) {
+      const auto next = emit(IR::ValueOpcode::IAdd32, {previous, raw});
+      previous = emit(IR::ValueOpcode::SelectU32, {active, next, previous});
+      current = emit(IR::ValueOpcode::BitCastU32F32, {previous});
+      current = emit(IR::ValueOpcode::FPMin32, {current, current});
+      current = emit(IR::ValueOpcode::FPMax32, {current, current});
+      current = emit(IR::ValueOpcode::FPMinTri32, {current, current, current});
+      current = emit(IR::ValueOpcode::FPMaxTri32, {current, current, current});
+      current = emit(IR::ValueOpcode::FPMedTri32, {current, current, current});
+    }
+    (void)current;
+    ShaderComputeInputInfo compute{};
+    compute.threads_num[0] = pair_mode ? 64u : 1u;
+    compute.threads_num[1] = compute.threads_num[2] = 1;
+    compute.host_subgroup_size = 32;
+    return Spirv::EmitProgram(program, {.compute = &compute});
+  };
+  const auto run = [&](const char *label, bool pair_mode) {
+    auto compiled = compile(pair_mode);
+    ValidateSpirv(name, compiled);
+    Stats stats{.spirv = std::move(compiled)};
+    stats.selects = CountSpirvOpcode(stats.spirv, spv::OpSelect);
+    stats.calls = CountSpirvOpcode(stats.spirv, spv::OpFunctionCall);
+    stats.phis = CountSpirvOpcode(stats.spirv, spv::OpPhi);
+    stats.functions = CountSpirvOpcode(stats.spirv, spv::OpFunction);
+    std::printf("SHADER_SHRINK case=%s lanes=%u words=%zu OpSelect=%zu "
+                "OpFunctionCall=%zu OpPhi=%zu\n",
+                label, pair_mode ? 2u : 1u, stats.spirv.size(), stats.selects,
+                stats.calls, stats.phis);
+    return stats;
+  };
+  const auto set_switches = [&](bool ifconv, bool outline) {
+    Require(name, "if-conversion setting",
+            SetShaderShrinkEnv("KYTY_IFCONV_LIMIT", ifconv ? "1" : "0"),
+            "could not set KYTY_IFCONV_LIMIT");
+    Require(name, "helper setting",
+            SetShaderShrinkEnv("KYTY_OUTLINE_HELPERS", outline ? "1" : "0"),
+            "could not set KYTY_OUTLINE_HELPERS");
+  };
+
+  set_switches(false, false);
+  const auto off = run("both_off", false);
+  set_switches(true, false);
+  const auto ifconv = run("ifconv_on", false);
+  set_switches(false, true);
+  const auto outline = run("outline_on", false);
+  set_switches(true, true);
+  const auto both = run("both_on", false);
+  set_switches(false, false);
+  const auto pair_off = run("pair_both_off", true);
+  set_switches(true, false);
+  const auto pair_ifconv = run("pair_ifconv_on", true);
+  set_switches(false, false);
+
+  Require(name, "if-conversion",
+          ifconv.selects + iterations == off.selects &&
+              ifconv.phis == off.phis + iterations,
+          "the single-lane region did not replace every predicated select with a raw U32 phi");
+  Require(name, "outlining",
+          outline.calls == off.calls + 5u * iterations &&
+              outline.functions == off.functions + 5u,
+          "the five float helpers were not outlined once and called at every use");
+  Require(name, "combined switches",
+          both.selects + iterations == outline.selects &&
+              both.calls == outline.calls && both.phis == ifconv.phis,
+          "the two shader-shrinking switches did not compose");
+  Require(name, "pair if-conversion",
+          pair_ifconv.selects + 2u * iterations == pair_off.selects &&
+              pair_ifconv.phis == pair_off.phis + 2u * iterations,
+          "pair mode did not emit independent branches and phis for both lane halves");
+  Require(name, "combined size", both.spirv.size() < off.spirv.size(),
+          "the combined switches did not shrink the synthetic module");
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckPixelParameterAliases() {
   constexpr const char *name = "PixelParameterAliases";
   ShaderPixelInputInfo pixel{};
@@ -45307,6 +45439,10 @@ int main(int argc, char **argv) {
   }
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  if (argc == 2 && std::strcmp(argv[1], "--shader-shrink-bench") == 0) {
+    CheckShaderShrinkBench();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--thread-dimensions-only") == 0) {
     VulkanHarness vulkan;
     CheckComputeThreadDimensions(vulkan);
