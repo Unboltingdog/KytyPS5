@@ -9,7 +9,9 @@
 #include "loader/symbolDatabase.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -1697,16 +1699,194 @@ namespace LibNpSessionSignaling {
 
 LIB_VERSION("NpSessionSignaling", 1, "NpSessionSignaling", 1, 1);
 
+constexpr int NP_SIGNALING_ERROR_NOT_INITIALIZED   = static_cast<int>(0x80553301u);
+constexpr int NP_SIGNALING_ERROR_INVALID_ARGUMENT  = static_cast<int>(0x80553303u);
+constexpr int NP_SIGNALING_ERROR_CONTEXT_LIMIT     = static_cast<int>(0x80553307u);
+constexpr int NP_SIGNALING_ERROR_CONTEXT_NOT_FOUND = static_cast<int>(0x80553308u);
+constexpr size_t NP_SIGNALING_CONTEXT_MAX          = 8;
+
+struct NpSessionSignalingPeerAddress;
+
+using NpSessionSignalingEventCallback = KYTY_SYSV_ABI void (*)(
+    uint32_t context_id, uint32_t request_id, int32_t event,
+    const NpSessionSignalingPeerAddress* peer_address, int32_t error_code, void* user_data);
+
+struct NpSessionSignalingContextParam {
+	int32_t                         user_id;
+	uint32_t                        service_label;
+	NpSessionSignalingEventCallback prepare_callback;
+	void*                           prepare_user_data;
+	NpSessionSignalingEventCallback session_callback;
+	void*                           session_user_data;
+	void*                           connection_callback;
+	void*                           connection_user_data;
+};
+
+struct NpSessionSignalingLocalNetInfo {
+	uint32_t local_address;
+	uint32_t mapped_address;
+	uint32_t mapped_port;
+	uint32_t mapping_status;
+};
+
+static_assert(sizeof(NpSessionSignalingContextParam) == 56);
+static_assert(offsetof(NpSessionSignalingContextParam, prepare_callback) == 8);
+static_assert(offsetof(NpSessionSignalingContextParam, session_callback) == 24);
+static_assert(offsetof(NpSessionSignalingContextParam, connection_callback) == 40);
+static_assert(sizeof(NpSessionSignalingLocalNetInfo) == 16);
+
+struct NpSessionSignalingContext {
+	bool                            used = false;
+	NpSessionSignalingEventCallback prepare_callback = nullptr;
+	void*                           prepare_user_data = nullptr;
+};
+
+static std::mutex g_np_signaling_mutex;
+static bool       g_np_signaling_initialized = false;
+static uint32_t   g_np_signaling_next_request_id = 1;
+static std::array<NpSessionSignalingContext, NP_SIGNALING_CONTEXT_MAX> g_np_signaling_contexts;
+
+static NpSessionSignalingContext* FindNpSignalingContext(uint32_t context_id) {
+	if (context_id == 0 || context_id > g_np_signaling_contexts.size()) {
+		return nullptr;
+	}
+	auto& context = g_np_signaling_contexts[context_id - 1];
+	return context.used ? &context : nullptr;
+}
+
 static int KYTY_SYSV_ABI NpSessionSignalingInitialize(void* param) {
 	PRINT_NAME();
 
 	LOGF("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 
-	return 0;
+	std::scoped_lock lock(g_np_signaling_mutex);
+	g_np_signaling_contexts = {};
+	g_np_signaling_next_request_id = 1;
+	g_np_signaling_initialized = true;
+	return OK;
+}
+
+static int CreateNpSignalingContext(const NpSessionSignalingContextParam* param,
+                                    uint32_t* context_id) {
+	if (param == nullptr || context_id == nullptr) {
+		return NP_SIGNALING_ERROR_INVALID_ARGUMENT;
+	}
+	*context_id = 0;
+
+	std::scoped_lock lock(g_np_signaling_mutex);
+	if (!g_np_signaling_initialized) {
+		return NP_SIGNALING_ERROR_NOT_INITIALIZED;
+	}
+	for (size_t i = 0; i < g_np_signaling_contexts.size(); i++) {
+		auto& context = g_np_signaling_contexts[i];
+		if (!context.used) {
+			context.used = true;
+			context.prepare_callback = param->prepare_callback;
+			context.prepare_user_data = param->prepare_user_data;
+			*context_id = static_cast<uint32_t>(i + 1);
+			return OK;
+		}
+	}
+	return NP_SIGNALING_ERROR_CONTEXT_LIMIT;
+}
+
+static int KYTY_SYSV_ABI
+NpSessionSignalingCreateContext(const NpSessionSignalingContextParam* param, uint32_t* context_id) {
+	PRINT_NAME();
+	return CreateNpSignalingContext(param, context_id);
+}
+
+static int KYTY_SYSV_ABI
+NpSessionSignalingCreateContext2(const NpSessionSignalingContextParam* param, uint32_t* context_id) {
+	PRINT_NAME();
+	return CreateNpSignalingContext(param, context_id);
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingDestroyContext(uint32_t context_id) {
+	PRINT_NAME();
+	std::scoped_lock lock(g_np_signaling_mutex);
+	auto* context = FindNpSignalingContext(context_id);
+	if (context == nullptr) {
+		return NP_SIGNALING_ERROR_CONTEXT_NOT_FOUND;
+	}
+	*context = {};
+	return OK;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingRequestPrepare(uint32_t context_id,
+                                                          uint32_t* request_id) {
+	PRINT_NAME();
+	if (request_id == nullptr) {
+		return NP_SIGNALING_ERROR_INVALID_ARGUMENT;
+	}
+	*request_id = 0;
+
+	NpSessionSignalingEventCallback callback = nullptr;
+	void* user_data = nullptr;
+	{
+		std::scoped_lock lock(g_np_signaling_mutex);
+		if (!g_np_signaling_initialized) {
+			return NP_SIGNALING_ERROR_NOT_INITIALIZED;
+		}
+		auto* context = FindNpSignalingContext(context_id);
+		if (context == nullptr) {
+			return NP_SIGNALING_ERROR_CONTEXT_NOT_FOUND;
+		}
+		*request_id = g_np_signaling_next_request_id++;
+		if (g_np_signaling_next_request_id == 0) {
+			g_np_signaling_next_request_id = 1;
+		}
+		callback = context->prepare_callback;
+		user_data = context->prepare_user_data;
+	}
+
+	if (callback != nullptr) {
+		callback(context_id, *request_id, 0, nullptr, OK, user_data);
+	}
+	return OK;
+}
+
+static int KYTY_SYSV_ABI
+NpSessionSignalingGetLocalNetInfo(uint32_t context_id, NpSessionSignalingLocalNetInfo* info) {
+	PRINT_NAME();
+	if (info == nullptr) {
+		return NP_SIGNALING_ERROR_INVALID_ARGUMENT;
+	}
+	std::scoped_lock lock(g_np_signaling_mutex);
+	if (!g_np_signaling_initialized) {
+		return NP_SIGNALING_ERROR_NOT_INITIALIZED;
+	}
+	if (FindNpSignalingContext(context_id) == nullptr) {
+		return NP_SIGNALING_ERROR_CONTEXT_NOT_FOUND;
+	}
+	*info = {};
+	return OK;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingTerminate() {
+	PRINT_NAME();
+	std::scoped_lock lock(g_np_signaling_mutex);
+	g_np_signaling_contexts = {};
+	g_np_signaling_initialized = false;
+	return OK;
+}
+
+static bool NpSignalingStubsEnabled() {
+	const char* value = std::getenv("KYTY_NP_SIGNALING_STUBS");
+	return value == nullptr || value[0] != '0';
 }
 
 LIB_DEFINE(InitNet_1_NpSessionSignaling) {
 	LIB_FUNC("ysmw6J-P8Ak", NpSessionSignalingInitialize);
+	if (!NpSignalingStubsEnabled()) {
+		return;
+	}
+	LIB_FUNC("GtuZGmN-tKw", NpSessionSignalingCreateContext);
+	LIB_FUNC("aBuX0PX-T7I", NpSessionSignalingCreateContext2);
+	LIB_FUNC("Z9Q9LzQDXf0", NpSessionSignalingDestroyContext);
+	LIB_FUNC("r8mVMwlafF8", NpSessionSignalingRequestPrepare);
+	LIB_FUNC("OTilStjd9L8", NpSessionSignalingGetLocalNetInfo);
+	LIB_FUNC("CqJuNXo5yiM", NpSessionSignalingTerminate);
 }
 
 } // namespace LibNpSessionSignaling

@@ -77,6 +77,10 @@ namespace Libs::LibNpAuth {
 void InitNet_1_NpAuth(Loader::SymbolDatabase *symbols);
 }
 
+namespace Libs::LibNpSessionSignaling {
+void InitNet_1_NpSessionSignaling(Loader::SymbolDatabase *symbols);
+}
+
 namespace Libs::LibNpEntitlementAccess {
 void InitNet_1_NpEntitlementAccess(Loader::SymbolDatabase *symbols);
 }
@@ -2346,6 +2350,108 @@ void TestNpAuthEmulation() {
   Config::Load(Config::ConfigOptions {});
 }
 
+using NpSignalingTestCallback = void (KYTY_SYSV_ABI *)(
+    uint32_t, uint32_t, int32_t, const void *, int32_t, void *);
+
+struct NpSignalingTestParameters {
+  int32_t user_id = 1;
+  uint32_t service_label = 0;
+  NpSignalingTestCallback prepare_callback = nullptr;
+  void *prepare_user_data = nullptr;
+  NpSignalingTestCallback session_callback = nullptr;
+  void *session_user_data = nullptr;
+  void *connection_callback = nullptr;
+  void *connection_user_data = nullptr;
+};
+
+struct NpSignalingTestEvent {
+  uint32_t context_id = 0;
+  uint32_t request_id = 0;
+  int32_t event = -1;
+  const void *peer = reinterpret_cast<const void *>(1);
+  int32_t error = -1;
+  int calls = 0;
+};
+
+void KYTY_SYSV_ABI RecordNpSignalingPrepare(uint32_t context_id, uint32_t request_id,
+    int32_t event, const void *peer, int32_t error, void *arg) {
+  auto &record = *static_cast<NpSignalingTestEvent *>(arg);
+  ++record.calls;
+  record.context_id = context_id;
+  record.request_id = request_id;
+  record.event = event;
+  record.peer = peer;
+  record.error = error;
+}
+
+void TestNpSessionSignaling() {
+#if defined(_WIN32)
+  Check(_putenv_s("KYTY_NP_SIGNALING_STUBS", "") == 0, "use default NP signaling exports");
+#else
+  Check(unsetenv("KYTY_NP_SIGNALING_STUBS") == 0, "use default NP signaling exports");
+#endif
+  Loader::SymbolDatabase symbols;
+  Libs::LibNpSessionSignaling::InitNet_1_NpSessionSignaling(&symbols);
+  const auto resolve = [&] (const char *nid) {
+    const auto *symbol = symbols.FindByNid(nid, Loader::SymbolType::Func);
+    Check(symbol != nullptr, "resolve offline NP signaling exports");
+    return symbol->vaddr;
+  };
+  const auto initialize = reinterpret_cast<int (KYTY_SYSV_ABI *)(void *)>(
+      resolve("ysmw6J-P8Ak"));
+  const auto create = reinterpret_cast<int (KYTY_SYSV_ABI *)(
+      const NpSignalingTestParameters *, uint32_t *)>(resolve("aBuX0PX-T7I"));
+  const auto prepare = reinterpret_cast<int (KYTY_SYSV_ABI *)(uint32_t, uint32_t *)>(
+      resolve("r8mVMwlafF8"));
+  const auto local_info = reinterpret_cast<int (KYTY_SYSV_ABI *)(uint32_t, void *)>(
+      resolve("OTilStjd9L8"));
+  const auto destroy = reinterpret_cast<int (KYTY_SYSV_ABI *)(uint32_t)>(
+      resolve("Z9Q9LzQDXf0"));
+  const auto terminate = reinterpret_cast<int (KYTY_SYSV_ABI *)()>(
+      resolve("CqJuNXo5yiM"));
+  Check(symbols.FindByNid("GtuZGmN-tKw", Loader::SymbolType::Func) != nullptr,
+        "the first context creation variant uses the same offline service");
+
+  NpSignalingTestEvent event;
+  NpSignalingTestParameters parameters;
+  parameters.prepare_callback = RecordNpSignalingPrepare;
+  parameters.prepare_user_data = &event;
+  uint32_t context = 0;
+  Check(initialize(nullptr) == OK && create(&parameters, &context) == OK && context != 0,
+        "create a nonzero NP signaling context");
+  std::array<uint32_t, 4> net_info;
+  net_info.fill(0xffffffffu);
+  Check(local_info(context, net_info.data()) == OK &&
+            std::all_of(net_info.begin(), net_info.end(), [] (uint32_t value) {
+              return value == 0;
+            }),
+        "local-only NP signaling zeroes every network info field");
+  uint32_t request = 0;
+  Check(prepare(context, &request) == OK && request != 0 && event.calls == 1 &&
+            event.context_id == context && event.request_id == request && event.event == 0 &&
+            event.peer == nullptr && event.error == OK,
+        "NP signaling prepare completes with a ready callback and matching request id");
+  Check(destroy(context) == OK && terminate() == OK, "release offline NP signaling state");
+
+#if defined(_WIN32)
+  Check(_putenv_s("KYTY_NP_SIGNALING_STUBS", "0") == 0, "disable offline NP signaling exports");
+#else
+  Check(setenv("KYTY_NP_SIGNALING_STUBS", "0", 1) == 0, "disable offline NP signaling exports");
+#endif
+  Loader::SymbolDatabase unresolved;
+  Libs::LibNpSessionSignaling::InitNet_1_NpSessionSignaling(&unresolved);
+  Check(unresolved.FindByNid("ysmw6J-P8Ak", Loader::SymbolType::Func) != nullptr &&
+            unresolved.FindByNid("aBuX0PX-T7I", Loader::SymbolType::Func) == nullptr &&
+            unresolved.FindByNid("r8mVMwlafF8", Loader::SymbolType::Func) == nullptr &&
+            unresolved.FindByNid("OTilStjd9L8", Loader::SymbolType::Func) == nullptr,
+        "KYTY_NP_SIGNALING_STUBS=0 leaves the new imports unresolved");
+#if defined(_WIN32)
+  Check(_putenv_s("KYTY_NP_SIGNALING_STUBS", "") == 0, "restore NP signaling default");
+#else
+  Check(unsetenv("KYTY_NP_SIGNALING_STUBS") == 0, "restore NP signaling default");
+#endif
+}
+
 void CheckEtherAddressFormatting() {
   Loader::SymbolDatabase symbols;
   Libs::LibNet::InitNet_1_Net(&symbols);
@@ -2728,6 +2834,7 @@ int main(int argc, char** argv) {
 #endif
     TestNpEmulation();
     TestNpAuthEmulation();
+    TestNpSessionSignaling();
     subsystems.Destroy();
     std::printf("KernelFileSystemTests: network cases passed\n");
     return 0;
@@ -2781,6 +2888,7 @@ int main(int argc, char** argv) {
 #endif
   TestNpEmulation();
   TestNpAuthEmulation();
+  TestNpSessionSignaling();
   TestNpWebApi2Memory();
   TestNpCommerceDialog();
   graphics.reset();
