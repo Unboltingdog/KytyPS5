@@ -1635,6 +1635,7 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
                                  uint32_t write_control) {
 	const uint32_t dst_sel = ((write_control >> 30u) & 0x1u) | ((write_control >> 7u) & 0x1eu);
 	const bool     write_one_address = ((write_control >> 16u) & 0x1u) != 0;
+	const bool     write_confirm     = ((write_control >> 20u) & 0x1u) != 0;
 	TraceCpWriter("write_data", reinterpret_cast<uint64_t>(dst), uint64_t {dw_num} * 4u, 0, dst_sel);
 
 	switch (dst_sel) {
@@ -1646,6 +1647,9 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 		default: EXIT("unsupported writeData destination selector 0x%02" PRIx32 "\n", dst_sel);
 	}
 	if (dw_num == 0) {
+		if (write_confirm) {
+			ConfirmWrite("WRITE_DATA", "zero_length_write");
+		}
 		return;
 	}
 
@@ -1688,6 +1692,34 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	} else if (!direct) {
 		NoteGuestWrite(sequence, reinterpret_cast<uint64_t>(dst), uint64_t {dw_num} * sizeof(uint32_t), src);
 	}
+	if (write_confirm) {
+		ConfirmWrite("WRITE_DATA");
+	}
+}
+
+void CommandProcessor::ConfirmWrite(const char* packet_kind, const char* unsupported_reason) {
+	const char* queue = IsAsyncComputeQueue() ? "ACB" : "DCB";
+	if (unsupported_reason != nullptr) {
+		GpuEventDiagnostics::Request(queue, GetQueueId(), packet_kind, 2, m_interrupt_event_id, false,
+		                             unsupported_reason);
+		return;
+	}
+	if (!IsAsyncComputeQueue()) {
+		GpuEventDiagnostics::Request(queue, GetQueueId(), packet_kind, 2, m_interrupt_event_id, false,
+		                             "dcb_write_confirm_unsupported");
+		return;
+	}
+	static const bool fix = [] {
+		const char* value = std::getenv("KYTY_FIX_COMPUTE_INTERRUPTS");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (!fix) {
+		GpuEventDiagnostics::Request(queue, GetQueueId(), packet_kind, 2, m_interrupt_event_id, false,
+		                             "compute_interrupts_disabled");
+		return;
+	}
+	TriggerEopEventAtEndOfPipe(0, packet_kind, 2);
+	BufferFlushForInterrupt();
 }
 
 void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_bytes) {
@@ -1722,6 +1754,9 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
                                uint8_t block_engine, const char* packet_kind) {
 	EXIT_NOT_IMPLEMENTED(engine > 1);
 	if (num_bytes == 0) {
+		if (write_confirm != 0) {
+			ConfirmWrite(packet_kind, "zero_length_write");
+		}
 		return;
 	}
 	TraceCpWriter("dma_data", dst_address_or_offset, num_bytes, src_address_or_offset_or_immediate,
@@ -1732,6 +1767,9 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 	EXIT_NOT_IMPLEMENTED(write_confirm > 1);
 	EXIT_NOT_IMPLEMENTED(block_engine > 1);
 	if (static_cast<uint32_t>(dst_address_or_offset) == 0x3022cu) {
+		if (write_confirm != 0) {
+			ConfirmWrite(packet_kind, "special_register_write");
+		}
 		return;
 	}
 	if (DebugCaptureFrame().load() && (src_sel == 1 || dst_sel == 1)) {
@@ -1755,6 +1793,9 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 		if (src_sel != 3) {
 			EXIT("unsupported dmaData nowhere source selector 0x%02" PRIx8 "\n", src_sel);
 		}
+		if (write_confirm != 0) {
+			ConfirmWrite(packet_kind, "discard_write");
+		}
 		return;
 	}
 	bool dst_gds = false;
@@ -1776,6 +1817,9 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 	});
 	if (!dst_gds) {
 		NoteGuestWrite(sequence, dst_address_or_offset, num_bytes);
+	}
+	if (write_confirm != 0) {
+		ConfirmWrite(packet_kind);
 	}
 }
 

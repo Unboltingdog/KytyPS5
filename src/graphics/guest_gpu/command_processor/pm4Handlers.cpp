@@ -1654,6 +1654,9 @@ KYTY_CP_OP_PARSER(CpOpCopyData) {
 			     src_sel, dst_sel, dst, num_bytes);
 		}
 		cp.WriteReferenceClock(dst, num_bytes);
+		if (write_confirm != 0) {
+			cp.ConfirmWrite("COPY_DATA");
+		}
 		return 5;
 	}
 	const auto dma_src = CopyDataSrcToDma(src_sel);

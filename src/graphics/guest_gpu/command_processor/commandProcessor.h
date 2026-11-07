@@ -198,6 +198,7 @@ public:
 	void MemSemaphore(uint64_t* counter, bool signal, bool write); // upstream 1b7093805
 	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control);
 	void WriteReferenceClock(uint64_t dst_address, uint32_t num_bytes);
+	void ConfirmWrite(const char* packet_kind, const char* unsupported_reason = nullptr);
 	void DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cache_policy,
 	             uint64_t dst_address_or_offset, uint8_t src_sel, uint8_t src_cache_policy,
 	             uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes,
