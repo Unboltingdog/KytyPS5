@@ -92,7 +92,7 @@ static void InterruptEventTriggerFunc(LibKernel::EventQueue::KernelEqueueEvent* 
 }
 
 int AddEqEvent(RenderContext& renderer, LibKernel::EventQueue::KernelEqueue eq, int id,
-               void* udata) {
+               void* udata, uint64_t caller) {
 	LibKernel::EventQueue::KernelEqueueEvent event;
 	event.triggered           = false;
 	event.event.ident         = static_cast<uintptr_t>(id);
@@ -108,16 +108,20 @@ int AddEqEvent(RenderContext& renderer, LibKernel::EventQueue::KernelEqueue eq, 
 	if (result == 0) {
 		renderer.AddInterruptEq(eq, id);
 	}
+	GpuEventDiagnostics::Registration("add", eq, id, udata, caller, result == 0);
 
 	return result;
 }
 
-int DeleteEqEvent(RenderContext& renderer, LibKernel::EventQueue::KernelEqueue eq, int id) {
+int DeleteEqEvent(RenderContext& renderer, LibKernel::EventQueue::KernelEqueue eq, int id,
+                  uint64_t caller) {
 	int result = LibKernel::EventQueue::KernelDeleteEvent(
 	    eq, static_cast<uintptr_t>(id), LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
 	if (result == OK || result == LibKernel::KERNEL_ERROR_ENOENT) {
 		renderer.DeleteInterruptEq(eq, id);
 	}
+	GpuEventDiagnostics::Registration("del", eq, id, nullptr, caller,
+	                                  result == OK || result == LibKernel::KERNEL_ERROR_ENOENT);
 
 	return result;
 }

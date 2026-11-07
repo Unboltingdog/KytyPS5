@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
+#include "graphics/host_gpu/renderer/gpuEventDiagnostics.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/videoOut.h"
@@ -2394,8 +2395,15 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 	constexpr uint32_t ReleaseMemDstMemory = 0;
 	constexpr uint32_t ReleaseMemDstTcL2   = 1;
 	EXIT_NOT_IMPLEMENTED(release_dst != ReleaseMemDstMemory && release_dst != ReleaseMemDstTcL2);
-	EXIT_NOT_IMPLEMENTED(data_sel != 0 && data_sel != 1 && data_sel != 2 && data_sel != 3 &&
-	                     data_sel != 5);
+	const bool supported_data_sel =
+	    data_sel == 0 || data_sel == 1 || data_sel == 2 || data_sel == 3 || data_sel == 5;
+	if (!supported_data_sel &&
+	    (interrupt_selector == 1 || interrupt_selector == 2 || interrupt_selector == 4)) {
+		GpuEventDiagnostics::Request(cp.IsAsyncComputeQueue() ? "ACB" : "DCB", cp.GetQueueId(),
+		                             "RELEASE_MEM", interrupt_selector, cp.GetQueueId(), false,
+		                             "unsupported_data_selector");
+	}
+	EXIT_NOT_IMPLEMENTED(!supported_data_sel);
 
 	LogUnknownReleaseMemGcr(gcr_cntl);
 
@@ -2408,10 +2416,14 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 			case 0x01:
 			case 0x02:
 			case 0x04:
-				cp.TriggerEopEventAtEndOfPipe(interrupt_context_id);
+				cp.TriggerEopEventAtEndOfPipe(interrupt_context_id, "RELEASE_MEM", interrupt_selector);
 				cp.BufferFlushForInterrupt();
 				break;
-			default: EXIT("unknown release_mem interrupt selector\n");
+			default:
+				GpuEventDiagnostics::Request(cp.IsAsyncComputeQueue() ? "ACB" : "DCB", cp.GetQueueId(),
+				                             "RELEASE_MEM", interrupt_selector, cp.GetQueueId(), false,
+				                             "unsupported_interrupt_selector");
+				EXIT("unknown release_mem interrupt selector\n");
 		}
 	};
 

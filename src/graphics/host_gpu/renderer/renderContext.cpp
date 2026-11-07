@@ -1,4 +1,5 @@
 #include "common/profiler.h"
+#include "graphics/host_gpu/renderer/gpuEventDiagnostics.h"
 #include "graphics/host_gpu/renderer/indirectLoadFast.h"
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -388,7 +389,8 @@ void RenderContext::DeleteInterruptEq(LibKernel::EventQueue::KernelEqueue eq, in
 	m_interrupt_eqs.erase(it);
 }
 
-void RenderContext::TriggerInterrupt(int event_id, uint32_t context_id) {
+uint32_t RenderContext::TriggerInterrupt(int event_id, uint32_t context_id, const char* packet_kind,
+                                         uint32_t interrupt_selector) {
 	std::vector<InterruptEqRegistration> registrations;
 	{
 		Common::LockGuard lock(m_interrupt_mutex);
@@ -399,6 +401,7 @@ void RenderContext::TriggerInterrupt(int event_id, uint32_t context_id) {
 		}
 	}
 
+	uint32_t delivered = 0;
 	for (const auto& registration: registrations) {
 		const auto result = LibKernel::EventQueue::KernelTriggerEvent(
 		    registration.eq, static_cast<uintptr_t>(registration.event_id),
@@ -409,7 +412,12 @@ void RenderContext::TriggerInterrupt(int event_id, uint32_t context_id) {
 			continue;
 		}
 		EXIT_NOT_IMPLEMENTED(result != OK);
+		delivered++;
 	}
+	GpuEventDiagnostics::Request(event_id >= 0x20 ? "ACB" : "DCB", static_cast<uint32_t>(event_id),
+	                             packet_kind, interrupt_selector, event_id, delivered != 0,
+	                             registrations.empty() ? "no_registered_listener" : "listener_unavailable");
+	return delivered;
 }
 
 } // namespace Libs::Graphics

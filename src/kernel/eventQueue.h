@@ -59,6 +59,7 @@ struct KernelEqueueEvent {
 };
 
 [[nodiscard]] KernelEqueueRef KernelPinEqueue(KernelEqueue eq);
+[[nodiscard]] std::string   KernelEqueueName(KernelEqueue eq);
 
 int KYTY_SYSV_ABI KernelAddEvent(KernelEqueue eq, const KernelEqueueEvent& event);
 int KYTY_SYSV_ABI KernelTriggerEvent(KernelEqueue eq, uintptr_t ident, int16_t filter,

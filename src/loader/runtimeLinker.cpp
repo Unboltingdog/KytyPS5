@@ -152,6 +152,10 @@ static std::string DescribeUnresolvedCaller(uint64_t caller) {
 	                   caller - program->base_vaddr);
 }
 
+std::string DescribeGuestCaller(uint64_t caller) {
+	return DescribeUnresolvedCaller(caller);
+}
+
 static bool PatchGuestMemory64(uint64_t vaddr, uint64_t value) {
 	auto* ptr     = reinterpret_cast<uint64_t*>(vaddr);
 	bool  changed = (*ptr != value);

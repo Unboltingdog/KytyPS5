@@ -205,7 +205,8 @@ private:
 	application_heap_posix_memalign_func_t m_application_heap_posix_memalign = nullptr;
 };
 
-uint64_t CalcFlexibleMemorySize(const Elf64_Phdr* phdr, uint16_t phnum);
+std::string DescribeGuestCaller(uint64_t caller);
+uint64_t     CalcFlexibleMemorySize(const Elf64_Phdr* phdr, uint16_t phnum);
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 bool TestMainEntryUsesGuestStack();

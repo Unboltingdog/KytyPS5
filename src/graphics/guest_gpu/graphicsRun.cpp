@@ -21,6 +21,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
+#include "graphics/host_gpu/renderer/gpuEventDiagnostics.h"
 #include "graphics/host_gpu/renderer/gpuTimer.h"
 
 #include <chrono>
@@ -552,17 +553,17 @@ void ReportLabelStats() {
 
 // Defers an end-of-pipe label (labels at completion); the journal holds it since its packet. Only on the GPU thread.
 void DeferLabel(CommandScheduler& scheduler, RenderContext& renderer, int event_id, uint64_t sequence, uint64_t dst,
-                uint64_t value, uint32_t size, bool with_interrupt, uint32_t interrupt_context_id,
-                const char* packet_kind) {
+                uint64_t value, uint32_t size, bool with_interrupt, uint32_t interrupt_selector,
+                uint32_t interrupt_context_id, const char* packet_kind) {
 	GuestGpu* gpu = g_gpu_state;
 	g_label_stats.deferred.fetch_add(1, std::memory_order_relaxed);
 	const int64_t recorded_ns = LabelNowNs();
 	// Priority thread, once the host GPU finished the open tick: hand the write to the GPU thread.
 	scheduler.DeferPriorityOperation([gpu, &renderer, event_id, sequence, dst, value, size, with_interrupt,
-	                                  interrupt_context_id, recorded_ns, packet_kind] {
+	                                  interrupt_selector, interrupt_context_id, recorded_ns, packet_kind] {
 		if (gpu->IsStopping()) return;
-		const auto publish = [gpu, &renderer, event_id, sequence, dst, value, size, with_interrupt, interrupt_context_id,
-		                      recorded_ns, packet_kind] {
+		const auto publish = [gpu, &renderer, event_id, sequence, dst, value, size, with_interrupt, interrupt_selector,
+		                      interrupt_context_id, recorded_ns, packet_kind] {
 			// The immediate path's write (the write-through or a plain store). In a direct range
 			// (KYTY_PERF_DIRECT_RANGES) a plain store: the work before the label is done, which is when the console's CP
 			// writes it, and an update recorded now would reach guest memory only with a later submit.
@@ -580,7 +581,7 @@ void DeferLabel(CommandScheduler& scheduler, RenderContext& renderer, int event_
 				g_label_stats.max_lag_ns.store(lag, std::memory_order_relaxed);
 			}
 			ReportLabelStats();
-			if (with_interrupt) renderer.TriggerInterrupt(event_id, interrupt_context_id);
+			if (with_interrupt) renderer.TriggerInterrupt(event_id, interrupt_context_id, packet_kind, interrupt_selector);
 		};
 		gpu->SendCommand(publish);
 	});
@@ -3121,18 +3122,27 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 		case 0x03: with_interrupt = false; break;
 		case 0x01:
 			if (!IsAsyncComputeQueue()) {
-				TriggerEopEventAtEndOfPipe(interrupt_context_id);
+				TriggerEopEventAtEndOfPipe(interrupt_context_id, packet_kind, interrupt_selector);
 				return;
 			}
 			with_interrupt = true;
 			break;
 		case 0x02: with_interrupt = true; break;
-		default: EXIT("unknown interrupt_selector\n");
+		default:
+			GpuEventDiagnostics::Request(IsAsyncComputeQueue() ? "ACB" : "DCB", GetQueueId(), packet_kind,
+			                             interrupt_selector, m_interrupt_event_id, false,
+			                             "unsupported_interrupt_selector");
+			EXIT("unknown interrupt_selector\n");
 	}
 
 	const auto write =
 	    ClassifyEndOfPipe<T>(event_write_source, eop_event_type, cache_action, event_index, with_interrupt);
 	if (write == EndOfPipeWrite::None) {
+		if (with_interrupt) {
+			GpuEventDiagnostics::Request(IsAsyncComputeQueue() ? "ACB" : "DCB", GetQueueId(), packet_kind,
+			                             interrupt_selector, m_interrupt_event_id, false,
+			                             "unsupported_event_data_selector");
+		}
 		EXIT("unknown event type\n");
 	}
 	const bool gpu_clock = event_write_source == 0x04;
@@ -3160,7 +3170,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 		}
 	}
 	EmitCallback([=, this] {
-		ExecuteEndOfPipe(write, sequence, dst_gpu_addr, data, gpu_clock, with_interrupt, interrupt_context_id,
+		ExecuteEndOfPipe(write, sequence, dst_gpu_addr, data, gpu_clock, with_interrupt, interrupt_selector, interrupt_context_id,
 		                 packet_kind);
 	});
 	if (write == EndOfPipeWrite::Gds) {
@@ -3241,8 +3251,8 @@ CommandProcessor::EndOfPipeWrite CommandProcessor::ClassifyEndOfPipe(uint32_t ev
 }
 
 void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence, void* dst_gpu_addr, uint64_t value,
-                                        bool gpu_clock, bool with_interrupt, uint32_t interrupt_context_id,
-                                        const char* packet_kind) {
+                                        bool gpu_clock, bool with_interrupt, uint32_t interrupt_selector,
+                                        uint32_t interrupt_context_id, const char* packet_kind) {
 	auto& command = CurrentBuffer();
 	switch (write) {
 		case EndOfPipeWrite::Gds: {
@@ -3255,7 +3265,8 @@ void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence,
 			PublishCpuDirtyRange(reinterpret_cast<uint64_t>(dst), // BDA sync epoch
 			                     uint64_t {data >> 16u} * sizeof(uint32_t));
 			if (with_interrupt) {
-				m_renderer.TriggerInterrupt(m_interrupt_event_id, interrupt_context_id);
+				m_renderer.TriggerInterrupt(m_interrupt_event_id, interrupt_context_id, packet_kind,
+				                            interrupt_selector);
 			}
 			return;
 		}
@@ -3264,12 +3275,12 @@ void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence,
 			EXIT_IF(dst_gpu_addr == nullptr);
 			(void)command.Handle();
 			if (g_gpu_state == nullptr || !LabelsAtCompletion()) {
-				WriteLabelNow(dst_gpu_addr, &data, sizeof(data), with_interrupt, interrupt_context_id, packet_kind);
+				WriteLabelNow(dst_gpu_addr, &data, sizeof(data), with_interrupt, interrupt_selector, interrupt_context_id, packet_kind);
 				return;
 			}
 			// Labels at completion: the label (and its interrupt) once the host GPU got here.
 			DeferLabel(GetScheduler(), m_renderer, m_interrupt_event_id, sequence, reinterpret_cast<uint64_t>(dst_gpu_addr),
-			           data, sizeof(data), with_interrupt, interrupt_context_id, packet_kind);
+			           data, sizeof(data), with_interrupt, interrupt_selector, interrupt_context_id, packet_kind);
 			return;
 		}
 		case EndOfPipeWrite::Qword: {
@@ -3279,18 +3290,18 @@ void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence,
 			if (gpu_clock && VirtualGpuClock::Stamp(GetScheduler(), command.Handle(), reinterpret_cast<uint64_t>(dst_gpu_addr),
 			                                        with_interrupt, packet_kind, GetQueueId())) {
 				if (with_interrupt) {
-					DeferEopInterrupt(interrupt_context_id);
+					DeferEopInterrupt(interrupt_context_id, packet_kind, interrupt_selector);
 				}
 				return;
 			}
 			if (g_gpu_state == nullptr || !LabelsAtCompletion()) {
-				WriteLabelNow(dst_gpu_addr, &value, sizeof(value), with_interrupt, interrupt_context_id, packet_kind);
+				WriteLabelNow(dst_gpu_addr, &value, sizeof(value), with_interrupt, interrupt_selector, interrupt_context_id, packet_kind);
 				return;
 			}
 			// labels at completion (as the dword; a clock the virtual GPU clock refused after all has no journal entry: a
 			// wait for it passes when it lands).
 			DeferLabel(GetScheduler(), m_renderer, m_interrupt_event_id, sequence, reinterpret_cast<uint64_t>(dst_gpu_addr),
-			           value, sizeof(value), with_interrupt, interrupt_context_id, packet_kind);
+			           value, sizeof(value), with_interrupt, interrupt_selector, interrupt_context_id, packet_kind);
 			return;
 		}
 		case EndOfPipeWrite::None: break;
@@ -3299,7 +3310,8 @@ void CommandProcessor::ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence,
 
 // Off the GPU thread (the tests): the label lands when its packet is translated.
 void CommandProcessor::WriteLabelNow(void* dst_gpu_addr, const void* value, uint32_t size, bool with_interrupt,
-                                     uint32_t interrupt_context_id, const char* packet_kind) {
+                                     uint32_t interrupt_selector, uint32_t interrupt_context_id,
+                                     const char* packet_kind) {
 	const auto dst = reinterpret_cast<uint64_t>(dst_gpu_addr);
 	// A GPU-owned page takes the label without a fault when the GPU owns none of its bytes.
 	if (!m_renderer.GetBufferCache().TryCpWriteThrough(dst, value, size)) {
@@ -3314,7 +3326,7 @@ void CommandProcessor::WriteLabelNow(void* dst_gpu_addr, const void* value, uint
 	}
 	PublishCpuDirtyRange(dst, size); // BDA sync epoch
 	if (with_interrupt) {
-		DeferEopInterrupt(interrupt_context_id);
+		DeferEopInterrupt(interrupt_context_id, packet_kind, interrupt_selector);
 	}
 }
 
@@ -3360,15 +3372,20 @@ void CommandProcessor::RecordGlobalBarrier() {
 	CurrentBuffer().Handle().pipelineBarrier2(dependency);
 }
 
-void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id) {
-	EmitCallback([this, interrupt_context_id] { DeferEopInterrupt(interrupt_context_id); });
+void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id, const char* packet_kind,
+                                                  uint32_t interrupt_selector) {
+	EmitCallback([this, interrupt_context_id, packet_kind, interrupt_selector] {
+		DeferEopInterrupt(interrupt_context_id, packet_kind, interrupt_selector);
+	});
 }
 
-void CommandProcessor::DeferEopInterrupt(uint32_t interrupt_context_id) {
+void CommandProcessor::DeferEopInterrupt(uint32_t interrupt_context_id, const char* packet_kind,
+                                         uint32_t interrupt_selector) {
 	(void)CurrentBuffer().Handle();
 	GetScheduler().DeferPriorityOperation(
-	    [&renderer = m_renderer, event_id = m_interrupt_event_id, interrupt_context_id] {
-		    renderer.TriggerInterrupt(event_id, interrupt_context_id);
+	    [&renderer = m_renderer, event_id = m_interrupt_event_id, interrupt_context_id, packet_kind,
+	     interrupt_selector] {
+		    renderer.TriggerInterrupt(event_id, interrupt_context_id, packet_kind, interrupt_selector);
 	    });
 }
 
@@ -3497,6 +3514,7 @@ void CommandProcessor::WriteLodStats(void* dst, uint32_t size) {
 // KYTY_LIVE_AB: each flip ends with a submission (Flush), which also resets the scheduler's batch state; right after
 // it is the frame boundary where live A/B phases change, so no frame runs partly in one phase and partly in another.
 static void LiveAbFrameBoundary() {
+	GpuEventDiagnostics::Report();
 	if (GuestGpu::IsGpuThread()) Common::LiveAb::OnFrameBoundary(DebugPresentCount().load());
 	// KYTY_DIAG_GPU_BURN_FLIP_US=<us> (measurement only, default 0; KYTY_LIVE_AB toggles 0/5000): the GPU thread spins that
 	// long after each flip, where no other stage is waited for: how much frame time GPU-thread work costs.
@@ -3576,7 +3594,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 		GetScheduler().DeferPriorityOperation(
 		    [&renderer = m_renderer, event_id = m_interrupt_event_id, request] {
 			    renderer.GetVideoOut().CompleteFlip(request);
-			    renderer.TriggerInterrupt(event_id, 0);
+			    renderer.TriggerInterrupt(event_id, 0, "FLIP", 2);
 		    });
 		GetScheduler().Flush();
 		LiveAbFrameBoundary();

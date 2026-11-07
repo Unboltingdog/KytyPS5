@@ -4291,7 +4291,10 @@ int KYTY_SYSV_ABI AgcDriverAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, in
 	}
 
 	EXIT_IF(g_renderer == nullptr);
-	return Sync::AddEqEvent(*g_renderer, eq, id, udata);
+	const auto caller = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+	const auto result = Sync::AddEqEvent(*g_renderer, eq, id, udata, caller);
+	GpuEventDiagnostics::Registration("add", eq, id, udata, caller, result == 0);
+	return result;
 }
 
 int KYTY_SYSV_ABI AgcDriverDeleteEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id) {
@@ -4302,7 +4305,11 @@ int KYTY_SYSV_ABI AgcDriverDeleteEqEvent(LibKernel::EventQueue::KernelEqueue eq,
 	}
 
 	EXIT_IF(g_renderer == nullptr);
-	return Sync::DeleteEqEvent(*g_renderer, eq, id);
+	const auto caller = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+	const auto result = Sync::DeleteEqEvent(*g_renderer, eq, id, caller);
+	GpuEventDiagnostics::Registration("del", eq, id, nullptr, caller,
+	                                  result == OK || result == LibKernel::KERNEL_ERROR_ENOENT);
+	return result;
 }
 
 int KYTY_SYSV_ABI AgcDriverGetEqEventType(const LibKernel::EventQueue::KernelEvent* ev) {

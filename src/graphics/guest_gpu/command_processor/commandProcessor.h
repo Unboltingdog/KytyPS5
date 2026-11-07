@@ -143,7 +143,8 @@ public:
 	void SynchronizeGpu();
 	// Kept: upstream 70668fbd9 removed the PM4 global barriers; our renderer still orders the game's work with them.
 	void EmitGlobalBarrier();
-	void TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id);
+	void TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id,
+	                                const char* packet_kind = "END_OF_PIPE", uint32_t interrupt_selector = 1);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z,
 	                    uint32_t mode);
 	void DispatchIndirect(uint64_t args_addr, uint32_t mode);
@@ -259,7 +260,7 @@ private:
 	[[nodiscard]] static EndOfPipeWrite ClassifyEndOfPipe(uint32_t event_write_source, uint32_t eop_event_type,
 	                                                      uint32_t cache_action, uint32_t event_index, bool with_interrupt);
 	void ExecuteEndOfPipe(EndOfPipeWrite write, uint64_t sequence, void* dst_gpu_addr, uint64_t value, bool gpu_clock,
-	                      bool with_interrupt, uint32_t interrupt_context_id, const char* packet_kind);
+	                      bool with_interrupt, uint32_t interrupt_selector, uint32_t interrupt_context_id, const char* packet_kind);
 	void WriteIndirectOffsets(const GpuOperation& operation, uint32_t vertex_offset, uint32_t instance_offset,
 	                          uint32_t first_index);
 	void ExecuteDrawIndex(const GpuOperation& operation, DrawIndexArgs args);
@@ -272,9 +273,10 @@ private:
 	                    uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes, const char* packet_kind);
 	void ExecuteTriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address);
 	void RecordGlobalBarrier();
-	void DeferEopInterrupt(uint32_t interrupt_context_id);
+	void DeferEopInterrupt(uint32_t interrupt_context_id, const char* packet_kind,
+	                       uint32_t interrupt_selector);
 	void WriteLabelNow(void* dst_gpu_addr, const void* value, uint32_t size, bool with_interrupt,
-	                   uint32_t interrupt_context_id, const char* packet_kind);
+	                   uint32_t interrupt_selector, uint32_t interrupt_context_id, const char* packet_kind);
 
 	// Copies of the register state for the operations that read registers. A slot is overwritten only after the last
 	// operation that uses it executed. Slots start on cache lines of their own (the resolve and execution threads read them

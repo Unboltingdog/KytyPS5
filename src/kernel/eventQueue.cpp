@@ -337,6 +337,11 @@ KernelEqueueRef KernelPinEqueue(KernelEqueue eq) {
 	return entry != g_equeues.end() ? entry->second : KernelEqueueRef {};
 }
 
+std::string KernelEqueueName(KernelEqueue eq) {
+	auto owner = KernelPinEqueue(eq);
+	return owner != nullptr ? owner->GetName() : "unknown";
+}
+
 int KYTY_SYSV_ABI KernelCreateEqueue(KernelEqueue* eq, const char* name) {
 	PRINT_NAME();
 

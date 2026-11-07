@@ -76,7 +76,8 @@ public:
 
 	void AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);
 	void DeleteInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);
-	void TriggerInterrupt(int event_id, uint32_t context_id);
+	uint32_t TriggerInterrupt(int event_id, uint32_t context_id, const char* packet_kind = "INTERRUPT",
+	                          uint32_t interrupt_selector = 2);
 
 private:
 	struct InterruptEqRegistration {
