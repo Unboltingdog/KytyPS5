@@ -1,6 +1,7 @@
 #include "kernel/eventQueue.h"
 
 #include "common/assert.h"
+#include "common/callTrace.h"
 #include "common/common.h"
 #include "common/guestWaits.h"
 #include "common/logging/log.h"
@@ -361,6 +362,7 @@ int KYTY_SYSV_ABI KernelCreateEqueue(KernelEqueue* eq, const char* name) {
 	}
 
 	LOGF("\tEqueue create: %s\n", name);
+	KYTY_CALL_TRACE_EVENT("EQUEUE_CREATE", fmt::format("eq=0x{:x},name={},ret=0", static_cast<uint64_t>(*eq), name));
 
 	return OK;
 }
@@ -378,10 +380,18 @@ int KYTY_SYSV_ABI KernelTriggerEvent(KernelEqueue eq, uintptr_t ident, int16_t f
                                      void* trigger_data) {
 	auto owner = KernelPinEqueue(eq);
 	if (!owner) {
+		KYTY_CALL_TRACE_EVENT("EQUEUE_TRIGGER",
+		                         fmt::format("eq=0x{:x},ident=0x{:x},filter={},ret=0x{:x}", static_cast<uint64_t>(eq),
+		                                     static_cast<uint64_t>(ident), filter, static_cast<uint32_t>(KERNEL_ERROR_EBADF)));
 		return KERNEL_ERROR_EBADF;
 	}
 
-	return owner->TriggerEvent(ident, filter, trigger_data);
+	const int result = owner->TriggerEvent(ident, filter, trigger_data);
+	KYTY_CALL_TRACE_EVENT("EQUEUE_TRIGGER",
+	                         fmt::format("eq=0x{:x},name={},ident=0x{:x},filter={},data=0x{:x},ret=0x{:x}",
+	                                     static_cast<uint64_t>(eq), owner->GetName(), static_cast<uint64_t>(ident), filter,
+	                                     reinterpret_cast<uint64_t>(trigger_data), static_cast<uint32_t>(result)));
+	return result;
 }
 
 int KYTY_SYSV_ABI KernelDeleteEvent(KernelEqueue eq, uintptr_t ident, int16_t filter) {
@@ -414,20 +424,39 @@ int KYTY_SYSV_ABI KernelDeleteEqueue(KernelEqueue eq) {
 	return OK;
 }
 
+static void TraceWaitReturn(KernelEqueue eq, const std::string& name, int count, int result,
+                            const KernelEvent* events) {
+	if (!Common::CallTrace::Active()) {
+		return;
+	}
+	std::string details = fmt::format("eq=0x{:x},name={},count={},ret=0x{:x}", static_cast<uint64_t>(eq), name,
+	                                  count, static_cast<uint32_t>(result));
+	for (int i = 0; i < count; i++) {
+		const auto& event = events[i];
+		details += fmt::format(",ev{}=[filter={},ident=0x{:x},flags=0x{:x},fflags=0x{:x},data=0x{:x},udata=0x{:x}]",
+		                       i, event.filter, static_cast<uint64_t>(event.ident), event.flags, event.fflags,
+		                       static_cast<uint64_t>(event.data), reinterpret_cast<uint64_t>(event.udata));
+	}
+	KYTY_CALL_TRACE_EVENT("EQUEUE_WAIT_RETURN", details);
+}
+
 int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int* out,
                                    const KernelUseconds* timo) {
 	PRINT_NAME();
 
 	auto owner = KernelPinEqueue(eq);
 	if (!owner) {
+		TraceWaitReturn(eq, "unknown", 0, KERNEL_ERROR_EBADF, ev);
 		return KERNEL_ERROR_EBADF;
 	}
 
 	if (ev == nullptr) {
+		TraceWaitReturn(eq, owner->GetName(), 0, KERNEL_ERROR_EFAULT, ev);
 		return KERNEL_ERROR_EFAULT;
 	}
 
 	if (num < 1) {
+		TraceWaitReturn(eq, owner->GetName(), 0, KERNEL_ERROR_EINVAL, ev);
 		return KERNEL_ERROR_EINVAL;
 	}
 
@@ -457,10 +486,12 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	}
 
 	if (*out == KERNEL_ERROR_EBADF) {
+		TraceWaitReturn(eq, owner->GetName(), 0, KERNEL_ERROR_EBADF, ev);
 		return KERNEL_ERROR_EBADF;
 	}
 	if (*out == 0) {
 		LOGF("\tEqueue wait timedout: %s\n", owner->GetName().c_str());
+		TraceWaitReturn(eq, owner->GetName(), 0, KERNEL_ERROR_ETIMEDOUT, ev);
 		return KERNEL_ERROR_ETIMEDOUT;
 	}
 
@@ -469,6 +500,7 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	     ", udata = 0x%016" PRIx64 "\n",
 	     *out, static_cast<uint64_t>(ev[0].ident), ev[0].filter, ev[0].flags, ev[0].fflags,
 	     static_cast<uint64_t>(ev[0].data), reinterpret_cast<uint64_t>(ev[0].udata));
+	TraceWaitReturn(eq, owner->GetName(), *out, OK, ev);
 
 	return OK;
 }
@@ -488,7 +520,11 @@ int KYTY_SYSV_ABI KernelAddUserEvent(KernelEqueue eq, int id) {
 	event.filter.trigger_func = UserEventTriggerFunc;
 	event.filter.reset_func   = UserEventResetFunc;
 
-	return KernelAddEvent(eq, event);
+	const int result = KernelAddEvent(eq, event);
+	KYTY_CALL_TRACE_EVENT("EQUEUE_ADD_USER", fmt::format("eq=0x{:x},id={},flags=0x{:x},ret=0x{:x}",
+	                                                       static_cast<uint64_t>(eq), id, event.event.flags,
+	                                                       static_cast<uint32_t>(result)));
+	return result;
 }
 
 int KYTY_SYSV_ABI KernelAddUserEventEdge(KernelEqueue eq, int id) {
@@ -506,7 +542,11 @@ int KYTY_SYSV_ABI KernelAddUserEventEdge(KernelEqueue eq, int id) {
 	event.filter.trigger_func = UserEventTriggerFunc;
 	event.filter.reset_func   = UserEventResetFunc;
 
-	return KernelAddEvent(eq, event);
+	const int result = KernelAddEvent(eq, event);
+	KYTY_CALL_TRACE_EVENT("EQUEUE_ADD_USER", fmt::format("eq=0x{:x},id={},flags=0x{:x},ret=0x{:x}",
+	                                                       static_cast<uint64_t>(eq), id, event.event.flags,
+	                                                       static_cast<uint32_t>(result)));
+	return result;
 }
 
 int KYTY_SYSV_ABI KernelTriggerUserEvent(KernelEqueue eq, int id, void* udata) {
@@ -515,7 +555,11 @@ int KYTY_SYSV_ABI KernelTriggerUserEvent(KernelEqueue eq, int id, void* udata) {
 	LOGF("\t user event trigger: eq = 0x%016" PRIx64 ", id = %d, udata = 0x%016" PRIx64 "\n",
 	     static_cast<uint64_t>(eq), id, reinterpret_cast<uint64_t>(udata));
 
-	return KernelTriggerEvent(eq, static_cast<uintptr_t>(id), KERNEL_EVFILT_USER, udata);
+	const int result = KernelTriggerEvent(eq, static_cast<uintptr_t>(id), KERNEL_EVFILT_USER, udata);
+	KYTY_CALL_TRACE_EVENT("EQUEUE_TRIGGER_USER",
+	                         fmt::format("eq=0x{:x},id={},udata=0x{:x},ret=0x{:x}", static_cast<uint64_t>(eq), id,
+	                                     reinterpret_cast<uint64_t>(udata), static_cast<uint32_t>(result)));
+	return result;
 }
 
 int KYTY_SYSV_ABI KernelTriggerUserEventForAll(int id, void* udata) {
@@ -535,7 +579,11 @@ int KYTY_SYSV_ABI KernelTriggerUserEventForAll(int id, void* udata) {
 		}
 	}
 
-	return (triggered > 0 ? OK : KERNEL_ERROR_ENOENT);
+	const int result = triggered > 0 ? OK : KERNEL_ERROR_ENOENT;
+	KYTY_CALL_TRACE_EVENT("EQUEUE_TRIGGER_USER_ALL", fmt::format("id={},udata=0x{:x},triggered={},ret=0x{:x}", id,
+	                                                               reinterpret_cast<uint64_t>(udata), triggered,
+	                                                               static_cast<uint32_t>(result)));
+	return result;
 }
 
 int KYTY_SYSV_ABI KernelDeleteUserEvent(KernelEqueue eq, int id) {

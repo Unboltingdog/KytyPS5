@@ -1,5 +1,6 @@
 #include "common/abi.h"
 #include "common/assert.h"
+#include "common/callTrace.h"
 #include "common/dateTime.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -16,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <fmt/format.h>
 #include <unordered_set>
 #include <condition_variable>
 #include <cstdint>
@@ -67,8 +69,9 @@ static uint32_t                                          g_next_file_id       = 
 static std::unordered_map<uint32_t, bool>                g_submissions;
 static std::condition_variable                           g_submission_cv;
 static std::unordered_map<uint32_t, std::filesystem::path>         g_files;
-static std::unordered_map<uint32_t, uint64_t>            g_file_sizes;
-static std::unordered_map<std::string, ResolvedPathInfo> g_resolved_paths;
+static std::unordered_map<uint32_t, std::string>                   g_file_guest_paths;
+static std::unordered_map<uint32_t, uint64_t>                      g_file_sizes;
+static std::unordered_map<std::string, ResolvedPathInfo>           g_resolved_paths;
 
 
 static bool IsValidGuestRange(uint64_t addr, uint64_t size, bool write = false) {
@@ -132,6 +135,12 @@ static bool TryGetHostPath(uint32_t file_id, std::filesystem::path* out) {
 	}
 	*out = it->second;
 	return true;
+}
+
+static std::string GuestPath(uint32_t file_id) {
+	std::scoped_lock lock(g_mutex);
+	const auto it = g_file_guest_paths.find(file_id);
+	return it != g_file_guest_paths.end() ? it->second : "-";
 }
 
 static bool TryGetHostFileSize(uint32_t file_id, uint64_t* out) {
@@ -237,6 +246,7 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 				} else {
 					info.file_id = it->second.file_id = g_next_file_id++;
 					g_files.emplace(info.file_id, info.host_path);
+					g_file_guest_paths.emplace(info.file_id, path);
 					g_file_sizes.emplace(info.file_id, info.is_dir ? 0 : info.file_size);
 				}
 			} else if (info.result == LibKernel::KERNEL_ERROR_ENOENT) {
@@ -252,6 +262,9 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 		}
 	}
 
+	KYTY_CALL_TRACE_EVENT("AMPR_RESOLVE", fmt::format("path={},id=0x{:x},size=0x{:x},ret=0x{:x}", path,
+	                                                   info.file_id, info.file_size,
+	                                                   static_cast<uint32_t>(info.result)));
 	if (info.result != OK) {
 		return info.result;
 	}
@@ -368,14 +381,22 @@ static void SetSubmissionComplete(uint32_t submission_id) {
 
 static bool CompleteSubmission(uint32_t submission_id) {
 	std::unique_lock lock(g_mutex);
-	if (!g_submissions.contains(submission_id)) {
+	const bool registered = g_submissions.contains(submission_id);
+	KYTY_CALL_TRACE_EVENT("AMPR_WAIT_BEGIN", fmt::format("id={},registered={}", submission_id, registered));
+	if (!registered) {
+		KYTY_CALL_TRACE_EVENT("AMPR_WAIT_RETURN", fmt::format("id={},ret=0x{:x}", submission_id,
+		                                                          static_cast<uint32_t>(LibKernel::KERNEL_ERROR_ESRCH)));
 		return false;
 	}
 	g_submission_cv.wait(lock, [submission_id] {
 		const auto it = g_submissions.find(submission_id);
 		return it == g_submissions.end() || it->second;
 	});
-	return g_submissions.erase(submission_id) != 0;
+	const bool completed = g_submissions.erase(submission_id) != 0;
+	KYTY_CALL_TRACE_EVENT("AMPR_WAIT_RETURN", fmt::format("id={},completed={},ret=0x{:x}", submission_id,
+	                                                          completed,
+	                                                          static_cast<uint32_t>(completed ? OK : LibKernel::KERNEL_ERROR_ESRCH)));
+	return completed;
 }
 
 static int WriteResult(void* result, int32_t execution_result = 0, uint32_t error_offset = 0) {
@@ -1188,21 +1209,30 @@ static bool AppendCommandRecord(uint64_t command_buffer, CommandBufferState::Com
 	return CommitCommandBufferRecord(command_buffer, &state, record_size);
 }
 
-static int ReadHostFileToGuest(const std::filesystem::path& host_path, uint64_t file_offset,
-                               uint64_t destination, uint64_t size, uint64_t* bytes_read);
+static int ReadHostFileToGuest(const std::filesystem::path& host_path, const std::string& guest_path,
+                               uint32_t file_id, uint64_t file_offset, uint64_t destination, uint64_t size,
+                               uint64_t* bytes_read);
 
 static int ExecuteCommand(const CommandBufferState::Command& entry) {
 	if (const auto* payload = std::get_if<CommandBufferState::ReadFileCommand>(&entry.data)) {
 		const auto& command = *payload;
+		const auto guest_path = Common::CallTrace::Active() ? AprShared::GuestPath(command.file_id) : "-";
 		std::filesystem::path host_path;
 		if (!AprShared::TryGetHostPath(command.file_id, &host_path)) {
 			LOGF("\tAPR submit failed for unknown file id: 0x%08" PRIx32 "\n", command.file_id);
+			KYTY_CALL_TRACE_EVENT("AMPR_READ", fmt::format("path={},id=0x{:x},ret=0x{:x}", guest_path,
+			                                                   command.file_id,
+			                                                   static_cast<uint32_t>(LibKernel::KERNEL_ERROR_ENOENT)));
 			return LibKernel::KERNEL_ERROR_ENOENT;
 		}
 
 		uint64_t   bytes_read = 0;
-		auto       result     = ReadHostFileToGuest(host_path, command.file_offset, command.destination,
-		                                            command.size, &bytes_read);
+		auto       result     = ReadHostFileToGuest(host_path, guest_path, command.file_id, command.file_offset,
+		                                            command.destination, command.size, &bytes_read);
+		KYTY_CALL_TRACE_EVENT("AMPR_READ",
+		                         fmt::format("path={},id=0x{:x},offset=0x{:x},size=0x{:x},read=0x{:x},ret=0x{:x}",
+		                                     guest_path, command.file_id, command.file_offset, command.size, bytes_read,
+		                                     static_cast<uint32_t>(result)));
 		static std::atomic<uint32_t> s_logged_dlc_reads {0};
 		if (host_path.filename() == "re_dlc_000.pak" && s_logged_dlc_reads.fetch_add(1) < 32) {
 			LOGF("\tAPR read dlc: id=0x%08" PRIx32 ", offset=0x%016" PRIx64 ", size=0x%016" PRIx64
@@ -1353,7 +1383,7 @@ static AmprDiagState& AmprDiagGetState() {
 }
 
 static uint64_t AmprDiagSubmit(uint64_t bytes, const char* kind) {
-	if (!AmprDiagEnabled()) {
+	if (!AmprDiagEnabled() && !Common::CallTrace::Active()) {
 		return 0;
 	}
 	auto& state = AmprDiagGetState();
@@ -1389,7 +1419,7 @@ static void AmprDiagComplete(uint64_t id, uint64_t event_eq, int32_t event_id, b
 	state.completed++;
 	state.triggered += triggered ? 1u : 0u;
 	const auto done_ms = AmprDiagNowMs();
-	if (state.completed <= 50) {
+	if (AmprDiagEnabled() && state.completed <= 50) {
 		std::fprintf(stderr,
 		             "AMPR_CMD id=%llu kind=%s bytes=%llu submit_ms=%llu done_ms=%llu event=0x%llx@%d triggered=%u\n",
 		             static_cast<unsigned long long>(id), pending.kind,
@@ -1575,7 +1605,12 @@ private:
 					Common::StartupTrace::Add(Common::StartupTrace::Counter::AprLatency,
 					                          Common::StartupTrace::NanosSince(submission.queued));
 				}
-				AmprDiagComplete(submission.diagnostic_id, submission.event_eq, submission.event_id,
+				KYTY_CALL_TRACE_EVENT(
+					    "AMPR_COMPLETE",
+					    fmt::format("id={},diag={},ret=0x{:x},error_offset=0x{:x},event_eq=0x{:x},event_id={},triggered={}",
+					                submission.id, submission.diagnostic_id, static_cast<uint32_t>(result), error_offset,
+					                submission.event_eq, submission.event_id, submission.event_triggered));
+					AmprDiagComplete(submission.diagnostic_id, submission.event_eq, submission.event_id,
 				                 submission.event_triggered);
 			}
 			lock.lock();
@@ -1629,7 +1664,7 @@ static int QueueCommandBuffer(Engine engine, uint64_t command_buffer, uint32_t b
 	static CommandEngine apr_engine(7);
 	static CommandEngine amm_engine(3);
 	Submission submission {std::move(state.commands), 0, result, id};
-	if (AmprDiagEnabled()) {
+	if (AmprDiagEnabled() || Common::CallTrace::Active()) {
 		submission.diagnostic_id =
 		    AmprDiagSubmit(end, AmprDiagCommandKind(submission.commands));
 		for (const auto& command: submission.commands) {
@@ -1642,7 +1677,10 @@ static int QueueCommandBuffer(Engine engine, uint64_t command_buffer, uint32_t b
 	if (!amm && Common::StartupTrace::Enabled()) {
 		submission.queued = std::chrono::steady_clock::now(); // KYTY_TRACE_STARTUP: submit-to-complete latency
 	}
+	const uint64_t diagnostic_id = submission.diagnostic_id;
 	(amm ? amm_engine : apr_engine).Submit(priority, std::move(submission));
+	KYTY_CALL_TRACE_EVENT("AMPR_SUBMIT", fmt::format("engine={},id={},diag={},bytes=0x{:x},priority={},ret=0",
+	                                                     amm ? "amm" : "apr", id, diagnostic_id, end, priority));
 	return OK;
 }
 
@@ -1663,8 +1701,21 @@ static bool AdvanceCommandBuffer(uint64_t command_buffer, uint64_t record_size) 
 	return CommitCommandBufferRecord(command_buffer, &state, record_size);
 }
 
-static int ReadHostFileToGuest(const std::filesystem::path& host_path, uint64_t file_offset,
-                               uint64_t destination, uint64_t size, uint64_t* bytes_read) {
+static int ReadHostFileToGuest(const std::filesystem::path& host_path, const std::string& guest_path,
+                               uint32_t file_id, uint64_t file_offset, uint64_t destination, uint64_t size,
+                               uint64_t* bytes_read) {
+	bool host_opened = false;
+	struct TraceClose {
+		bool& opened;
+		const std::string& path;
+		uint32_t id;
+		~TraceClose() {
+			if (opened) {
+				KYTY_CALL_TRACE_EVENT("AMPR_CLOSE", fmt::format("path={},id=0x{:x},ret=0", path, id));
+			}
+		}
+	} trace_close {host_opened, guest_path, file_id};
+
 	if (bytes_read == nullptr) {
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
@@ -1687,6 +1738,9 @@ static int ReadHostFileToGuest(const std::filesystem::path& host_path, uint64_t 
 			file = &local_file;
 		}
 	}
+	host_opened = file != nullptr;
+	KYTY_CALL_TRACE_EVENT("AMPR_OPEN", fmt::format("path={},id=0x{:x},ret=0x{:x}", guest_path, file_id,
+	                                                 static_cast<uint32_t>(host_opened ? OK : LibKernel::KERNEL_ERROR_ENOENT)));
 	if (file == nullptr) {
 		LOGF("\tAPR read missing host file: %s\n", Common::PathToString(host_path).c_str());
 		return LibKernel::KERNEL_ERROR_ENOENT;

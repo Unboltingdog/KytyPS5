@@ -1,6 +1,7 @@
 #include "kernel/pthread.h"
 
 #include "common/assert.h"
+#include "common/callTrace.h"
 #include "common/common.h"
 #include "common/dateTime.h"
 #include "common/emulatorConfig.h"
@@ -507,25 +508,26 @@ static void CondRemoveWaiter(PthreadCondPrivate* cond, Pthread thread) {
 	std::erase(cond->waiters, thread);
 }
 
-static void CondWakeWaiter(PthreadCondPrivate* cond, Pthread thread) {
+static Pthread CondWakeWaiter(PthreadCondPrivate* cond, Pthread thread) {
 	EXIT_IF(cond == nullptr);
 
 	if (thread == nullptr) {
 		if (cond->waiters.empty()) {
-			return;
+			return nullptr;
 		}
 		thread = cond->waiters.front();
 	}
 
 	auto it = std::find(cond->waiters.begin(), cond->waiters.end(), thread);
 	if (it == cond->waiters.end()) {
-		return;
+		return nullptr;
 	}
 
 	cond->waiters.erase(it);
 	thread->cond_sequence++;
 	// Notify while holding cond->m so the selected waiter cannot exit and be freed first.
 	thread->cond_cv.notify_one();
+	return thread;
 }
 
 void PthreadWakeForSignal(Pthread thread) {
@@ -2841,10 +2843,20 @@ int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond) {
 	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
 
 	std::lock_guard lock((*cond)->m);
+	std::string waiters;
 	for (auto* thread: (*cond)->waiters) {
+		if (Common::CallTrace::Active()) {
+			if (!waiters.empty()) {
+				waiters += ',';
+			}
+			waiters += fmt::format("{}#{}", thread->name, thread->guest.thread_id);
+		}
 		thread->cond_sequence++;
 		thread->cond_cv.notify_one();
 	}
+	KYTY_CALL_TRACE_EVENT("COND_BROADCAST",
+	                         fmt::format("cond=0x{:x},name={},waiters=[{}],ret=0", reinterpret_cast<uint64_t>(cond),
+	                                     (*cond)->name, waiters));
 	(*cond)->waiters.clear();
 	return OK;
 }
@@ -2931,7 +2943,12 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond) {
 	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
 
 	std::lock_guard lock((*cond)->m);
-	CondWakeWaiter(*cond, nullptr);
+	const size_t waiters = (*cond)->waiters.size();
+	auto* woken = CondWakeWaiter(*cond, nullptr);
+	KYTY_CALL_TRACE_EVENT("COND_SIGNAL",
+	                         fmt::format("cond=0x{:x},name={},waiters={},woken={},ret=0",
+	                                     reinterpret_cast<uint64_t>(cond), (*cond)->name, waiters,
+	                                     woken != nullptr ? fmt::format("{}#{}", woken->name, woken->guest.thread_id) : "-"));
 	return OK;
 }
 
@@ -2950,7 +2967,12 @@ int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread) {
 	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
 
 	std::lock_guard lock((*cond)->m);
-	CondWakeWaiter(*cond, thread);
+	const size_t waiters = (*cond)->waiters.size();
+	auto* woken = CondWakeWaiter(*cond, thread);
+	KYTY_CALL_TRACE_EVENT("COND_SIGNALTO",
+	                         fmt::format("cond=0x{:x},name={},waiters={},woken={},ret=0",
+	                                     reinterpret_cast<uint64_t>(cond), (*cond)->name, waiters,
+	                                     woken != nullptr ? fmt::format("{}#{}", woken->name, woken->guest.thread_id) : "-"));
 	return OK;
 }
 

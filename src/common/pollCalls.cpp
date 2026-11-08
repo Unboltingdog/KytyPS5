@@ -1,5 +1,6 @@
 #include "common/pollCalls.h"
 
+#include "common/callTrace.h"
 #include "common/virtualMemory.h"
 
 #include <algorithm>
@@ -329,7 +330,7 @@ std::vector<uint8_t> MakeThunk(uint64_t target, uint64_t function_id) {
 
 } // namespace
 
-bool Enabled() {
+static bool PollEnabled() {
 	static const bool enabled = [] {
 		const char* value = std::getenv("KYTY_DIAG_POLL_CALLS");
 		return value != nullptr && value[0] == '1';
@@ -337,8 +338,13 @@ bool Enabled() {
 	return enabled;
 }
 
+bool Enabled() {
+	return PollEnabled() || CallTrace::Enabled();
+}
+
 void Initialize() {
-	if (!Enabled()) {
+	CallTrace::Initialize();
+	if (!PollEnabled()) {
 		return;
 	}
 	g_start = Clock::now();
@@ -366,17 +372,22 @@ void Initialize() {
 }
 
 void RegisterWrapped() {
-	if (Enabled()) {
+	if (PollEnabled()) {
 		g_wrapped_functions.fetch_add(1, std::memory_order_relaxed);
 	}
 }
 
 void SetAddressResolver(std::string (*resolver)(uint64_t address)) {
 	g_address_resolver = resolver;
+	CallTrace::SetAddressResolver(resolver);
 }
 
 void RegisterCurrentThread(int guest_id, const char* name) {
 	if (!Enabled()) {
+		return;
+	}
+	CallTrace::RegisterCurrentThread(guest_id, name);
+	if (!PollEnabled()) {
 		return;
 	}
 	auto record = std::make_shared<ThreadRecord>();
@@ -388,10 +399,12 @@ void RegisterCurrentThread(int guest_id, const char* name) {
 }
 
 void UnregisterCurrentThread() {
+	CallTrace::UnregisterCurrentThread();
 	g_current_thread.reset();
 }
 
 void SetCurrentThreadName(const char* name) {
+	CallTrace::SetCurrentThreadName(name);
 	if (g_current_thread != nullptr) {
 		std::lock_guard lock(g_current_thread->mutex);
 		g_current_thread->name = name != nullptr ? name : "";
@@ -428,25 +441,12 @@ uint64_t Wrap(uint64_t target, const char* library, const char* function) {
 #endif
 }
 
-void RecordResolved(const char* library, const char* module, const char* function, uint64_t caller,
-                    uint64_t result, const uint64_t* arguments) {
-	if (!Enabled() || !WindowOpen()) {
-		return;
-	}
-	const std::string name = std::string(library != nullptr ? library : "unknown") + "::" +
-	                         (module != nullptr ? module : "unknown") + "::" +
-	                         (function != nullptr ? function : "unknown");
-	RecordCall(FunctionId(name), caller, result, arguments);
-}
-
-void KYTY_SYSV_ABI RecordCall(uint64_t function_id, uint64_t caller, uint64_t result,
-                              const uint64_t* arguments) {
-	if (!Enabled() || !WindowOpen()) {
-		return;
-	}
-	g_calls_seen.fetch_add(1, std::memory_order_relaxed);
-	if (g_current_thread == nullptr) {
-		g_calls_dropped_no_thread.fetch_add(1, std::memory_order_relaxed);
+static void RecordCallImpl(uint64_t function_id, uint64_t caller, uint64_t result,
+                           const uint64_t* arguments, size_t argument_count, uint64_t output_mask,
+                           bool registered_outputs) {
+	const bool trace = CallTrace::Active();
+	const bool poll = PollEnabled() && WindowOpen();
+	if (!trace && !poll) {
 		return;
 	}
 	std::shared_ptr<FunctionRecord> function;
@@ -456,6 +456,23 @@ void KYTY_SYSV_ABI RecordCall(uint64_t function_id, uint64_t caller, uint64_t re
 			return;
 		}
 		function = g_functions[function_id];
+	}
+	if (trace) {
+		if (registered_outputs) {
+			output_mask = 0;
+			for (const uint8_t index: function->output_arguments) {
+				output_mask |= uint64_t {1} << index;
+			}
+		}
+		CallTrace::RecordCall(function->name, caller, result, arguments, argument_count, output_mask);
+	}
+	if (!poll) {
+		return;
+	}
+	g_calls_seen.fetch_add(1, std::memory_order_relaxed);
+	if (g_current_thread == nullptr) {
+		g_calls_dropped_no_thread.fetch_add(1, std::memory_order_relaxed);
+		return;
 	}
 	auto& thread = *g_current_thread;
 	std::lock_guard lock(thread.mutex);
@@ -495,11 +512,27 @@ void KYTY_SYSV_ABI RecordCall(uint64_t function_id, uint64_t caller, uint64_t re
 	}
 }
 
-void RecordUnresolved(const char* function, uint64_t caller) {
-	if (!Enabled() || !WindowOpen()) {
+void RecordResolved(const char* library, const char* module, const char* function, uint64_t caller,
+                    uint64_t result, const uint64_t* arguments, size_t argument_count,
+                    uint64_t output_mask) {
+	if (!Enabled()) {
 		return;
 	}
-	RecordCall(FunctionId(function != nullptr ? function : "unknown"), caller, 0, nullptr);
+	const std::string name = std::string(library != nullptr ? library : "unknown") + "::" +
+	                         (module != nullptr ? module : "unknown") + "::" +
+	                         (function != nullptr ? function : "unknown");
+	RecordCallImpl(FunctionId(name), caller, result, arguments, argument_count, output_mask, false);
+}
+
+void KYTY_SYSV_ABI RecordCall(uint64_t function_id, uint64_t caller, uint64_t result,
+                              const uint64_t* arguments) {
+	RecordCallImpl(function_id, caller, result, arguments, 6, 0, true);
+}
+
+void RecordUnresolved(const char* function, uint64_t caller) {
+	if (Enabled()) {
+		RecordCall(FunctionId(function != nullptr ? function : "unknown"), caller, 0, nullptr);
+	}
 }
 
 } // namespace Common::PollCalls

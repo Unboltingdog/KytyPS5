@@ -2,6 +2,7 @@
 
 #include "common/archive.h"
 #include "common/assert.h"
+#include "common/callTrace.h"
 #include "common/common.h"
 #include "common/dateTime.h"
 #include "common/debugCounters.h"
@@ -23,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fmt/format.h>
 #include <optional>
 #include <random>
 #include <system_error>
@@ -100,6 +102,48 @@ private:
 
 static MountPoints*     g_mount_points = nullptr;
 static FileDescriptors* g_files        = nullptr;
+
+static std::string TraceGuestPath(int descriptor) {
+	if (!Common::CallTrace::Active()) {
+		return "-";
+	}
+	if (auto* file = g_files->GetFile(descriptor); file != nullptr) {
+		return file->name;
+	}
+	return "-";
+}
+
+static int TraceOpenResult(const char* path, int result) {
+	if (Common::CallTrace::Active()) {
+		KYTY_CALL_TRACE_EVENT("FS_OPEN", fmt::format("path={},ret=0x{:x}", path != nullptr ? path : "-",
+		                                                  static_cast<uint32_t>(result)));
+	}
+	return result;
+}
+
+static int64_t TraceReadResult(const std::string& path, int descriptor, uint64_t requested, int64_t result) {
+	if (Common::CallTrace::Active()) {
+		KYTY_CALL_TRACE_EVENT("FS_READ", fmt::format("path={},fd={},requested=0x{:x},ret=0x{:x}", path,
+		                                                  descriptor, requested, static_cast<uint64_t>(result)));
+	}
+	return result;
+}
+
+static int TraceCloseResult(const std::string& path, int descriptor, int result) {
+	if (Common::CallTrace::Active()) {
+		KYTY_CALL_TRACE_EVENT("FS_CLOSE", fmt::format("path={},fd={},ret=0x{:x}", path, descriptor,
+		                                                   static_cast<uint32_t>(result)));
+	}
+	return result;
+}
+
+static int TraceStatResult(const char* path, int result) {
+	if (Common::CallTrace::Active()) {
+		KYTY_CALL_TRACE_EVENT("FS_STAT", fmt::format("path={},ret=0x{:x}", path != nullptr ? path : "-",
+		                                                  static_cast<uint32_t>(result)));
+	}
+	return result;
+}
 
 static bool IsRandomDevice(const std::string& path) {
 	return path == "/dev/random" || path == "/dev/urandom";
@@ -417,7 +461,7 @@ bool IsOpenDescriptor(int d) {
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
+static int KernelOpenImpl(const char* path, int flags, uint16_t mode) {
 	PRINT_NAME();
 	const Common::StartupTrace::Scope startup_scope(Common::StartupTrace::Counter::KernelOpen); // KYTY_TRACE_STARTUP
 
@@ -569,7 +613,11 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 	return descriptor;
 }
 
-int KYTY_SYSV_ABI KernelClose(int d) {
+int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
+	return TraceOpenResult(path, KernelOpenImpl(path, flags, mode));
+}
+
+static int KernelCloseImpl(int d) {
 	PRINT_NAME();
 
 	if (d < DESCRIPTOR_MIN) {
@@ -602,6 +650,11 @@ int KYTY_SYSV_ABI KernelClose(int d) {
 	return OK;
 }
 
+int KYTY_SYSV_ABI KernelClose(int d) {
+	const std::string path = TraceGuestPath(d);
+	return TraceCloseResult(path, d, KernelCloseImpl(d));
+}
+
 int KYTY_SYSV_ABI KernelFcntl(int d, int command, int arg) {
 	PRINT_NAME();
 
@@ -623,7 +676,7 @@ int KYTY_SYSV_ABI KernelFcntl(int d, int command, int arg) {
 	}
 }
 
-int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
+static int64_t KernelReadImpl(int d, void* buf, size_t nbytes) {
 	PRINT_NAME();
 
 	if (d < DESCRIPTOR_MIN) {
@@ -696,6 +749,11 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	return bytes_read;
 }
 
+int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
+	const std::string path = TraceGuestPath(d);
+	return TraceReadResult(path, d, nbytes, KernelReadImpl(d, buf, nbytes));
+}
+
 int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {
 	PRINT_NAME();
 
@@ -765,7 +823,7 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {
 	return bytes_written;
 }
 
-int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offset) {
+static int64_t KernelPreadImpl(int d, void* buf, size_t nbytes, int64_t offset) {
 	PRINT_NAME();
 
 	if (d < DESCRIPTOR_MIN) {
@@ -834,6 +892,11 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	return bytes_read;
 }
 
+int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offset) {
+	const std::string path = TraceGuestPath(d);
+	return TraceReadResult(path, d, nbytes, KernelPreadImpl(d, buf, nbytes, offset));
+}
+
 static int ValidateIovecs(const KernelIovec* iov, int iovcnt, int64_t offset,
                           std::vector<KernelIovec>* buffers, size_t* total) {
 	constexpr int MaxIov = 1024;
@@ -860,7 +923,7 @@ static int ValidateIovecs(const KernelIovec* iov, int iovcnt, int64_t offset,
 	return OK;
 }
 
-int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, int64_t offset) {
+static int64_t KernelPreadvImpl(int d, const KernelIovec* iov, int iovcnt, int64_t offset) {
 	PRINT_NAME();
 
 	std::vector<KernelIovec> buffers;
@@ -938,6 +1001,11 @@ int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, in
 	LOGF("\tReadv %" PRId64 " bytes (pos = %" PRId64 ", iovcnt = %d) from: %s\n", bytes_read,
 	     offset, iovcnt, Common::PathToString(file->real_name).c_str());
 	return bytes_read;
+}
+
+int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, int64_t offset) {
+	const std::string path = TraceGuestPath(d);
+	return TraceReadResult(path, d, 0, KernelPreadvImpl(d, iov, iovcnt, offset));
 }
 
 int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset) {
@@ -1143,7 +1211,7 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence) {
 	return static_cast<int64_t>(position);
 }
 
-int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb) {
+static int KernelStatImpl(const char* path, FileStat* sb) {
 	PRINT_NAME();
 
 	if (path == nullptr || sb == nullptr) {
@@ -1188,6 +1256,10 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb) {
 	*sb              = stat;
 
 	return OK;
+}
+
+int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb) {
+	return TraceStatResult(path, KernelStatImpl(path, sb));
 }
 
 int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb) {

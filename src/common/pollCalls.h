@@ -5,6 +5,7 @@
 
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <type_traits>
@@ -21,7 +22,8 @@ void SetCurrentThreadName(const char* name);
 
 uint64_t Wrap(uint64_t target, const char* library, const char* function);
 void     RecordResolved(const char* library, const char* module, const char* function, uint64_t caller,
-                        uint64_t result, const uint64_t* arguments);
+                        uint64_t result, const uint64_t* arguments, size_t argument_count,
+                        uint64_t output_mask);
 void     RecordUnresolved(const char* function, uint64_t caller);
 void     KYTY_SYSV_ABI RecordCall(uint64_t function_id, uint64_t caller, uint64_t result,
                                   const uint64_t* arguments);
@@ -44,6 +46,22 @@ uint64_t Value(const T& value) {
 	} else {
 		return 0;
 	}
+}
+
+template <typename... Args>
+consteval uint64_t OutputPointerMask() {
+	uint64_t mask = 0;
+	size_t index = 0;
+	([&mask, &index] {
+		using U = std::decay_t<Args>;
+		if constexpr (std::is_pointer_v<U> && !std::is_const_v<std::remove_pointer_t<U>>) {
+			if (index < 64) {
+				mask |= uint64_t {1} << index;
+			}
+		}
+		index++;
+	}(), ...);
+	return mask;
 }
 
 } // namespace Detail
@@ -69,11 +87,13 @@ struct Export<Function> {
 		const auto caller = reinterpret_cast<uint64_t>(__builtin_return_address(0));
 		if constexpr (std::is_void_v<R>) {
 			Function(args...);
-			RecordResolved(library, module, name, caller, 0, arguments.data());
+			RecordResolved(library, module, name, caller, 0, arguments.data(), sizeof...(Args),
+			               Detail::OutputPointerMask<Args...>());
 			return;
 		} else {
 			R result = Function(args...);
-			RecordResolved(library, module, name, caller, Detail::Value(result), arguments.data());
+			RecordResolved(library, module, name, caller, Detail::Value(result), arguments.data(), sizeof...(Args),
+			               Detail::OutputPointerMask<Args...>());
 			return result;
 		}
 	}

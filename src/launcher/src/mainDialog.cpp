@@ -1555,7 +1555,12 @@ void MainDialog::RunInterpreter(QProcess* process, const Configuration& info) {
 		command += QStringLiteral(" \"") + arg + QLatin1Char('"');
 	}
 	const auto log_file = m_p->StartRunLog(command);
-	process->setProcessEnvironment(m_p->GameEnvironment(info));
+	auto environment = m_p->GameEnvironment(info);
+	if (!log_file.isEmpty()) {
+		const auto timestamp = QFileInfo(log_file).baseName().mid(QString::fromLatin1(LOG_PREFIX).size());
+		environment.insert(QStringLiteral("KYTY_LOG_TIMESTAMP"), timestamp);
+	}
+	process->setProcessEnvironment(environment);
 
 #ifdef __linux__
 	auto bash_file_name = dir.filePath(KYTY_BASH_FILE);
