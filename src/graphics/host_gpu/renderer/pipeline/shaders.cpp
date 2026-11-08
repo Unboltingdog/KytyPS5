@@ -1158,6 +1158,11 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		pipeline.pipeline_layout = nullptr;
 		return;
 	}
+	if (result != vk::Result::eSuccess) {
+		std::fprintf(stderr, "PIPELINE_CREATE_FAILED kind=compute step=layout key=0x%016llx result=%s\n",
+		             static_cast<unsigned long long>(key_hash), vk::to_string(result).c_str());
+		std::fflush(stderr);
+	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline_layout == nullptr);
@@ -1214,6 +1219,14 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	if (background && (result != vk::Result::eSuccess || pipeline.pipeline == nullptr)) {
 		pipeline.pipeline = nullptr;
 		return;
+	}
+	if (result != vk::Result::eSuccess || pipeline.pipeline == nullptr) {
+		std::fprintf(stderr, "PIPELINE_CREATE_FAILED kind=compute step=pipeline key=0x%016llx result=%s spirv_hash=0x%016llx\n",
+		             static_cast<unsigned long long>(key_hash), vk::to_string(result).c_str(),
+		             static_cast<unsigned long long>(diag_stages[0].spirv.empty()
+		                                                 ? 0
+		                                                 : PipelineCompileDiag::SpirvHash(diag_stages[0].spirv)));
+		std::fflush(stderr);
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
