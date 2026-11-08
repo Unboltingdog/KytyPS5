@@ -37,8 +37,10 @@ foreach ($plugins in 'generic', 'iconengines', 'imageformats', 'networkinformati
     if (Test-Path $source) { Copy-Item -Recurse $source (Join-Path $stage $plugins) }
 }
 
-# The emulator and its assets (as the CMake install rules: cursors, fonts, the loading art, the trophy sound).
+# The emulator, the standalone SPIR-V compile timer, and their assets.
 Copy-Item $Emulator (Join-Path $stage 'kyty_emulator.exe')
+$spvBench = Join-Path (Split-Path $Emulator) 'kyty_spvbench.exe'
+if (Test-Path $spvBench) { Copy-Item $spvBench $stage }
 $assets = Join-Path $stage 'assets'
 New-Item -ItemType Directory -Force (Join-Path $assets 'images'), (Join-Path $assets 'sounds') | Out-Null
 Copy-Item -Recurse (Join-Path $repo 'assets\cursors') (Join-Path $assets 'cursors')

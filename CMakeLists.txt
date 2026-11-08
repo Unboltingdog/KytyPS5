@@ -858,6 +858,13 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 	endif()
 endif()
 
+if(WIN32 OR LINUX)
+	add_executable(kyty_spvbench "${CMAKE_CURRENT_SOURCE_DIR}/tools/spvbench.cpp")
+	target_link_libraries(kyty_spvbench Vulkan::Headers ${CMAKE_DL_LIBS})
+	target_include_directories(kyty_spvbench PRIVATE "${KYTY_THIRD_PARTY_DIR}/SPIRV-Headers/include")
+	install(TARGETS kyty_spvbench DESTINATION .)
+endif()
+
 add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
 configure_macos_guest_address_space(kyty_emulator)
 
