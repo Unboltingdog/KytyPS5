@@ -65,6 +65,15 @@ public:
 	void                      DeferPriorityOperation(Common::UniqueFunction<void>&& operation);
 	[[nodiscard]] bool        HasPendingPriorityOperations();
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
+	struct DebugState {
+		int64_t pending = -1;
+		int64_t oldest_pending_tick = -1;
+		int priority_active = -1;
+		int64_t priority_operations = -1;
+		uint32_t deferred_callbacks = 0;
+	};
+	[[nodiscard]] DebugState GetDebugState() noexcept;
+	[[nodiscard]] static uint32_t DebugDeferredCallbacks() noexcept;
 
 	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
 	void                           CheckActive() const;

@@ -242,6 +242,7 @@ public:
 	void Wait(VideoOutConfig& cfg, int index);
 	// KYTY_UPSTREAM_FLIP_SUSPEND=1: the GPU thread's non-blocking test (the stalled GPU is woken on a flip).
 	bool IsSafeForRendering(VideoOutConfig& cfg, int index);
+	[[nodiscard]] int64_t DebugDepth() noexcept;
 
 private:
 	enum class RequestState { Reserved, Recording, Ready, Presenting };
@@ -878,6 +879,7 @@ void VideoOutDriver::Impl::VblankEnd() {
 }
 
 void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+	KYTY_PROFILER_THREAD("Thread_Presenter");
 	const auto frequency = Common::Timer::QueryPerformanceFrequency();
 	EXIT_IF(frequency == 0);
 
@@ -1286,6 +1288,13 @@ bool FlipQueue::IsSafeForRendering(VideoOutConfig& cfg, int index) {
 	                  std::none_of(m_cpu_requests.begin(), m_cpu_requests.end(), matches);
 	m_gpu_waiting = !safe;
 	return safe;
+}
+
+int64_t FlipQueue::DebugDepth() noexcept {
+	if (!m_mutex.TryLock()) return -1;
+	const auto depth = m_requests.size() + m_cpu_requests.size() + m_cancelled_requests.size();
+	m_mutex.Unlock();
+	return static_cast<int64_t>(depth);
 }
 
 bool FlipQueue::Flip(uint32_t micros) {

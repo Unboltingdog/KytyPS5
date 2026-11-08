@@ -40,6 +40,12 @@ void Route(vk::CommandBuffer buffer);
 // After the last command buffer was submitted and waited for: stops the worker thread.
 void Shutdown();
 
+struct DebugState {
+	uint64_t published = 0;
+	uint64_t recorded = 0;
+};
+[[nodiscard]] DebugState GetDebugState() noexcept;
+
 // The routed buffer is begun, ended and
 // submitted by the worker, so the recording thread never waits for it at a command-buffer boundary. The buffer is
 // routed before it is begun; queue calls of other threads first call SyncQueue.

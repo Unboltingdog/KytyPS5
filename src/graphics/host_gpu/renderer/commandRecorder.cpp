@@ -171,6 +171,12 @@ public:
 	KYTY_CLASS_NO_COPY(Recorder);
 
 	[[nodiscard]] bool Stopped() const noexcept { return m_stopped.load(std::memory_order_acquire); }
+	[[nodiscard]] DebugState State() const noexcept {
+		return DebugState {
+		    .published = m_write.load(std::memory_order_relaxed),
+		    .recorded = m_read.load(std::memory_order_relaxed),
+		};
+	}
 
 	void Start() {
 		m_thread = std::thread([this] { ConsumerMain(); });
@@ -270,7 +276,7 @@ private:
 	// ---- The worker.
 
 	void ConsumerMain() {
-		KYTY_PROFILER_THREAD("Thread_VkRecord");
+		KYTY_PROFILER_THREAD("Thread_Recorder");
 		// The stage's core, normal priority: it spins while the ring is empty.
 		Config::ConfigureGpuStageThread(Config::GpuStageThread::Recording);
 		g_worker_token.store(ThreadToken(), std::memory_order_release);
@@ -1671,6 +1677,10 @@ void Shutdown() {
 	}
 	g_routed.store(nullptr, std::memory_order_release);
 	g_recorder->Stop();
+}
+
+DebugState GetDebugState() noexcept {
+	return g_recorder == nullptr ? DebugState {} : g_recorder->State();
 }
 
 } // namespace Libs::Graphics::CommandRecorder

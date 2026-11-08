@@ -34,6 +34,7 @@
 namespace Libs::Graphics {
 
 static thread_local CommandScheduler* g_deferred_callback_scheduler = nullptr;
+static std::atomic<uint32_t> g_deferred_callback_operations {0};
 
 namespace {
 
@@ -193,6 +194,22 @@ vk::CommandBuffer CommandScheduler::CommandPool::Commit() {
 
 bool CommandScheduler::InDeferredOperation() noexcept {
 	return g_deferred_callback_scheduler != nullptr;
+}
+
+uint32_t CommandScheduler::DebugDeferredCallbacks() noexcept {
+	return g_deferred_callback_operations.load(std::memory_order_relaxed);
+}
+
+CommandScheduler::DebugState CommandScheduler::GetDebugState() noexcept {
+	DebugState state;
+	state.deferred_callbacks = DebugDeferredCallbacks();
+	std::unique_lock lock(m_operation_mutex, std::try_to_lock);
+	if (!lock.owns_lock()) return state;
+	state.pending = static_cast<int64_t>(m_pending_operations.size());
+	state.oldest_pending_tick = m_pending_operations.empty() ? 0 : static_cast<int64_t>(m_pending_operations.front().tick);
+	state.priority_active = m_priority_active ? 1 : 0;
+	state.priority_operations = static_cast<int64_t>(m_priority_operations.size());
+	return state;
 }
 
 CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graphics)
@@ -385,6 +402,7 @@ bool CommandScheduler::HasPendingPriorityOperations() {
 }
 
 void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
+	KYTY_PROFILER_THREAD("Thread_GpuCallbacks");
 	if (SyncTimeline::Enabled()) SyncTimeline::MarkPriorityThread();
 	while (!stop.stop_requested()) {
 		PendingOperation operation;
@@ -447,7 +465,9 @@ bool CommandScheduler::PriorityOperationsDone(uint64_t tick) {
 void CommandScheduler::RunOperation(Common::UniqueFunction<void>&& operation) {
 	auto* previous                = g_deferred_callback_scheduler;
 	g_deferred_callback_scheduler = this;
+	g_deferred_callback_operations.fetch_add(1, std::memory_order_relaxed);
 	operation();
+	g_deferred_callback_operations.fetch_sub(1, std::memory_order_relaxed);
 	g_deferred_callback_scheduler = previous;
 }
 

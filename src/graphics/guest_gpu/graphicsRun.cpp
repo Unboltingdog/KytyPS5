@@ -23,6 +23,7 @@
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/renderer/gpuEventDiagnostics.h"
 #include "graphics/host_gpu/renderer/gpuTimer.h"
+#include "graphics/host_gpu/renderer/hostStall.h"
 
 #include <chrono>
 #include "graphics/host_gpu/regionManager.h"
@@ -618,6 +619,10 @@ GuestGpu::GuestGpu(RenderContext& renderer)
 	m_executor = std::jthread([this] { ExecutionThread(); });
 	m_resolver = std::jthread([this] { ResolveThread(); });
 	m_thread   = std::jthread(ThreadRun, this);
+	m_debug_last_progress_ns.store(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+	    std::memory_order_release);
+	m_host_stall = std::make_unique<HostStallWatchdog>(*this, renderer);
 }
 
 GuestGpu::~GuestGpu() {
@@ -629,6 +634,8 @@ void GuestGpu::Shutdown() {
 	if (m_shutdown_complete) {
 		return;
 	}
+	m_debug_stopping.store(true, std::memory_order_release);
+	m_host_stall->Stop();
 	{
 		Common::LockGuard lock(m_queue_mutex);
 		m_accepting = false;
@@ -645,6 +652,14 @@ void GuestGpu::Shutdown() {
 bool GuestGpu::IsStopping() {
 	Common::LockGuard lock(m_queue_mutex);
 	return m_stopping;
+}
+
+uint64_t GuestGpu::DebugProgressAgeMs() const noexcept {
+	const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                     std::chrono::steady_clock::now().time_since_epoch())
+	                     .count();
+	const auto last = m_debug_last_progress_ns.load(std::memory_order_acquire);
+	return static_cast<uint64_t>(std::max<int64_t>(now - last, 0) / 1000000);
 }
 
 void GuestGpu::SendCommand(Common::UniqueFunction<void>&& command) {
@@ -902,6 +917,7 @@ void GuestGpu::ExecutionThread() {
 	std::optional<PerfScope>               perf_process;
 	std::optional<Common::LiveAb::BusyScope> live_busy; // KYTY_LIVE_AB: GPU-thread busy time of the phase
 	for (;;) {
+		m_debug_gpu_loop.fetch_add(1, std::memory_order_relaxed);
 		auto operation = m_resolved.TryPop();
 		if (!operation) {
 			live_busy.reset();
@@ -1927,6 +1943,7 @@ void GuestGpu::ThreadRun(void* data) {
 	bool                                                 spin_blocked = false;
 
 	for (;;) {
+		gpu->m_debug_cp_loop.fetch_add(1, std::memory_order_relaxed);
 		Submission                   submission;
 		bool                         should_stop = false;
 		bool                         cond_guard  = false; // The queue waits: the submission goes to the guard
@@ -2053,6 +2070,7 @@ void GuestGpu::ThreadRun(void* data) {
 		const bool complete = gpu->Process(submission);
 		if (complete || gpu->m_slice_progressed) {
 			gpu->m_last_progress = std::chrono::steady_clock::now(); // the queue waits guard
+			gpu->m_debug_last_progress_ns.store(SteadyNowNs(), std::memory_order_release);
 			blocked_since.reset();
 		}
 		if (static const bool reports = PerfEnabled() || MemCensusRequested() || SyncTimeline::Enabled(); reports) {
@@ -2459,6 +2477,7 @@ bool GuestGpu::ResolveCondGuard(Submission& submission) {
 	cp.BufferInit();
 	// The next candidate, if any, gets a delay of its own.
 	m_last_progress  = std::chrono::steady_clock::now();
+	m_debug_last_progress_ns.store(SteadyNowNs(), std::memory_order_release);
 	const auto queue = GuestQueueId(submission.queue_id);
 	return cp.ResolveAssumedCondBlock(submission.command_execution, queue) ||
 	       cp.ResolveAssumedCondBlock(submission.constant_execution, queue);

@@ -22,6 +22,7 @@
 
 namespace Libs::Graphics {
 
+class HostStallWatchdog;
 class RenderContext;
 
 class GuestGpu final {
@@ -32,6 +33,10 @@ public:
 
 	void               Shutdown();
 	[[nodiscard]] bool IsStopping();
+	[[nodiscard]] uint64_t DebugCpLoopIterations() const noexcept { return m_debug_cp_loop.load(std::memory_order_relaxed); }
+	[[nodiscard]] uint64_t DebugGpuLoopIterations() const noexcept { return m_debug_gpu_loop.load(std::memory_order_relaxed); }
+	[[nodiscard]] uint64_t DebugProgressAgeMs() const noexcept;
+	[[nodiscard]] bool DebugStopping() const noexcept { return m_debug_stopping.load(std::memory_order_acquire); }
 	// On the GPU thread it runs in place.
 	void               SendCommand(Common::UniqueFunction<void>&& command);
 	// Always through the queue: it runs at a packet boundary, also when sent from the GPU thread (from a fault handler there,
@@ -219,6 +224,11 @@ private:
 	// GPU thread, the queue waits guard: when a slice last ran a packet, and whether the current slice did.
 	std::chrono::steady_clock::time_point m_last_progress {};
 	bool                                  m_slice_progressed = false;
+	std::atomic<int64_t> m_debug_last_progress_ns {0};
+	std::atomic<uint64_t> m_debug_cp_loop {0};
+	std::atomic<uint64_t> m_debug_gpu_loop {0};
+	std::atomic_bool m_debug_stopping {false};
+	std::unique_ptr<HostStallWatchdog> m_host_stall;
 	std::jthread    m_executor;
 	std::jthread    m_resolver;
 	std::jthread    m_thread;
