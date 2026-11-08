@@ -1009,8 +1009,8 @@ ChildResult RunIsolated(const std::string& executable, const std::filesystem::pa
 		return result;
 	}
 	SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
-	std::string command = QuoteWindows(executable) + " --child " + QuoteWindows(path.string()) + " --device " +
-	                      std::to_string(device_index);
+	std::string command = QuoteWindows(executable) + " --child " + QuoteWindows(path.string());
+	if (device_index >= 0) command += " --device " + std::to_string(device_index);
 	if (no_cache) command += " --no-cache";
 	STARTUPINFOA startup {sizeof(startup)};
 	startup.dwFlags = STARTF_USESTDHANDLES;
@@ -1074,13 +1074,14 @@ ChildResult RunIsolated(const std::string& executable, const std::filesystem::pa
 		dup2(pipes[1], STDOUT_FILENO);
 		close(pipes[1]);
 		const std::string index = std::to_string(device_index);
-		if (no_cache) {
-			execl(executable.c_str(), executable.c_str(), "--child", path.c_str(), "--device", index.c_str(),
-			      "--no-cache", static_cast<char*>(nullptr));
-		} else {
-			execl(executable.c_str(), executable.c_str(), "--child", path.c_str(), "--device", index.c_str(),
-			      static_cast<char*>(nullptr));
+		std::vector<const char*> args {executable.c_str(), "--child", path.c_str()};
+		if (device_index >= 0) {
+			args.push_back("--device");
+			args.push_back(index.c_str());
 		}
+		if (no_cache) args.push_back("--no-cache");
+		args.push_back(nullptr);
+		execv(executable.c_str(), const_cast<char* const*>(args.data()));
 		_Exit(127);
 	}
 	close(pipes[1]);
