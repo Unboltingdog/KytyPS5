@@ -248,6 +248,14 @@ uint32_t EmitUMedTri32(EmitterState& state, uint32_t arg0, uint32_t arg1, uint32
 	return EmitUMax32(state, EmitUMin32(state, arg0, arg1), high_min);
 }
 
+uint32_t EmitFPIsNan32(EmitterState& state, uint32_t arg0) {
+	const auto features = GetHostFloatFeatures();
+	if (!features.amd || features.native_isnan) return Unary(state, spv::OpIsNan, TypeBool(state), arg0);
+	const auto bits = Unary(state, spv::OpBitcast, TypeU32(state), arg0);
+	return EmitCompareU32Constant(state, spv::OpUGreaterThan, EmitAndConstant(state, bits, 0x7fffffffu),
+	                              0x7f800000u);
+}
+
 uint32_t EmitFPMin32(EmitterState& state, uint32_t arg0, uint32_t arg1) {
 	return EmitMinMaxF32Value(state, arg0, arg1, false);
 }
