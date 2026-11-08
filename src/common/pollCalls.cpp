@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -70,16 +71,21 @@ struct FunctionRecord {
 std::mutex                                 g_registry_mutex;
 std::vector<std::shared_ptr<ThreadRecord>> g_threads;
 thread_local std::shared_ptr<ThreadRecord> g_current_thread;
-std::mutex                                        g_function_mutex;
-std::vector<std::shared_ptr<FunctionRecord>>       g_functions;
-std::unordered_map<std::string, uint64_t>         g_function_ids;
-std::string                              (*g_address_resolver)(uint64_t) = nullptr;
-Clock::time_point                          g_start = Clock::now();
-int64_t                                    g_at_ms = 60000;
-int64_t                                    g_for_ms = 10000;
-std::mutex                                 g_thunk_mutex;
-std::vector<uint64_t>                      g_thunk_pages;
-uint64_t                                   g_thunk_offset = 0;
+std::mutex                                 g_function_mutex;
+std::vector<std::shared_ptr<FunctionRecord>> g_functions;
+std::unordered_map<std::string, uint64_t>    g_function_ids;
+std::string                                (*g_address_resolver)(uint64_t) = nullptr;
+Clock::time_point                            g_start = Clock::now();
+int64_t                                      g_at_ms = 60000;
+int64_t                                      g_for_ms = 10000;
+std::mutex                                   g_thunk_mutex;
+std::vector<uint64_t>                        g_thunk_pages;
+uint64_t                                     g_thunk_offset = 0;
+std::atomic_uint64_t                         g_wrapped_functions {0};
+std::atomic_uint64_t                         g_thunks {0};
+std::atomic_uint64_t                         g_records {0};
+std::atomic_uint64_t                         g_calls_seen {0};
+std::atomic_uint64_t                         g_calls_dropped_no_thread {0};
 
 std::vector<uint8_t> OutputArguments(std::string_view name) {
 	if (name.ends_with("SystemServiceGetStatus") || name.ends_with("SystemServiceReceiveEvent") ||
@@ -143,6 +149,24 @@ bool ReadGuestBytes(uint64_t address, void* destination, size_t size) {
 bool WindowOpen() {
 	const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - g_start).count();
 	return elapsed >= g_at_ms && elapsed < g_at_ms + g_for_ms;
+}
+
+void LogWindowOpen() {
+	size_t threads = 0;
+	{
+		std::lock_guard lock(g_registry_mutex);
+		threads = g_threads.size();
+	}
+	std::fprintf(stderr, "POLL_CALLS window_open threads_registered=%zu\n", threads);
+	std::fflush(stderr);
+}
+
+void LogWindowClose() {
+	std::fprintf(stderr, "POLL_CALLS window_close records=%llu calls_seen=%llu calls_dropped_no_thread=%llu\n",
+	             static_cast<unsigned long long>(g_records.load(std::memory_order_relaxed)),
+	             static_cast<unsigned long long>(g_calls_seen.load(std::memory_order_relaxed)),
+	             static_cast<unsigned long long>(g_calls_dropped_no_thread.load(std::memory_order_relaxed)));
+	std::fflush(stderr);
 }
 
 std::string CleanField(std::string_view value) {
@@ -328,10 +352,23 @@ void Initialize() {
 		const double seconds = value != nullptr ? std::strtod(value, nullptr) : 10.0;
 		return std::isfinite(seconds) && seconds >= 0 ? static_cast<int64_t>(seconds * 1000.0) : int64_t {10000};
 	}();
+	std::fprintf(stderr, "POLL_CALLS wrapped=%llu thunks=%llu enabled=1\n",
+	             static_cast<unsigned long long>(g_wrapped_functions.load(std::memory_order_relaxed)),
+	             static_cast<unsigned long long>(g_thunks.load(std::memory_order_relaxed)));
+	std::fflush(stderr);
 	std::thread([] {
+		std::this_thread::sleep_until(g_start + std::chrono::milliseconds(g_at_ms));
+		LogWindowOpen();
 		std::this_thread::sleep_until(g_start + std::chrono::milliseconds(g_at_ms + g_for_ms));
+		LogWindowClose();
 		Dump();
 	}).detach();
+}
+
+void RegisterWrapped() {
+	if (Enabled()) {
+		g_wrapped_functions.fetch_add(1, std::memory_order_relaxed);
+	}
 }
 
 void SetAddressResolver(std::string (*resolver)(uint64_t address)) {
@@ -385,13 +422,31 @@ uint64_t Wrap(uint64_t target, const char* library, const char* function) {
 	std::memcpy(reinterpret_cast<void*>(address), code.data(), code.size());
 	VirtualMemory::FlushInstructionCache(address, code.size());
 	g_thunk_offset += code.size();
+	g_wrapped_functions.fetch_add(1, std::memory_order_relaxed);
+	g_thunks.fetch_add(1, std::memory_order_relaxed);
 	return address;
 #endif
 }
 
+void RecordResolved(const char* library, const char* module, const char* function, uint64_t caller,
+                    uint64_t result, const uint64_t* arguments) {
+	if (!Enabled() || !WindowOpen()) {
+		return;
+	}
+	const std::string name = std::string(library != nullptr ? library : "unknown") + "::" +
+	                         (module != nullptr ? module : "unknown") + "::" +
+	                         (function != nullptr ? function : "unknown");
+	RecordCall(FunctionId(name), caller, result, arguments);
+}
+
 void KYTY_SYSV_ABI RecordCall(uint64_t function_id, uint64_t caller, uint64_t result,
                               const uint64_t* arguments) {
-	if (!Enabled() || g_current_thread == nullptr || !WindowOpen()) {
+	if (!Enabled() || !WindowOpen()) {
+		return;
+	}
+	g_calls_seen.fetch_add(1, std::memory_order_relaxed);
+	if (g_current_thread == nullptr) {
+		g_calls_dropped_no_thread.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 	std::shared_ptr<FunctionRecord> function;
@@ -409,6 +464,7 @@ void KYTY_SYSV_ABI RecordCall(uint64_t function_id, uint64_t caller, uint64_t re
 		entry.function_id = function_id;
 		entry.caller = caller;
 		entry.outputs.resize(function->output_arguments.size());
+		g_records.fetch_add(1, std::memory_order_relaxed);
 	}
 	entry.count++;
 	bool found = false;

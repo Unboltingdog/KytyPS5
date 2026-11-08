@@ -1,4 +1,5 @@
 #include "common/abi.h"
+#include "graphics/shader/shader.h"
 #include "libs/agc.h"
 #include "libs/libs.h"
 #include "loader/symbolDatabase.h"

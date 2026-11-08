@@ -118,6 +118,6 @@ struct Export<Function> {
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define NP_DIAGNOSTICS_FUNC(nid, function)                                                        \
 	::Libs::NpDiagnostics::Export<function>::name = #function;                                     \
-	LIB_FUNC(nid, ::Libs::NpDiagnostics::Export<function>::Call)
+	LIB_FUNC_NAMED(nid, ::Libs::NpDiagnostics::Export<function>::Call, #function)
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_LIBS_NPDIAGNOSTICS_H_ */

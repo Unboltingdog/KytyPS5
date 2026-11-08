@@ -40,7 +40,7 @@ public:
 	virtual ~SymbolDatabase() = default;
 
 	void Add(const SymbolResolve& s, uint64_t vaddr);
-	void Add(const SymbolResolve& s, uint64_t vaddr, const std::string& dbg_name);
+	void Add(const SymbolResolve& s, uint64_t vaddr, const std::string& dbg_name, bool wrap_function = true);
 
 	[[nodiscard]] const SymbolRecord* Find(const SymbolResolve& s) const;
 	[[nodiscard]] const SymbolRecord* FindByNid(const std::string& nid, SymbolType type,

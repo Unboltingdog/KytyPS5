@@ -30,12 +30,21 @@ void SymbolDatabase::Add(const SymbolResolve& s, uint64_t vaddr) {
 	m_symbols.push_back(r);
 }
 
-void SymbolDatabase::Add(const SymbolResolve& s, uint64_t vaddr, const std::string& dbg_name) {
+void SymbolDatabase::Add(const SymbolResolve& s, uint64_t vaddr, const std::string& dbg_name,
+                         bool wrap_function) {
 	SymbolRecord r {};
-	r.name  = GenerateName(s);
-	r.vaddr = s.type == SymbolType::Func
-	              ? Common::PollCalls::Wrap(vaddr, s.library.c_str(), dbg_name.empty() ? s.name.c_str() : dbg_name.c_str())
-	              : vaddr;
+	r.name = GenerateName(s);
+	if (s.type == SymbolType::Func) {
+		if (wrap_function) {
+			r.vaddr = Common::PollCalls::Wrap(vaddr, s.library.c_str(),
+			                                  dbg_name.empty() ? s.name.c_str() : dbg_name.c_str());
+		} else {
+			r.vaddr = vaddr;
+			Common::PollCalls::RegisterWrapped();
+		}
+	} else {
+		r.vaddr = vaddr;
+	}
 	r.dbg_name = dbg_name;
 	m_map.insert_or_assign(r.name, m_symbols.size());
 	m_symbols.push_back(r);
