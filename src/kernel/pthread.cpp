@@ -24,6 +24,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <memory>
@@ -1304,6 +1305,20 @@ static void NativeMutexRemoveWaiter(PthreadMutexPrivate* mutex,
 	}
 }
 
+// KYTY_FIX_ADAPTIVE_MUTEX_RECURSE=1: an owner relocking an adaptive (type 4) mutex counts up like a
+// recursive mutex instead of getting EDEADLK. Experiment for titles whose threads relock their own
+// adaptive mutexes (Ghost of Yotei's FIOS worker and MainThread do).
+static bool MutexRelockRecurses(int type) {
+	if (type == 2) {
+		return true;
+	}
+	static const bool adaptive = [] {
+		const char* value = std::getenv("KYTY_FIX_ADAPTIVE_MUTEX_RECURSE");
+		return value != nullptr && value[0] == '1';
+	}();
+	return adaptive && type == 4;
+}
+
 static int NativeMutexLock(PthreadMutexPrivate* mutex, KernelUseconds* timeout_us) {
 	EXIT_IF(mutex == nullptr);
 
@@ -1313,7 +1328,7 @@ static int NativeMutexLock(PthreadMutexPrivate* mutex, KernelUseconds* timeout_u
 	std::unique_lock lock(mutex->m);
 
 	if (mutex->owner == self) {
-		if (mutex->type == 2) {
+		if (MutexRelockRecurses(mutex->type)) {
 			if (mutex->count == UINT32_MAX) {
 				return EAGAIN;
 			}
@@ -1379,7 +1394,7 @@ static int NativeMutexTrylock(PthreadMutexPrivate* mutex) {
 	std::unique_lock lock(mutex->m);
 
 	if (mutex->owner == self) {
-		if (mutex->type == 2) {
+		if (MutexRelockRecurses(mutex->type)) {
 			if (mutex->count == UINT32_MAX) {
 				return EAGAIN;
 			}
@@ -1416,7 +1431,7 @@ static int NativeMutexUnlock(PthreadMutexPrivate* mutex, uint32_t* recurse = nul
 		mutex->count = 1;
 	}
 
-	if (mutex->type == 2 && mutex->count > 1) {
+	if (MutexRelockRecurses(mutex->type) && mutex->count > 1) {
 		mutex->count--;
 		return OK;
 	}
