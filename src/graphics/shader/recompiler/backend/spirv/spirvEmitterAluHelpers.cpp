@@ -382,8 +382,14 @@ void DeclareNativeHalf(EmitterState& state) {
 // magnitude compare; NaN lanes are replaced anyway) and both lanes' NaN encodings are built once on the packed word and
 // merged with one masked XOR (package FSR3 1.84 -> 1.62 ms, Volfog 1.02 -> 0.86 ms, open world +1.4%). CPU checks
 // (verify_rtz_trim.py): away over all 2^32 inputs 0 differences, NaN merge 0 differences over 67 M random cases.
+static bool AmdHardwareNanResults() {
+	const auto features = GetHostFloatFeatures();
+	return features.amd && features.hardware_nan;
+}
+
 uint32_t EmitPackF16RtzNative(EmitterState& state, uint32_t a, uint32_t b) {
 	if (!NativeExactHalf(state)) return 0;
+	const bool hardware_nan = AmdHardwareNanResults();
 	const auto u32    = TypeU32(state);
 	const auto f32    = TypeF32(state);
 	const auto pair   = state.builder.AllocateId();
@@ -398,12 +404,16 @@ uint32_t EmitPackF16RtzNative(EmitterState& state, uint32_t a, uint32_t b) {
 		const auto is_nan  = Binary(state, spv::OpUGreaterThan, TypeBool(state),
 		                            Binary(state, spv::OpBitwiseAnd, u32, in_bits, U32Const(state, 0x7fffffffu)),
 		                            U32Const(state, 0x7f800000u));
-		return std::tuple {Select(state, u32, away, U32Const(state, step), U32Const(state, 0u)),
-		                   Select(state, u32, is_nan, U32Const(state, nan_mask), U32Const(state, 0u)), in_bits};
+		const auto trimmed = Select(state, u32, away, U32Const(state, step), U32Const(state, 0u));
+		return std::tuple {hardware_nan ? Select(state, u32, is_nan, U32Const(state, 0u), trimmed) : trimmed,
+		                   hardware_nan ? U32Const(state, 0u)
+		                                : Select(state, u32, is_nan, U32Const(state, nan_mask), U32Const(state, 0u)),
+		                   in_bits};
 	};
 	const auto [step_lo, mask_lo, bits_lo] = lane(a, 0u, 1u, 0xffffu);
 	const auto [step_hi, mask_hi, bits_hi] = lane(b, 1u, 0x10000u, 0xffff0000u);
 	const auto stepped = Binary(state, spv::OpISub, u32, Binary(state, spv::OpISub, u32, packed, step_lo), step_hi);
+	if (hardware_nan) return stepped;
 	// Both NaN encodings at once: sign, 0x7e00, the top 10 payload bits of each input.
 	const auto nan_pair = Binary(
 	    state, spv::OpBitwiseOr, u32,
@@ -459,10 +469,14 @@ static bool F16CvtPlain(const EmitterState& state) {
 	return list.find(text) != std::string::npos;
 }
 
+static bool HardwareNanResults(const EmitterState& state) {
+	return F16CvtPlain(state) || AmdHardwareNanResults();
+}
+
 // `converted` (a hardware f32 -> f16 conversion of `value` in the low 16 bits, the rest zero) with a NaN encoded as
 // ExactF32ToHalf does: the sign, the quiet bit and the top ten payload bits.
 static uint32_t NanHalfBits(EmitterState& state, uint32_t value, uint32_t converted) {
-	if (F16CvtPlain(state)) return converted;
+	if (HardwareNanResults(state)) return converted;
 	const auto u32  = TypeU32(state);
 	const auto bits = Unary(state, spv::OpBitcast, u32, value);
 	const auto nan  = Binary(
@@ -479,7 +493,7 @@ static uint32_t NanHalfBits(EmitterState& state, uint32_t value, uint32_t conver
 // `converted` (a hardware f16 -> f32 conversion of the low 16 bits of `bits`) with a NaN encoded as ExactHalfToF32
 // does: the sign and the payload widened, not quieted.
 static uint32_t NanFloatBits(EmitterState& state, uint32_t bits, uint32_t converted) {
-	if (F16CvtPlain(state)) return converted;
+	if (HardwareNanResults(state)) return converted;
 	const auto u32 = TypeU32(state);
 	// For an all-ones f16 exponent, (h & 0x7fff) << 13 | 0x70000000 is the all-ones f32 exponent and the payload.
 	const auto nan = Binary(
@@ -502,7 +516,7 @@ uint32_t EmitPackHalf2x16(EmitterState& state, uint32_t pair) {
 	if (NativeExactHalf(state)) {
 		const auto u32    = TypeU32(state);
 		const auto packed = Unary(state, spv::OpBitcast, u32, Unary(state, spv::OpFConvert, TypeF16Pair(state), pair));
-		if (F16CvtPlain(state)) return packed; // KYTY_PERF_F16_CVT_PLAIN: both lanes as converted
+		if (HardwareNanResults(state)) return packed; // KYTY_PERF_F16_CVT_PLAIN: both lanes as converted
 		return Binary(
 		    state, spv::OpBitwiseOr, u32,
 		    NanHalfBits(state, low, Binary(state, spv::OpBitwiseAnd, u32, packed, U32Const(state, 0xffffu))),
