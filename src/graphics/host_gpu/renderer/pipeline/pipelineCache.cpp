@@ -244,6 +244,15 @@ std::string DriverCacheSignature(const vk::PhysicalDeviceProperties& properties)
 	                   properties.vendorID, properties.deviceID, properties.driverVersion, uuid);
 }
 
+void PipelineCacheLoadDiag(const char* status, uint64_t bytes, const vk::PhysicalDeviceProperties& properties) {
+	if (!PipelineCompileDiag::Enabled()) return;
+	auto signature = DriverCacheSignature(properties);
+	while (!signature.empty() && signature.back() == '\n') signature.pop_back();
+	std::fprintf(stderr, "PIPELINE_CACHE_LOAD status=%s bytes=%llu signature=%s\n", status,
+	             static_cast<unsigned long long>(bytes), signature.c_str());
+	std::fflush(stderr);
+}
+
 std::string PipelineCacheTitleId() {
 	std::string title_id;
 	if ((!Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id) || title_id.empty()) &&
@@ -265,6 +274,8 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 	auto message = fmt::format(format, std::forward<Args>(args)...);
 	message += '\n';
 	Log::WriteToConsoleAndLog(message);
+	std::fwrite(message.data(), 1, message.size(), stderr);
+	std::fflush(stderr);
 }
 
 // True when a user SGPR the vertex variant reads from SPIR-V draw
@@ -1444,12 +1455,17 @@ PipelineCache::~PipelineCache() {
 }
 
 void PipelineCache::InitializeDriverCache() {
+	const auto report = [this](const char* status, uint64_t bytes = 0) {
+		PipelineCacheLoadDiag(status, bytes, m_graphics.GetPhysicalDeviceProperties());
+	};
 	const auto title_id = PipelineCacheTitleId();
 	if (title_id.empty()) {
+		report("no_title_id");
 		return;
 	}
 	if (KYTY_BUILD != KYTY_BUILD_RELEASE) {
 		PipelineCacheLog("Vulkan pipeline cache: disabled (non-Release build)");
+		report("non_release_build");
 		return;
 	}
 	// (Upstream d58aefde4 drops these checks with its build-independent KytyPC2 signature; ours keeps the revision in
@@ -1458,10 +1474,12 @@ void PipelineCache::InitializeDriverCache() {
 	const std::string_view git_revision = KYTY_GIT_REVISION;
 	if (git_hash == "unknown" || git_revision == "unknown") {
 		PipelineCacheLog("Vulkan pipeline cache: disabled (unknown git revision)");
+		report("unknown_git_revision");
 		return;
 	}
 	if (git_hash.ends_with("-dirty")) {
 		PipelineCacheLog("Vulkan pipeline cache: disabled (dirty build)");
+		report("dirty_build");
 		return;
 	}
 
@@ -1474,6 +1492,7 @@ void PipelineCache::InitializeDriverCache() {
 		PipelineCacheLog("Vulkan pipeline cache: initializing {}", path);
 	}
 	std::vector<uint8_t> initial_data;
+	const char*          empty_status = "empty";
 	// KYTY_TRACE_STARTUP: the load's read, hash and vkCreatePipelineCache times (one STARTUP_PCACHE line).
 	const auto load_begin = std::chrono::steady_clock::now();
 	double     read_ms    = 0.0;
@@ -1503,12 +1522,14 @@ void PipelineCache::InitializeDriverCache() {
 			if (signature_read != cached_signature.size() || hash_read != sizeof(payload_hash) ||
 			    payload_read != initial_data.size() || cached_signature != signature || !payload_matches()) {
 				initial_data.clear();
+				empty_status = "invalidated_mismatch";
 				PipelineCacheLog(
 				    "Vulkan pipeline cache: invalidating {} (driver, emulator, or data mismatch)",
 				    path);
 			}
 		} else {
 			file.Close();
+			empty_status = "invalidated_file_size";
 			PipelineCacheLog("Vulkan pipeline cache: invalidating {} (invalid file size)", path);
 		}
 	}
@@ -1528,6 +1549,7 @@ void PipelineCache::InitializeDriverCache() {
 		PipelineCacheLog("Vulkan pipeline cache: driver rejected {} ({}); starting empty", path,
 		                 vk::to_string(result));
 		initial_data.clear();
+		empty_status = "driver_rejected";
 		create.initialDataSize = 0;
 		create.pInitialData    = nullptr;
 		result = m_graphics.device.createPipelineCache(&create, nullptr, &m_driver_cache);
@@ -1535,6 +1557,7 @@ void PipelineCache::InitializeDriverCache() {
 	if (result != vk::Result::eSuccess) {
 		PipelineCacheLog("Vulkan pipeline cache: disabled ({})", vk::to_string(result));
 		m_driver_cache = nullptr;
+		report("create_failed");
 		return;
 	}
 	if (!initial_data.empty()) {
@@ -1542,8 +1565,10 @@ void PipelineCache::InitializeDriverCache() {
 		PipelineCacheLog("Vulkan pipeline cache: loaded {} bytes from {}", initial_data.size(),
 		                 path);
 		m_cache_loaded_bytes = initial_data.size();
+		report("loaded", initial_data.size());
 	} else {
 		PipelineCacheLog("Vulkan pipeline cache: initialized empty");
+		report(empty_status);
 	}
 }
 

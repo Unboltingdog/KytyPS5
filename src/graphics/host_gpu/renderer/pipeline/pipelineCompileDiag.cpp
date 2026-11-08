@@ -117,7 +117,7 @@ void PrintStages(const Record& record, const char* prefix, uint64_t elapsed_ms, 
 	const char* kind = record.kind == Kind::Compute ? "compute" : "graphics";
 	for (const auto& stage: record.stages) {
 		std::fprintf(stderr, "%s%s kind=%s stage=%s hash=0x%016" PRIx64 " spirv_hash=0x%016" PRIx64
-		                     " elapsed_ms=%" PRIu64 " guest=0x%016" PRIx64,
+		                     " ms=%" PRIu64 " guest=0x%016" PRIx64,
 		             prefix, write_spirv ? "" : " pipeline_in_flight", kind, stage.name, record.key_hash, stage.hash,
 		             elapsed_ms, stage.guest_address);
 		if (write_spirv && !stage.spirv.empty()) {
@@ -224,14 +224,15 @@ void Compile::End(vk::Result result) {
 	if (m_record == nullptr) return;
 	const auto elapsed_ms = ElapsedMs(*m_record, Clock::now());
 	Slots()[m_slot].active.store(nullptr, std::memory_order_release);
-	uint64_t spirv_bytes = 0;
-	for (const auto& stage: m_record->stages) spirv_bytes += stage.spirv.size() * sizeof(uint32_t);
 	if (Mode() == 2 || elapsed_ms >= 250) {
-		std::fprintf(stderr,
-		             "PIPELINE_COMPILE kind=%s hash=0x%016" PRIx64 " spirv_bytes=%" PRIu64
-		             " ms=%" PRIu64 " result=%s\n",
-		             m_record->kind == Kind::Compute ? "compute" : "graphics", m_record->key_hash, spirv_bytes,
-		             elapsed_ms, vk::to_string(result).c_str());
+		for (const auto& stage: m_record->stages) {
+			std::fprintf(stderr,
+			             "PIPELINE_COMPILE kind=%s stage=%s hash=0x%016" PRIx64 " spirv_hash=0x%016" PRIx64
+			             " spirv_bytes=%zu ms=%" PRIu64 " guest=0x%016" PRIx64 " result=%s\n",
+			             m_record->kind == Kind::Compute ? "compute" : "graphics", stage.name, m_record->key_hash,
+			             stage.hash, stage.spirv.size() * sizeof(uint32_t), elapsed_ms, stage.guest_address,
+			             vk::to_string(result).c_str());
+		}
 		std::fflush(stderr);
 	}
 	m_record = nullptr;
