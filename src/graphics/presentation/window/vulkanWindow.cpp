@@ -692,6 +692,20 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		     float_controls.shaderSignedZeroInfNanPreserveFloat16 == VK_TRUE,
 		     static_cast<int>(float_controls.denormBehaviorIndependence),
 		     static_cast<int>(float_controls.roundingModeIndependence));
+		std::fprintf(stderr,
+		             "HOST_FLOAT_FEATURES vendor=0x%04x native_f16=%d f16_with_f64=%d shaderFloat16=%d denormPreserve16=%d "
+		             "rte16=%d nanPreserve16=%d denormIndependence=%d roundingIndependence=%d hw_float_ops=%d hw_nan=%d "
+		             "native_minmax=%d native_isnan=%d native_mix=%d native_f16_fma=%d\n",
+		             static_cast<unsigned>(properties2.properties.vendorID), float16 ? 1 : 0, float16_with_float64 ? 1 : 0,
+		             supported_features12.shaderFloat16 == VK_TRUE ? 1 : 0,
+		             float_controls.shaderDenormPreserveFloat16 == VK_TRUE ? 1 : 0,
+		             float_controls.shaderRoundingModeRTEFloat16 == VK_TRUE ? 1 : 0,
+		             float_controls.shaderSignedZeroInfNanPreserveFloat16 == VK_TRUE ? 1 : 0,
+		             static_cast<int>(float_controls.denormBehaviorIndependence),
+		             static_cast<int>(float_controls.roundingModeIndependence), amd && amd_hardware_float_ops ? 1 : 0,
+		             amd && amd_hardware_nan ? 1 : 0, amd && amd_native_minmax ? 1 : 0, amd && amd_native_isnan ? 1 : 0,
+		             amd && amd_native_mix ? 1 : 0, amd && amd_native_f16_fma ? 1 : 0);
+		std::fflush(stderr);
 	}
 
 	// The bindless set's image arrays count against both the pipeline-layout limit and the per-stage limit.
