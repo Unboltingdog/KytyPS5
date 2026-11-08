@@ -39,7 +39,11 @@ struct AudioOut2PortParam;
 struct AudioOut2Attribute;
 struct AudioOut2PortState;
 struct AudioOut2SystemState;
-struct AudioOut2Position;
+struct AudioOut2Position {
+	float x;
+	float y;
+	float z;
+};
 struct AudioOut2SpeakerInfo;
 struct AudioOut2SystemDebugStateParam;
 struct AudioOut2MasteringParamsHeader;

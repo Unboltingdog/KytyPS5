@@ -100,7 +100,7 @@ jobs:
       - name: Build
         shell: cmd
         run: |
-          cmake --build _Build/windows --target launcher shader_recompiler_compute_tests resource_tracking_tests scalar_provenance_tests resource_materialization_tests --parallel
+          cmake --build _Build/windows --target launcher shader_recompiler_compute_tests resource_tracking_tests scalar_provenance_tests resource_materialization_tests --parallel -- -k 0
 
       - name: Test
         shell: cmd
