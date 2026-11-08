@@ -149,7 +149,24 @@ uint32_t EmitClassMaskF16(EmitterState& state, uint32_t bits, uint32_t mask) {
 // variants, 4 x 2^32 pairs): 0 differences on numbers, with one NaN operand and with signed zeros; when both are NaN only
 // the payload differs; a denormal operand is treated as a zero of its sign (the emulation passed its bits through), which
 // is the console's result under the flush mode the game runs with.
+static uint32_t EmitMinMaxF32Legacy(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
+	const auto lhs_bits = EmitBitcastF32ToU32(state, lhs);
+	const auto rhs_bits = EmitBitcastF32ToU32(state, rhs);
+	const auto either   = EmitOrU32(state, lhs_bits, rhs_bits);
+	const auto both_zero =
+	    EmitCompareU32Constant(state, spv::OpIEqual, EmitAndConstant(state, either, 0x7fffffffu), 0);
+	const auto zero =
+	    EmitBitcastU32ToF32(state, max_value ? EmitAndU32(state, lhs_bits, rhs_bits) : either);
+	const auto keep_lhs = Binary(state, max_value ? spv::OpFUnordGreaterThanEqual : spv::OpFUnordLessThan,
+	                             TypeBool(state), lhs, rhs);
+	const auto ordered = Select(state, TypeF32(state), keep_lhs, lhs, rhs);
+	const auto numeric = Select(state, TypeF32(state), both_zero, zero, ordered);
+	return Select(state, TypeF32(state), Unary(state, spv::OpIsNan, TypeBool(state), lhs), rhs, numeric);
+}
+
 uint32_t EmitMinMaxF32Inline(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
+	const auto features = GetHostFloatFeatures();
+	if (features.amd && !features.native_minmax) return EmitMinMaxF32Legacy(state, lhs, rhs, max_value);
 	const auto result = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpExtInst, TypeF32(state), result, GlslStd450(state),
 	                          max_value ? GLSLstd450NMax : GLSLstd450NMin, lhs, rhs);

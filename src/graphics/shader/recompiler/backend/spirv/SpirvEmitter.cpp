@@ -261,18 +261,21 @@ namespace {
 std::atomic_bool g_exact_half {false};
 std::atomic_bool g_exact_half_float64 {false};
 std::atomic_bool g_amd {false};
+std::atomic_bool g_native_minmax {false};
 } // namespace
 
 void SetHostFloatFeatures(const HostFloatFeatures& features) {
 	g_exact_half.store(features.exact_half, std::memory_order_relaxed);
 	g_exact_half_float64.store(features.exact_half_float64, std::memory_order_relaxed);
 	g_amd.store(features.amd, std::memory_order_relaxed);
+	g_native_minmax.store(features.native_minmax, std::memory_order_relaxed);
 }
 
 HostFloatFeatures GetHostFloatFeatures() {
 	return {.exact_half         = g_exact_half.load(std::memory_order_relaxed),
 	        .exact_half_float64 = g_exact_half_float64.load(std::memory_order_relaxed),
-	        .amd                = g_amd.load(std::memory_order_relaxed)};
+	        .amd                = g_amd.load(std::memory_order_relaxed),
+	        .native_minmax      = g_native_minmax.load(std::memory_order_relaxed)};
 }
 
 namespace {

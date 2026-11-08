@@ -651,7 +651,9 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		}();
 		const bool amd = properties2.properties.vendorID == VendorAmd;
 		const char* no_amd_f16 = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_F16");
+		const char* no_amd_minmax = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_MINMAX");
 		const bool amd_native_f16 = amd && (no_amd_f16 == nullptr || no_amd_f16[0] != '1');
+		const bool amd_native_minmax = no_amd_minmax == nullptr || no_amd_minmax[0] != '1';
 		const bool float16 =
 		    (properties2.properties.vendorID == VendorNvidia || force_nvidia_f16 || amd_native_f16) &&
 		    supported_features12.shaderFloat16 == VK_TRUE &&
@@ -663,8 +665,10 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		const bool float16_with_float64 = float16 && float_controls.denormBehaviorIndependence == Independence::eAll &&
 		                                  float_controls.roundingModeIndependence == Independence::eAll;
 		if (float16) features12.shaderFloat16 = VK_TRUE;
-		ShaderRecompiler::Spirv::SetHostFloatFeatures(
-		    {.exact_half = float16, .exact_half_float64 = float16_with_float64, .amd = amd});
+		ShaderRecompiler::Spirv::SetHostFloatFeatures({.exact_half = float16,
+		                                               .exact_half_float64 = float16_with_float64,
+		                                               .amd = amd,
+		                                               .native_minmax = amd_native_minmax});
 		LOGF("Vulkan exact f16 conversions in hardware: %s (shaderFloat16=%d denormPreserve16=%d rte16=%d nanPreserve16=%d "
 		     "denormIndependence=%d roundingIndependence=%d)\n",
 		     float16 ? (float16_with_float64 ? "true" : "true (not with float64)") : "false",

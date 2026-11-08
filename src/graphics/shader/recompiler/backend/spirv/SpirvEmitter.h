@@ -55,6 +55,7 @@ struct HostFloatFeatures {
 	bool exact_half_float64 = false;
 	// AMD-only fast paths have independent KYTY_NO_AMD_* opt-outs. Other vendors keep their existing emission.
 	bool amd = false;
+	bool native_minmax = false;
 };
 
 void              SetHostFloatFeatures(const HostFloatFeatures& features);

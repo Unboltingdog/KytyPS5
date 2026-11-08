@@ -201,9 +201,11 @@ void ClampNanCheck(EmitterState& state, uint32_t is_nan, uint32_t counter) {
 uint32_t EmitFPSaturate32(EmitterState& state, uint32_t arg0) {
 	// Upstream 4f1f3b1bb makes this NClamp unconditionally; here it is KYTY_FIX_CLAMP_NAN=1 (M124, with the DX10_CLAMP
 	// check), which stays the switch for that behaviour.
-	const int  mode  = IR::ClampNanModeFor(state.program.shader_hash);
-	const bool dx10  = mode != 0 && ProgramDx10Clamp(state);
-	const auto clamp = mode == 1 && dx10 ? GLSLstd450NClamp : GLSLstd450FClamp;
+	const int   mode     = IR::ClampNanModeFor(state.program.shader_hash);
+	const bool  dx10     = mode != 0 && ProgramDx10Clamp(state);
+	const auto  features = GetHostFloatFeatures();
+	const bool  native   = features.amd && features.native_minmax;
+	const auto  clamp    = native || (mode == 1 && dx10) ? GLSLstd450NClamp : GLSLstd450FClamp;
 	const auto result =
 	    EmitExt(state, TypeF32(state), clamp, {arg0, ConstantF32(state, 0), ConstantF32(state, 0x3f800000u)});
 	if (mode == 2 && dx10) {
