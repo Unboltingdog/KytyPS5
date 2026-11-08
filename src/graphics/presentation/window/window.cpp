@@ -1,4 +1,4 @@
-﻿#include "graphics/presentation/window.h"
+#include "graphics/presentation/window.h"
 
 #include "common/assert.h"
 #include "common/common.h"
@@ -24,11 +24,15 @@
 #include "loader/systemContent.h"
 
 #include <SDL3/SDL.h>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fmt/format.h>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 #include <vulkan/vk_platform.h>
 
@@ -131,6 +135,34 @@ struct EventController {
 namespace {
 
 std::unique_ptr<WindowContext> g_window;
+
+class ShutdownTimeout {
+public:
+	ShutdownTimeout() {
+		const char* enabled = std::getenv("KYTY_FIX_SHUTDOWN_TIMEOUT");
+		if (enabled == nullptr || enabled[0] != '1') return;
+		m_state = std::make_shared<State>();
+		std::thread([state = m_state] {
+			Common::Thread::SetCurrentName("Thread_ShutdownTimeout");
+			std::this_thread::sleep_for(std::chrono::seconds(10));
+			if (state->finished.load(std::memory_order_acquire)) return;
+			std::fprintf(stderr, "SHUTDOWN_TIMEOUT window_destruction\n");
+			std::fflush(stderr);
+			std::_Exit(1);
+		}).detach();
+	}
+
+	~ShutdownTimeout() {
+		if (m_state != nullptr) m_state->finished.store(true, std::memory_order_release);
+	}
+	KYTY_CLASS_NO_COPY(ShutdownTimeout);
+
+private:
+	struct State {
+		std::atomic_bool finished {false};
+	};
+	std::shared_ptr<State> m_state;
+};
 
 } // namespace
 
@@ -879,6 +911,7 @@ int WindowPrecompileOnly(uint32_t threads, const std::atomic<bool>& stop) {
 
 void WindowShutdown() {
 	if (g_window != nullptr) {
+		ShutdownTimeout shutdown_timeout;
 		HostInputShutdown();
 		Controller::EmergencyShutdown();
 		g_window.reset();
