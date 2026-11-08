@@ -414,9 +414,32 @@ void SetCurrentThreadName(const char* name) {
 	}
 }
 
+// KYTY_DIAG_CALL_TRACE_SKIP=Name1,Name2: no call records from guest threads with these names (busy pollers
+// such as audio workers would otherwise fill the line cap within seconds). Events are still recorded.
+static bool SkippedThread() {
+	static const std::vector<std::string> skipped = [] {
+		std::vector<std::string> names;
+		const char*              value = std::getenv("KYTY_DIAG_CALL_TRACE_SKIP");
+		std::string_view         list  = value != nullptr ? value : "";
+		while (!list.empty()) {
+			const auto comma = list.find(',');
+			const auto item  = list.substr(0, comma);
+			if (!item.empty()) names.emplace_back(item);
+			if (comma == std::string_view::npos) break;
+			list.remove_prefix(comma + 1);
+		}
+		return names;
+	}();
+	if (skipped.empty() || g_current_thread == nullptr) {
+		return false;
+	}
+	const std::string_view name(g_current_thread->name.data());
+	return std::find(skipped.begin(), skipped.end(), name) != skipped.end();
+}
+
 void RecordCall(std::string_view function, uint64_t caller, uint64_t result, const uint64_t* arguments,
                 size_t argument_count, uint64_t output_mask) {
-	if (!Active()) {
+	if (!Active() || SkippedThread()) {
 		return;
 	}
 	TraceRecord record;
