@@ -321,13 +321,15 @@ uint32_t EmitFPLdexp(EmitterState& state, uint32_t arg0, uint32_t arg1) {
 }
 
 uint32_t EmitFPSin(EmitterState& state, uint32_t arg0) {
-	auto source = EmitTrigCycleF32(state, arg0, true);
+	const auto features = GetHostFloatFeatures();
+	auto source = features.amd && features.hardware_float_ops ? arg0 : EmitTrigCycleF32(state, arg0, true);
 	source = Binary(state, spv::OpFMul, TypeF32(state), source, ConstantF32(state, 0x40c90fdbu));
 	return EmitExt(state, TypeF32(state), GLSLstd450Sin, {source});
 }
 
 uint32_t EmitFPCos(EmitterState& state, uint32_t arg0) {
-	auto source = EmitTrigCycleF32(state, arg0, false);
+	const auto features = GetHostFloatFeatures();
+	auto source = features.amd && features.hardware_float_ops ? arg0 : EmitTrigCycleF32(state, arg0, false);
 	source = Binary(state, spv::OpFMul, TypeF32(state), source, ConstantF32(state, 0x40c90fdbu));
 	return EmitExt(state, TypeF32(state), GLSLstd450Cos, {source});
 }

@@ -219,10 +219,11 @@ uint32_t EmitFPMedTri32(EmitterState& state, uint32_t a, uint32_t b, uint32_t c)
 // patterns (test shader denorm.comp), op(x) against op(flush(x)) for the five operations and the
 // six compares against 16 values (zeros, denormals, FLT_MIN, +-1, +-inf, NaN), each as an immediate and as a dynamic
 // operand, with and without the 16-bit float controls the native-half modules declare: 0 differences, 16,777,214
-// denormal inputs. Limited to the device gate of those tests (HostFloatFeatures::exact_half, NVIDIA) and to modules
-// without f64 (whose float controls were not tested).
+// denormal inputs. NVIDIA uses its measured exact-half device gate; AMD uses its independent hardware-float option.
+// Modules with f64 keep the explicit flush (whose float controls were not tested).
 static bool F32FlushHost(const EmitterState& state) {
-	return GetHostFloatFeatures().exact_half && !state.program.info.float64;
+	const auto features = GetHostFloatFeatures();
+	return (features.amd ? features.hardware_float_ops : features.exact_half) && !state.program.info.float64;
 }
 
 uint32_t EmitFlushF32InputUnlessHost(EmitterState& state, uint32_t value) {

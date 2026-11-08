@@ -650,10 +650,12 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 			return value != nullptr && value[0] == '1';
 		}();
 		const bool amd = properties2.properties.vendorID == VendorAmd;
+		const char* no_amd_float_ops = Common::ShaderEnv::Read("KYTY_NO_AMD_HARDWARE_FLOAT_OPS");
 		const char* no_amd_nan = Common::ShaderEnv::Read("KYTY_NO_AMD_HARDWARE_NAN");
 		const char* no_amd_f16 = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_F16");
 		const char* no_amd_isnan = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_ISNAN");
 		const char* no_amd_minmax = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_MINMAX");
+		const bool amd_hardware_float_ops = no_amd_float_ops == nullptr || no_amd_float_ops[0] != '1';
 		const bool amd_hardware_nan = no_amd_nan == nullptr || no_amd_nan[0] != '1';
 		const bool amd_native_f16 = amd && (no_amd_f16 == nullptr || no_amd_f16[0] != '1');
 		const bool amd_native_isnan = no_amd_isnan == nullptr || no_amd_isnan[0] != '1';
@@ -672,6 +674,7 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		ShaderRecompiler::Spirv::SetHostFloatFeatures({.exact_half = float16,
 		                                               .exact_half_float64 = float16_with_float64,
 		                                               .amd = amd,
+		                                               .hardware_float_ops = amd_hardware_float_ops,
 		                                               .hardware_nan = amd_hardware_nan,
 		                                               .native_isnan = amd_native_isnan,
 		                                               .native_minmax = amd_native_minmax});
