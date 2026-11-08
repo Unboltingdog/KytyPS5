@@ -135,7 +135,12 @@ Twin LookUp(RenderContext& context, const HW::ComputeShaderInfo& regs, const HW:
 	auto&      pipelines = context.GetPipelineCache();
 	const auto program   = pipelines.GetComputeProgramTwin(regs, sh, info, GetSpec().variant_xor);
 	if (info.stage.program == nullptr) return {};
-	return {info.stage.program, &pipelines.GetComputePipeline(info, program)};
+	auto* pipeline = pipelines.GetComputePipeline(info, program, false);
+	if (pipeline == nullptr) {
+		Skip(hash, "pipeline compile pending");
+		return {};
+	}
+	return {info.stage.program, pipeline};
 }
 // Why B cannot run with A's bound descriptors and push data (null: it can).
 const char* Incompatible(const ShaderRecompiler::IR::CompiledShaderInfo& a, const ShaderRecompiler::IR::CompiledShaderInfo& b,

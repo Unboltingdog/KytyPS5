@@ -435,6 +435,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = *input_info.stage.resources;
+	buffer.EndRendering();
+	std::optional<DispatchSubTimer> sub_timer(std::in_place, DispatchSub::Pipeline); // KYTY_TRACE_DISPATCH_CENSUS
+	auto* compute_pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program, false);
+	if (compute_pipeline == nullptr) return;
+	auto& pipeline = *compute_pipeline;
 	if (ComputeTrace::ProxyPhaseOn()) ComputeTrace::ProxyPhaseNote(program.shader_hash, &resources);
 	if (DispatchCensusTimer::Enabled()) census_timer.NoteDispatch(input_info, mode); // KYTY_TRACE_DISPATCH_CENSUS
 	RecordHtileRewriteClear(m_context.GetTextureCache(), input_info);
@@ -471,10 +476,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// memory read before anything of the dispatch is recorded (see RefCapture::Prefetch).
 	const bool ref_capture = RefCapture::Claim(program.shader_hash);
 	if (ref_capture) RefCapture::Prefetch(cs_regs);
-	buffer.EndRendering();
 	census_timer.Mark(3);
-	std::optional<DispatchSubTimer> sub_timer(std::in_place, DispatchSub::Pipeline); // KYTY_TRACE_DISPATCH_CENSUS
-	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	auto& bindings = m_compute_bindings;
 	sub_timer.emplace(DispatchSub::PrepareBindings);
 	PrepareBindings(input_info.stage, bindings);
@@ -863,6 +865,10 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	census_timer.Mark(1);
 	const auto compute_program = m_context.GetPipelineCache().GetComputeProgram(
 	    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info);
+	buffer.EndRendering();
+	auto* compute_pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program, true);
+	if (compute_pipeline == nullptr) return;
+	auto& pipeline = *compute_pipeline;
 	// KYTY_DIAG_TWIN_DISPATCH: the other program of a selected dispatch, before anything of the dispatch is recorded.
 	TwinDispatch::Twin twin;
 	if (TwinDispatch::Enabled()) {
@@ -877,9 +883,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	// RefCapture::Prefetch).
 	const bool ref_capture = RefCapture::Claim(input_info.stage.program->shader_hash);
 	if (ref_capture) RefCapture::Prefetch(cs_regs);
-	buffer.EndRendering();
 	census_timer.Mark(3);
-	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	auto& bindings = m_compute_bindings;
 	PrepareBindings(input_info.stage, bindings);
 	census_timer.Mark(4);

@@ -171,9 +171,10 @@ uint64_t SpirvHash(std::span<const uint32_t> spirv) {
 
 void PrepareShader(ShaderRecompiler::IR::CompiledShaderInfo& info, std::span<const uint32_t> spirv,
                    uint64_t guest_address) {
+	info.diagnostic_spirv_hash = SpirvHash(spirv);
+	info.diagnostic_guest_address = guest_address;
 	if (!Enabled() && OptimizationMode() == 0) return;
 	info.diagnostic_spirv = std::make_shared<const std::vector<uint32_t>>(spirv.begin(), spirv.end());
-	info.diagnostic_guest_address = guest_address;
 }
 
 Stage ShaderStage(const char* name, const ShaderRecompiler::IR::CompiledShaderInfo* info) {

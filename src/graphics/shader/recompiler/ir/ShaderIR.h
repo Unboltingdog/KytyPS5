@@ -1034,6 +1034,7 @@ struct CompiledShaderInfo {
 	ShaderInfo                    info;
 	Bindings                      bindings;
 	std::shared_ptr<const std::vector<uint32_t>> diagnostic_spirv;
+	uint64_t                      diagnostic_spirv_hash = 0;
 	uint64_t                      diagnostic_guest_address = 0;
 };
 

@@ -80,6 +80,9 @@ inline constexpr const char* OutputOnlyNames[] = {
     "KYTY_DIAG_SKIP_CS_HASHES",
     "KYTY_DIAG_SKIP_CS_LIVE",
     "KYTY_DIAG_SKIP_UNSUPPORTED_CS",
+    // Compute pipelines made in the background: a dispatch is skipped until its pipeline is ready.
+    "KYTY_FIX_ASYNC_COMPUTE_PIPELINES",
+    "KYTY_FIX_ASYNC_COMPUTE_PIPELINES_WAIT_MS",
     // The background compiles' reuse store (shaderPrecompile.cpp): the same SPIR-V, made earlier.
     "KYTY_PERF_SHADER_REUSE_MB",
     // Table-mode pipelines made in the background: the key a lookup asks for, not what a key makes.

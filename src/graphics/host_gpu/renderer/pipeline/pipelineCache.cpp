@@ -1151,6 +1151,21 @@ struct PipelineCache::TableCompileJob {
 	std::atomic<bool>                      done {false};
 };
 
+// KYTY_FIX_ASYNC_COMPUTE_PIPELINES: one driver creation, keyed by the compute program id. The program and its
+// compiled info live in ProgramCache for the session; resource snapshots are not inputs to pipeline creation.
+struct PipelineCache::ComputeCompileJob {
+	ShaderComputeInputInfo                  input_info;
+	ShaderProgram                           compute_program;
+	ShaderRecompiler::IR::ResourceSnapshot  no_resources;
+	std::unique_ptr<Pipeline>               pipeline = std::make_unique<Pipeline>();
+	std::mutex                              mutex;
+	std::condition_variable                 wake;
+	std::atomic<bool>                       done {false};
+	bool                                    failed = false;
+	double                                  ms = 0.0;
+	uint64_t                                skips = 0; // GPU thread only
+};
+
 // KYTY_PERF_TABLE_ASYNC: the threads that create queued pipelines beside the game (below normal priority,
 // labelled and given up on as background compiles: EnterBackgroundCompileThread). Based on chenxiao07/KytyPS5 v20261020b
 // (src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp, CompileWorkers), GPL-2.0.
@@ -1397,6 +1412,12 @@ PipelineCache::~PipelineCache() {
 		}
 	}
 	m_table_pending.clear();
+	for (auto& [key, job]: m_compute_pending) {
+		if (job->done.load(std::memory_order_acquire) && !job->failed && job->pipeline != nullptr) {
+			m_compute_pipelines.emplace(key, std::move(job->pipeline));
+		}
+	}
+	m_compute_pending.clear();
 	// Background compiles first: they use the driver cache the save below writes out.
 	m_program_cache->precompiler = nullptr;
 	m_precompiler.reset();
@@ -2345,6 +2366,27 @@ uint32_t TableAsyncThreads() {
 	return threads;
 }
 
+std::chrono::milliseconds AsyncComputeWait() {
+	static const auto wait = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_FIX_ASYNC_COMPUTE_PIPELINES_WAIT_MS");
+		return std::chrono::milliseconds(value == nullptr ? 50ul : std::strtoul(value, nullptr, 10));
+	}();
+	return wait;
+}
+
+bool AsyncComputePipelinesEnabled() {
+	static const bool enabled = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_FIX_ASYNC_COMPUTE_PIPELINES");
+		const bool  on    = value != nullptr && value[0] == '1';
+		if (on) {
+			std::fprintf(stderr, "FIX_ASYNC_COMPUTE_PIPELINES enabled wait_ms=%lld\n",
+			             static_cast<long long>(AsyncComputeWait().count()));
+		}
+		return on;
+	}();
+	return enabled;
+}
+
 void TableAsyncReport(TableAsyncStats& s, size_t pending, size_t queued) {
 	if (!PerfEnabled()) return;
 	// The clock is read at every 128th call only (a QueryPerformanceCounter call per table-mode draw was ~0.14 ms a frame
@@ -2488,9 +2530,9 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipelineAsync(
 	return nullptr;
 }
 
-PipelineCache::Pipeline&
+PipelineCache::Pipeline*
 PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
-                                  const ShaderProgram&          compute_program) {
+                                  const ShaderProgram& compute_program, bool indirect) {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
 	PipelineHousekeeping();
 
@@ -2501,38 +2543,106 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 		auto& found     = *iter->second;
 		found.last_used = static_cast<uint32_t>(DebugPresentCount().load());
 		if (found.pipeline == nullptr) RecreateComputePipeline(found, input_info, compute_program);
-		return found;
+		return &found;
 	}
 
 	if (graphics_debug_dump_enabled()) {
 		ShaderDbgDumpInputInfo(input_info);
 	}
 
-	auto cached = std::make_unique<Pipeline>();
-	{
-		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
-		                                         Common::DebugCounters::Counter::PipelineCreateNs,
-		                                         Common::DebugCounters::Peak::PipelineCreateNs);
-		CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache, compute_program.id);
+	const auto mark_warm = [this, &compute_program] {
+		if (m_warm != nullptr) {
+			if (const auto found = m_program_cache->precompile_stages.find(compute_program.id);
+			    found != m_program_cache->precompile_stages.end()) {
+				m_warm->Mark(found->second.key, false);
+			}
+		}
+	};
+	if (!AsyncComputePipelinesEnabled()) {
+		auto cached = std::make_unique<Pipeline>();
+		{
+			Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
+			                                         Common::DebugCounters::Counter::PipelineCreateNs,
+			                                         Common::DebugCounters::Peak::PipelineCreateNs);
+			CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache,
+			                       compute_program.id);
+		}
+		m_pipelines_since_save++;
+		EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
+		EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
+		mark_warm();
+		cached->last_used = static_cast<uint32_t>(DebugPresentCount().load());
+		auto [iter, inserted] = m_compute_pipelines.emplace(compute_program.id, std::move(cached));
+		EXIT_IF(!inserted);
+		return iter->second.get();
 	}
-	m_pipelines_since_save++;
 
-	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
-	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
-	// The warm list: a recorded permutation's pipeline is in the driver cache now.
-	if (m_warm != nullptr) {
-		if (const auto found = m_program_cache->precompile_stages.find(compute_program.id);
-		    found != m_program_cache->precompile_stages.end()) {
-			m_warm->Mark(found->second.key, false);
+	auto pending = m_compute_pending.find(compute_program.id);
+	if (pending == m_compute_pending.end() && !m_table_workers_stopped) {
+		if (m_table_workers == nullptr) {
+			m_table_workers = std::make_unique<TableCompileWorkers>(TableAsyncThreads());
+		}
+		auto job = std::make_shared<ComputeCompileJob>();
+		job->input_info = input_info;
+		job->input_info.stage.resources = &job->no_resources;
+		job->input_info.stage.stagef_record = nullptr;
+		job->compute_program = compute_program;
+		pending = m_compute_pending.emplace(compute_program.id, job).first;
+		m_table_workers->Push([this, job] {
+			const auto begin = std::chrono::steady_clock::now();
+			CreatePipelineInternal(m_graphics, *job->pipeline, job->input_info, job->compute_program.module,
+			                       m_driver_cache, job->compute_program.id);
+			job->ms = MillisecondsSince(begin);
+			auto& made = *job->pipeline;
+			if (made.pipeline == nullptr || made.pipeline_layout == nullptr) {
+				if (made.pipeline != nullptr) m_graphics.device.destroyPipeline(made.pipeline, nullptr);
+				if (made.pipeline_layout != nullptr) m_graphics.device.destroyPipelineLayout(made.pipeline_layout, nullptr);
+				if (made.descriptor_set_layout != nullptr) {
+					m_graphics.device.destroyDescriptorSetLayout(made.descriptor_set_layout, nullptr);
+				}
+				made = Pipeline {};
+				job->failed = true;
+				std::fprintf(stderr, "COMPUTE_PIPELINE_FAILED hash=0x%016llx ms=%.0f\n",
+				             static_cast<unsigned long long>(job->compute_program.id), job->ms);
+			} else {
+				std::fprintf(stderr, "COMPUTE_PIPELINE_READY hash=0x%016llx ms=%.0f\n",
+				             static_cast<unsigned long long>(job->compute_program.id), job->ms);
+			}
+			std::fflush(stderr);
+			job->done.store(true, std::memory_order_release);
+			job->wake.notify_all();
+		});
+	}
+	if (pending != m_compute_pending.end()) {
+		auto& job = *pending->second;
+		if (!job.done.load(std::memory_order_acquire)) {
+			std::unique_lock lock(job.mutex);
+			job.wake.wait_for(lock, AsyncComputeWait(), [&job] { return job.done.load(std::memory_order_acquire); });
+		}
+		if (job.done.load(std::memory_order_acquire) && !job.failed) {
+			auto finished = std::move(job.pipeline);
+			finished->last_used = static_cast<uint32_t>(DebugPresentCount().load());
+			m_compute_pending.erase(pending);
+			m_pipelines_since_save++;
+			mark_warm();
+			auto [iter, inserted] = m_compute_pipelines.emplace(compute_program.id, std::move(finished));
+			EXIT_IF(!inserted);
+			return iter->second.get();
+		}
+		const uint64_t count = ++job.skips;
+		if (count == 1 || count % 1000u == 0) {
+			const auto* program = job.input_info.stage.program;
+			std::fprintf(stderr,
+			             "COMPUTE_DISPATCH_SKIPPED hash=0x%016llx spirv_hash=0x%016llx guest=0x%016llx "
+			             "dispatch=%s count=%llu\n",
+			             static_cast<unsigned long long>(job.compute_program.id),
+			             static_cast<unsigned long long>(program->diagnostic_spirv_hash),
+			             static_cast<unsigned long long>(program->diagnostic_guest_address), indirect ? "indirect" : "direct",
+			             static_cast<unsigned long long>(count));
+			std::fflush(stderr);
 		}
 	}
-
-	cached->last_used     = static_cast<uint32_t>(DebugPresentCount().load());
-	auto [iter, inserted] = m_compute_pipelines.emplace(compute_program.id, std::move(cached));
-	EXIT_IF(!inserted);
-	// (Upstream 959bee479 checkpoints the driver cache here; ours saves it with SaveIfDue, m_pipelines_since_save.)
-
-	return *iter->second;
+	return nullptr;
 }
 
 void PipelineCache::RecreateComputePipeline(Pipeline& pipeline, const ShaderComputeInputInfo& input_info,

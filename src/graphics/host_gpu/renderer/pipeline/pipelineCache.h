@@ -227,8 +227,10 @@ public:
 	                              CommandBuffer& command, const ShaderPixelInputInfo* ps_input_info,
 	                              vk::PrimitiveTopology topology, bool primitive_restart_enable,
 	                              const GraphicsPrograms& programs);
-	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info,
-	                             const ShaderProgram&          compute_program);
+	// Null with KYTY_FIX_ASYNC_COMPUTE_PIPELINES=1 while the driver compile is still running (or after it failed):
+	// the caller skips only the dispatch. Other modes always return a ready pipeline.
+	Pipeline* GetComputePipeline(const ShaderComputeInputInfo& input_info,
+	                             const ShaderProgram& compute_program, bool indirect);
 
 	// KYTY_PERF_TABLE_ASYNC (default on; =0: every draw creates its pipeline on the calling thread, as before 28.10): a
 	// graphics pipeline made in the background (renderDraw.cpp ExecutePreparedDraw: every draw that writes no memory asks
@@ -252,6 +254,7 @@ public:
 private:
 	struct ProgramCache;
 	struct TableCompileJob;
+	struct ComputeCompileJob;
 	class TableCompileWorkers;
 
 	struct GraphicsPipelineKey {
@@ -309,10 +312,11 @@ private:
 	std::unordered_map<GraphicsPipelineKey, std::unique_ptr<Pipeline>, GraphicsPipelineKeyHash>
 	                                                        m_graphics_pipelines;
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
-	// KYTY_PERF_TABLE_ASYNC: the workers (started at the first queued creation) and the creations queued, running,
-	// finished but not taken yet, or refused (kept: their draws stay on today's path).
+	// KYTY_PERF_TABLE_ASYNC and KYTY_FIX_ASYNC_COMPUTE_PIPELINES share the workers. Pending compute jobs stay
+	// here until the GPU thread takes their result; a failed job stays so its dispatches do not retry on this thread.
 	std::unique_ptr<TableCompileWorkers> m_table_workers;
 	std::unordered_map<GraphicsPipelineKey, std::shared_ptr<TableCompileJob>, GraphicsPipelineKeyHash> m_table_pending;
+	std::unordered_map<uint64_t, std::shared_ptr<ComputeCompileJob>> m_compute_pending;
 	bool                                 m_table_workers_stopped = false;
 	// KYTY_TRACE_MEM_CENSUS: driver-cache bytes loaded at start, and written by the last save (its thread stores it).
 	uint64_t                               m_cache_loaded_bytes = 0;
