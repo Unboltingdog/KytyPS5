@@ -472,6 +472,27 @@ static int KYTY_SYSV_ABI NpEntitlementAccessGetAddcontEntitlementInfo(
 		return 0;
 	}
 
+	// KYTY_FIX_ADDCONT_ALL_ENTITLED=1: report any add-on the title asks about as an owned
+	// license-only entitlement (PSAL, no extra data) instead of NO_ENTITLEMENT. Experiment for
+	// titles that hold their loading screen until their add-on entitlements resolve.
+	static const bool all_entitled = [] {
+		const char* value = std::getenv("KYTY_FIX_ADDCONT_ALL_ENTITLED");
+		return value != nullptr && value[0] == '1';
+	}();
+	static std::atomic<int> reported {0};
+	if (reported.fetch_add(1, std::memory_order_relaxed) < 64) {
+		char label[sizeof(entitlement_label->data) + 1] {};
+		std::memcpy(label, entitlement_label->data, sizeof(entitlement_label->data));
+		std::fprintf(stderr, "ADDCONT_UNKNOWN_LABEL label=%s service_label=%" PRIu32 " answer=%s\n", label,
+		             service_label, all_entitled ? "entitled" : "no_entitlement");
+	}
+	if (all_entitled) {
+		std::memcpy(info->entitlement_label.data, entitlement_label->data, sizeof(entitlement_label->data));
+		info->package_type    = 3; // PSAL: license only
+		info->download_status = 0; // NO_EXTRA_DATA
+		return 0;
+	}
+
 	return NP_ENTITLEMENT_ACCESS_ERROR_NO_ENTITLEMENT;
 }
 
