@@ -1841,8 +1841,19 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex, uint64_t caller) {
 			(*mutex)->lock_caller = this_caller;
 		} else if (result == EDEADLK) {
 			// The thread already owns this non-recursive mutex: say which mutex and where it took it.
-			static std::atomic<int> reported {0};
-			if (reported.fetch_add(1, std::memory_order_relaxed) < 32) {
+			// One line per (mutex, relock site, owning site), up to 256 distinct cases.
+			static std::mutex              reported_mutex;
+			static std::vector<std::array<uint64_t, 3>> reported;
+			bool                           report = false;
+			{
+				std::lock_guard reported_lock(reported_mutex);
+				const std::array<uint64_t, 3> key {reinterpret_cast<uint64_t>(mutex), this_caller, (*mutex)->lock_caller};
+				if (reported.size() < 256 && std::find(reported.begin(), reported.end(), key) == reported.end()) {
+					reported.push_back(key);
+					report = true;
+				}
+			}
+			if (report) {
 				std::fprintf(stderr,
 				             "MUTEX_SELF_DEADLOCK mutex=%s@%p type=%d count=%u caller=%s owned_since=%s thread=%s\n",
 				             (*mutex)->name.empty() ? "-" : (*mutex)->name.c_str(), static_cast<void*>(mutex),
