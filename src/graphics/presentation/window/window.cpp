@@ -136,35 +136,43 @@ namespace {
 
 std::unique_ptr<WindowContext> g_window;
 
-class ShutdownTimeout {
-public:
-	ShutdownTimeout() {
-		const char* enabled = std::getenv("KYTY_FIX_SHUTDOWN_TIMEOUT");
-		if (enabled == nullptr || enabled[0] != '1') return;
-		m_state = std::make_shared<State>();
-		std::thread([state = m_state] {
-			Common::Thread::SetCurrentName("Thread_ShutdownTimeout");
-			std::this_thread::sleep_for(std::chrono::seconds(10));
-			if (state->finished.load(std::memory_order_acquire)) return;
-			std::fprintf(stderr, "SHUTDOWN_TIMEOUT window_destruction\n");
-			std::fflush(stderr);
-			std::_Exit(1);
-		}).detach();
-	}
-
-	~ShutdownTimeout() {
-		if (m_state != nullptr) m_state->finished.store(true, std::memory_order_release);
-	}
-	KYTY_CLASS_NO_COPY(ShutdownTimeout);
-
-private:
-	struct State {
-		std::atomic_bool finished {false};
-	};
-	std::shared_ptr<State> m_state;
+struct ShutdownTimeoutState {
+	std::atomic_bool        armed {false};
+	std::atomic_bool        finished {false};
+	std::atomic<const char*> stage {"close_requested"};
 };
 
+ShutdownTimeoutState g_shutdown_timeout;
+
+void ArmShutdownTimeout() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_FIX_SHUTDOWN_TIMEOUT");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (!enabled) return;
+	SetShutdownStage("close_requested");
+	bool expected = false;
+	if (!g_shutdown_timeout.armed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
+	g_shutdown_timeout.finished.store(false, std::memory_order_release);
+	std::thread([] {
+		Common::Thread::SetCurrentName("Thread_ShutdownTimeout");
+		std::this_thread::sleep_for(std::chrono::seconds(10));
+		if (g_shutdown_timeout.finished.load(std::memory_order_acquire)) return;
+		std::fprintf(stderr, "SHUTDOWN_TIMEOUT %s\n", g_shutdown_timeout.stage.load(std::memory_order_acquire));
+		std::fflush(stderr);
+		std::_Exit(1);
+	}).detach();
+}
+
+void DisarmShutdownTimeout() {
+	g_shutdown_timeout.finished.store(true, std::memory_order_release);
+}
+
 } // namespace
+
+void SetShutdownStage(const char* stage) noexcept {
+	g_shutdown_timeout.stage.store(stage, std::memory_order_release);
+}
 
 constexpr const char* KYTY_SDL_WINDOW_CAPTION = "Game";
 
@@ -177,12 +185,14 @@ static void SetPause(WindowLoopState& game, bool flag) {
 static void GameEventQuit(WindowLoopState& game) {
 	LOGF("Event: quit\n");
 
+	ArmShutdownTimeout();
 	game.need_exit = true;
 }
 
 static void GameEventTerminate(WindowLoopState& game) {
 	LOGF("Event: terminate\n");
 
+	ArmShutdownTimeout();
 	game.need_exit = true;
 }
 
@@ -454,6 +464,7 @@ void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 			break;
 		case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
 			LOGF("Window %" PRIu32 " closed\n", window_event.windowID);
+			ArmShutdownTimeout();
 			break;
 		default:
 			LOGF("Window %" PRIu32 " got unknown event %" PRIu32 "\n", window_event.windowID,
@@ -899,7 +910,9 @@ void WindowRun() {
 	EXIT_IF(g_window == nullptr);
 
 	g_window->Run();
+	SetShutdownStage("pipeline_cache_lock");
 	Common::LockGuard lock(g_window->render_context->GetMutex());
+	SetShutdownStage("pipeline_cache_save");
 	g_window->render_context->GetPipelineCache().Save();
 }
 
@@ -911,11 +924,14 @@ int WindowPrecompileOnly(uint32_t threads, const std::atomic<bool>& stop) {
 
 void WindowShutdown() {
 	if (g_window != nullptr) {
-		ShutdownTimeout shutdown_timeout;
+		SetShutdownStage("host_input_shutdown");
 		HostInputShutdown();
+		SetShutdownStage("controller_shutdown");
 		Controller::EmergencyShutdown();
+		SetShutdownStage("window_destruction");
 		g_window.reset();
 	}
+	DisarmShutdownTimeout();
 }
 
 static int WindowIconRead(void* user, char* data, int size) {

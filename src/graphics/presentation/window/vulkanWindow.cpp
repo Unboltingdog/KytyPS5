@@ -1437,36 +1437,49 @@ void WindowContext::RecreateSurface() {
 }
 
 WindowContext::~WindowContext() {
+	SetShutdownStage("openxr_shutdown");
 	Vr::OpenXrShutdown();
+	SetShutdownStage("system_overlay_shutdown");
 	ShutdownSystemOverlayInput();
+	SetShutdownStage("presenter_shutdown");
 	presenter.reset();
+	SetShutdownStage("gpu_resources_detach");
 	LibKernel::Memory::InstallGpuResources(nullptr);
+	SetShutdownStage("render_context_shutdown");
 	render_context.reset();
 
 	if (graphic_ctx.device != nullptr) {
+		SetShutdownStage("device_wait_idle");
 		RequireVulkanSuccess(graphic_ctx.device.waitIdle(), "wait for Vulkan device shutdown");
+		SetShutdownStage("allocator_destroy");
 		graphic_ctx.DestroyAllocator();
+		SetShutdownStage("device_destroy");
 		graphic_ctx.device.destroy(nullptr);
 		graphic_ctx.device = nullptr;
 		graphic_ctx.queue  = nullptr;
 	}
 	if (surface != nullptr) {
+		SetShutdownStage("surface_destroy");
 		graphic_ctx.instance.destroySurfaceKHR(surface, nullptr);
 		surface = nullptr;
 	}
 	if (graphic_ctx.debug_messenger != nullptr) {
+		SetShutdownStage("debug_messenger_destroy");
 		graphic_ctx.instance.destroyDebugUtilsMessengerEXT(graphic_ctx.debug_messenger, nullptr);
 		graphic_ctx.debug_messenger = nullptr;
 	}
 	if (graphic_ctx.instance != nullptr) {
+		SetShutdownStage("instance_destroy");
 		graphic_ctx.instance.destroy(nullptr);
 		graphic_ctx.instance        = nullptr;
 		graphic_ctx.physical_device = nullptr;
 	}
 	if (window != nullptr) {
+		SetShutdownStage("window_destroy");
 		SDL_DestroyWindow(window);
 		window = nullptr;
 	}
+	SetShutdownStage("sdl_shutdown");
 	SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
 }
 

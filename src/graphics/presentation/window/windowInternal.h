@@ -61,6 +61,8 @@ struct WindowContext {
 	Common::Mutex mutex;
 };
 
+void SetShutdownStage(const char* stage) noexcept;
+
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_PRESENTATION_WINDOW_WINDOWINTERNAL_H_
