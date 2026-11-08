@@ -695,7 +695,12 @@ private:
 				stage_count = limits.maxPerStageDescriptorUpdateAfterBindSampledImages;
 				break;
 		}
-		const uint32_t count = std::min(set_count, stage_count);
+		uint32_t count = std::min(set_count, stage_count);
+		if (type == VK_DESCRIPTOR_TYPE_SAMPLER) count = std::min(count, 4096u);
+		if (type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+			count = std::min(count, 1u << 20u);
+			count = count > 4096u ? (count - 4096u) / 4u : 1u;
+		}
 		return count == 0 ? 1 : count;
 	}
 
@@ -836,14 +841,16 @@ VkResult VulkanSession::Compile(const std::vector<uint32_t>& words, const Reflec
 						uint32_t type_id = pointer->second.operands[1];
 						while (parsed.types[type_id].op == spv::OpTypeArray) type_id = parsed.types[type_id].operands[0];
 						if (parsed.types[type_id].op == spv::OpTypeRuntimeArray) {
-							flags[i] = VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT |
-							           VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+							flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
 							           VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
 							           VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
 						}
 					}
 				}
 			}
+		}
+		if (!flags.empty() && (flags.back() & VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT) != 0) {
+			flags.back() |= VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
 		}
 		VkDescriptorSetLayoutBindingFlagsCreateInfo flags_create {
 		    VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
