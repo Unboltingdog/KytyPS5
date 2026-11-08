@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -61,6 +62,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <xxhash.h>
@@ -191,6 +193,41 @@ ShaderRecompiler::Spirv::Profile ShaderCompileProfile(const GraphicContext& grap
 	                                  !force_nvidia_minmax,
 	        .device_clock_period_ps = graphics.device_clock_period_ps,
 	        .robust_buffer_access   = graphics.robust_buffer_access_enabled};
+}
+
+ComputeSkipMatch ComputeSkipListed(uint64_t guest_address, uint64_t shader_hash) {
+	struct List {
+		std::unordered_set<uint64_t> guests;
+		std::unordered_set<uint64_t> hashes;
+	};
+	static const List list = [] {
+		List        parsed;
+		const char* setting = Common::ShaderEnv::Read("KYTY_SKIP_COMPUTE_GUEST");
+		std::string_view input = setting != nullptr ? setting : "";
+		while (!input.empty()) {
+			const auto comma = input.find(',');
+			auto       token = input.substr(0, comma);
+			input.remove_prefix(comma == std::string_view::npos ? input.size() : comma + 1u);
+			while (!token.empty() && std::isspace(static_cast<unsigned char>(token.front()))) token.remove_prefix(1);
+			while (!token.empty() && std::isspace(static_cast<unsigned char>(token.back()))) token.remove_suffix(1);
+			if (token.empty()) continue;
+			const bool hash = token.starts_with("hash:");
+			if (hash || token.starts_with("guest:")) token.remove_prefix(token.find(':') + 1u);
+			if (token.starts_with("0x") || token.starts_with("0X")) token.remove_prefix(2);
+			uint64_t value = 0;
+			const auto result = std::from_chars(token.data(), token.data() + token.size(), value, 16);
+			if (token.empty() || result.ec != std::errc {} || result.ptr != token.data() + token.size()) {
+				std::fprintf(stderr, "KYTY_SKIP_COMPUTE_GUEST ignoring invalid entry '%.*s'\n",
+				             static_cast<int>(token.size()), token.data());
+				continue;
+			}
+			(hash ? parsed.hashes : parsed.guests).insert(value);
+		}
+		return parsed;
+	}();
+	if (list.guests.contains(guest_address)) return ComputeSkipMatch::Guest;
+	if (list.hashes.contains(shader_hash)) return ComputeSkipMatch::Hash;
+	return ComputeSkipMatch::None;
 }
 
 namespace {
@@ -2562,6 +2599,24 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	PipelineHousekeeping();
 
 	EXIT_IF(!compute_program);
+
+	const auto* program = input_info.stage.program;
+	const auto  skip = ComputeSkipListed(program != nullptr ? program->diagnostic_guest_address : 0,
+	                                    program != nullptr ? program->shader_hash : 0);
+	if (skip != ComputeSkipMatch::None) {
+		const uint64_t count = ++m_compute_skip_counts[compute_program.id];
+		if (count == 1 || count % 1000u == 0) {
+			std::fprintf(stderr,
+			             "COMPUTE_DISPATCH_SKIPPED reason=skip_list guest=0x%016llx hash=0x%016llx matched=%s "
+			             "dispatch=%s count=%llu\n",
+			             static_cast<unsigned long long>(program != nullptr ? program->diagnostic_guest_address : 0),
+			             static_cast<unsigned long long>(program != nullptr ? program->shader_hash : 0),
+			             skip == ComputeSkipMatch::Guest ? "guest" : "hash", indirect ? "indirect" : "direct",
+			             static_cast<unsigned long long>(count));
+			std::fflush(stderr);
+		}
+		return nullptr;
+	}
 
 	if (auto iter = m_compute_pipelines.find(compute_program.id);
 	    iter != m_compute_pipelines.end()) {

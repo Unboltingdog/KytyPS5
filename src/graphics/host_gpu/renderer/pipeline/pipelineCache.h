@@ -140,6 +140,10 @@ struct ShaderProgram {
 	explicit operator bool() const { return id != 0 && module != nullptr; }
 };
 
+enum class ComputeSkipMatch : uint8_t { None, Guest, Hash };
+// KYTY_SKIP_COMPUTE_GUEST: bare and guest: values match the live address; hash: values match the shader hash.
+[[nodiscard]] ComputeSkipMatch ComputeSkipListed(uint64_t guest_address, uint64_t shader_hash);
+
 // The owning renderer serializes access, including saves while the GPU is running.
 class PipelineCache {
 public:
@@ -227,8 +231,8 @@ public:
 	                              CommandBuffer& command, const ShaderPixelInputInfo* ps_input_info,
 	                              vk::PrimitiveTopology topology, bool primitive_restart_enable,
 	                              const GraphicsPrograms& programs);
-	// Null with KYTY_FIX_ASYNC_COMPUTE_PIPELINES=1 while the driver compile is still running (or after it failed):
-	// the caller skips only the dispatch. Other modes always return a ready pipeline.
+	// Null with KYTY_FIX_ASYNC_COMPUTE_PIPELINES=1 while the driver compile is still running (or after it failed), and
+	// for a shader listed by KYTY_SKIP_COMPUTE_GUEST: the caller skips only the dispatch. Other modes return a ready pipeline.
 	Pipeline* GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	                             const ShaderProgram& compute_program, bool indirect);
 
@@ -312,6 +316,7 @@ private:
 	std::unordered_map<GraphicsPipelineKey, std::unique_ptr<Pipeline>, GraphicsPipelineKeyHash>
 	                                                        m_graphics_pipelines;
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
+	std::unordered_map<uint64_t, uint64_t>                  m_compute_skip_counts;
 	// KYTY_PERF_TABLE_ASYNC and KYTY_FIX_ASYNC_COMPUTE_PIPELINES share the workers. Pending compute jobs stay
 	// here until the GPU thread takes their result; a failed job stays so its dispatches do not retry on this thread.
 	std::unique_ptr<TableCompileWorkers> m_table_workers;

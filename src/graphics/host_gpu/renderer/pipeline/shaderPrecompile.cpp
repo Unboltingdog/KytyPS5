@@ -1929,6 +1929,13 @@ void ShaderPrecompiler::LoadCompute(const std::unordered_set<uint64_t>& skipped,
 		Job job;
 		job.key = record.Key();
 		if (!m_recorded.insert(job.key).second) return;
+		if (ComputeSkipListed(0, record.shader_hash) == ComputeSkipMatch::Hash) {
+			std::fprintf(stderr,
+			             "SHADER_PRECOMPILE skipped guest=0x%016llx hash=0x%016llx matched=hash\n",
+			             0ull, static_cast<unsigned long long>(record.shader_hash));
+			m_compute_records.push_back(std::move(record)); // preserve it if the journal is rewritten
+			return;
+		}
 		job.record = static_cast<uint32_t>(m_compute_records.size());
 		if (skipped.contains(job.key)) {
 			job.state = JobState::Dropped;

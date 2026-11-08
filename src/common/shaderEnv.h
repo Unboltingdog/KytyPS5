@@ -104,6 +104,8 @@ inline constexpr const char* OutputOnlyNames[] = {
     "KYTY_SHADER_PRECOMPILE_GRAPHICS",
     "KYTY_SHADER_PRECOMPILE_THREADS",
     "KYTY_SHADER_PRECOMPILE_WARM_PRUNE",
+    // Compute pipelines and dispatches refused by guest address or shader hash; emitted SPIR-V is unchanged.
+    "KYTY_SKIP_COMPUTE_GUEST",
     // Emission statistics.
     "KYTY_SWEEP_SPIRV_OPSTATS",
     "KYTY_SWEEP_SPIRV_SLICE",
