@@ -3,6 +3,7 @@
 #include "common/threads.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -13,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 #include <xxhash.h>
 
@@ -41,6 +43,31 @@ struct Slot {
 		return value != nullptr && (value[0] == '1' || value[0] == '2') ? value[0] - '0' : 0;
 	}();
 	return mode;
+}
+
+[[nodiscard]] int OptimizationMode() {
+	static const int mode = [] {
+		const char* value = std::getenv("KYTY_FIX_PIPELINE_DISABLE_OPT");
+		return value != nullptr && (value[0] == '1' || value[0] == '2') ? value[0] - '0' : 0;
+	}();
+	return mode;
+}
+
+[[nodiscard]] const std::unordered_set<uint64_t>& OptimizationHashes() {
+	static const std::unordered_set<uint64_t> hashes = [] {
+		std::unordered_set<uint64_t> result;
+		const char* cursor = std::getenv("KYTY_FIX_PIPELINE_DISABLE_OPT_HASHES");
+		while (cursor != nullptr && *cursor != '\0') {
+			char* end = nullptr;
+			const auto hash = std::strtoull(cursor, &end, 16);
+			if (end == cursor) break;
+			result.insert(hash);
+			cursor = *end == ',' ? end + 1 : end;
+			if (*end != '\0' && *end != ',') break;
+		}
+		return result;
+	}();
+	return hashes;
 }
 
 [[nodiscard]] std::chrono::seconds SlowAfter() {
@@ -144,7 +171,7 @@ uint64_t SpirvHash(std::span<const uint32_t> spirv) {
 
 void PrepareShader(ShaderRecompiler::IR::CompiledShaderInfo& info, std::span<const uint32_t> spirv,
                    uint64_t guest_address) {
-	if (!Enabled()) return;
+	if (!Enabled() && OptimizationMode() == 0) return;
 	info.diagnostic_spirv = std::make_shared<const std::vector<uint32_t>>(spirv.begin(), spirv.end());
 	info.diagnostic_guest_address = guest_address;
 }
@@ -156,6 +183,16 @@ Stage ShaderStage(const char* name, const ShaderRecompiler::IR::CompiledShaderIn
 	    .spirv = *info->diagnostic_spirv,
 	    .guest_address = info->diagnostic_guest_address,
 	};
+}
+
+bool DisableOptimization(Kind kind, std::span<const Stage> stages) {
+	const int mode = OptimizationMode();
+	if (mode == 0 || (kind == Kind::Graphics && mode != 2)) return false;
+	const auto& hashes = OptimizationHashes();
+	if (hashes.empty()) return true;
+	return std::ranges::any_of(stages, [](const Stage& stage) {
+		return OptimizationHashes().contains(SpirvHash(stage.spirv));
+	});
 }
 
 Compile::Compile(Kind kind, uint64_t key_hash, std::span<const Stage> stages) {

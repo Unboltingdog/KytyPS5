@@ -261,6 +261,9 @@ vk::Pipeline TileManager::CreatePipeline(std::span<const uint32_t>     code,
 	create.layout         = m_pipeline_layout;
 	vk::Pipeline pipeline = nullptr;
 	const std::array diag_stages {PipelineCompileDiag::Stage {"cs", code, 0}};
+	if (PipelineCompileDiag::DisableOptimization(PipelineCompileDiag::Kind::Compute, diag_stages)) {
+		create.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+	}
 	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute,
 	                                          PipelineCompileDiag::SpirvHash(code), diag_stages);
 	const auto result = m_graphics.device.createComputePipelines(nullptr, 1, &create, nullptr, &pipeline);
@@ -809,7 +812,10 @@ void TileManager::Retile(Image& target, Image& source, std::span<const RetileJob
 		create.stage      = stage;
 		create.layout     = m_retile_pipeline_layout;
 		const std::array diag_stages {PipelineCompileDiag::Stage {"cs", GPU_TILER_RETILE_SPV, 0}};
-		PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute,
+		if (PipelineCompileDiag::DisableOptimization(PipelineCompileDiag::Kind::Compute, diag_stages)) {
+		create.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+	}
+	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute,
 		                                          PipelineCompileDiag::SpirvHash(GPU_TILER_RETILE_SPV), diag_stages);
 		const auto result = m_graphics.device.createComputePipelines(nullptr, 1, &create, nullptr, &m_retile);
 		diag_compile.End(result);
@@ -981,7 +987,10 @@ void TileManager::AliasCopy(vk::Buffer target_linear, uint64_t target_size, cons
 		create.stage      = stage;
 		create.layout     = m_alias_pipeline_layout;
 		const std::array diag_stages {PipelineCompileDiag::Stage {"cs", GPU_TILER_ALIAS_COPY_SPV, 0}};
-		PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute,
+		if (PipelineCompileDiag::DisableOptimization(PipelineCompileDiag::Kind::Compute, diag_stages)) {
+		create.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+	}
+	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute,
 		                                          PipelineCompileDiag::SpirvHash(GPU_TILER_ALIAS_COPY_SPV), diag_stages);
 		const auto result = m_graphics.device.createComputePipelines(nullptr, 1, &create, nullptr, &m_alias_copy);
 		diag_compile.End(result);

@@ -1002,6 +1002,9 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		diag_stages.push_back({"ds", rect_list_shaders.evaluation, 0});
 	}
 	if (ps_active) diag_stages.push_back(PipelineCompileDiag::ShaderStage("ps", ps_input_info->stage.program));
+	if (PipelineCompileDiag::DisableOptimization(PipelineCompileDiag::Kind::Graphics, diag_stages)) {
+		pipeline_info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+	}
 	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Graphics, key_hash, diag_stages);
 	const auto create_begin = std::chrono::steady_clock::now();
 	result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info, nullptr,
@@ -1168,6 +1171,9 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		info.flags |= vk::PipelineCreateFlagBits::eCaptureStatisticsKHR;
 	}
 	const std::array diag_stages {PipelineCompileDiag::ShaderStage("cs", input_info.stage.program)};
+	if (PipelineCompileDiag::DisableOptimization(PipelineCompileDiag::Kind::Compute, diag_stages)) {
+		info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+	}
 	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute, key_hash, diag_stages);
 	const auto create_begin = std::chrono::steady_clock::now();
 	result = graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr,

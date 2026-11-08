@@ -771,6 +771,9 @@ void Swapchain::DrawLayer(vk::CommandBuffer command, const Presenter::Layer& lay
 		    PipelineCompileDiag::Stage {"vs", GPU_BLIT_FS_TRIANGLE_SPV, 0},
 		    PipelineCompileDiag::Stage {"ps", GPU_VIDEO_OUT_OVERLAY_SPV, 0},
 		};
+		if (PipelineCompileDiag::DisableOptimization(PipelineCompileDiag::Kind::Graphics, diag_stages)) {
+			create.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+		}
 		PipelineCompileDiag::Compile diag_compile(
 		    PipelineCompileDiag::Kind::Graphics,
 		    PipelineCompileDiag::SpirvHash(GPU_BLIT_FS_TRIANGLE_SPV) ^

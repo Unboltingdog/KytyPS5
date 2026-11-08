@@ -118,6 +118,9 @@ vk::Pipeline BlitHelper::GetPipeline(PipelineKey key) {
 	    PipelineCompileDiag::Stage {"vs", GPU_BLIT_FS_TRIANGLE_SPV, 0},
 	    PipelineCompileDiag::Stage {"ps", GPU_BLIT_COLOR_TO_MS_DEPTH_SPV, 0},
 	};
+	if (PipelineCompileDiag::DisableOptimization(PipelineCompileDiag::Kind::Graphics, diag_stages)) {
+		create.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+	}
 	PipelineCompileDiag::Compile diag_compile(
 	    PipelineCompileDiag::Kind::Graphics,
 	    uint64_t {key.samples} | (static_cast<uint64_t>(static_cast<uint32_t>(key.format)) << 32u), diag_stages);

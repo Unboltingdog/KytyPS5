@@ -75,6 +75,9 @@ DccClearResolver::DccClearResolver(GraphicContext& graphics, CommandScheduler& s
 	pipeline_info.stage  = stage;
 	pipeline_info.layout = m_pipeline_layout;
 	const std::array diag_stages {PipelineCompileDiag::Stage {"cs", DCC_CLEAR_CHECK_SPV, 0}};
+	if (PipelineCompileDiag::DisableOptimization(PipelineCompileDiag::Kind::Compute, diag_stages)) {
+		pipeline_info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+	}
 	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute,
 	                                          PipelineCompileDiag::SpirvHash(DCC_CLEAR_CHECK_SPV), diag_stages);
 	const auto result = graphics.device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &m_pipeline);

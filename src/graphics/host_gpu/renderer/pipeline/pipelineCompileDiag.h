@@ -31,6 +31,7 @@ struct Stage {
 void PrepareShader(ShaderRecompiler::IR::CompiledShaderInfo& info, std::span<const uint32_t> spirv,
                    uint64_t guest_address);
 [[nodiscard]] Stage ShaderStage(const char* name, const ShaderRecompiler::IR::CompiledShaderInfo* info);
+[[nodiscard]] bool DisableOptimization(Kind kind, std::span<const Stage> stages);
 
 class Compile {
 public:
@@ -41,7 +42,7 @@ public:
 	void End(vk::Result result);
 
 private:
-Record*  m_record = nullptr;
+	Record*  m_record = nullptr;
 	uint32_t m_slot   = 0;
 };
 

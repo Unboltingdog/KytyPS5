@@ -100,6 +100,9 @@ FaultManager::FaultManager(GraphicContext& graphics, CommandScheduler& scheduler
 	pipeline_info.stage  = stage;
 	pipeline_info.layout = m_fault_process_pipeline_layout;
 	const std::array diag_stages {PipelineCompileDiag::Stage {"cs", FAULT_BUFFER_PROCESS_SPV, 0}};
+	if (PipelineCompileDiag::DisableOptimization(PipelineCompileDiag::Kind::Compute, diag_stages)) {
+		pipeline_info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+	}
 	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute,
 	                                          PipelineCompileDiag::SpirvHash(FAULT_BUFFER_PROCESS_SPV), diag_stages);
 	const auto result = m_graphics.device.createComputePipelines(
