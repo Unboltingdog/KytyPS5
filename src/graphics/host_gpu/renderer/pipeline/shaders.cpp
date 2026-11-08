@@ -150,6 +150,14 @@ const char* PipelineDiagStageName(ShaderType stage) {
 	}
 }
 
+bool PipelineNoDriverCache() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_FIX_PIPELINE_NO_DRIVER_CACHE");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
 } // namespace
 
 // IDK: maybe we can remove it?
@@ -611,6 +619,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
                             const PipelineCache::GraphicsPrograms& programs,
                             const PipelineStaticParameters&        static_params,
                             vk::PipelineCache                      driver_cache, uint64_t key_hash) {
+	if (PipelineNoDriverCache()) driver_cache = nullptr;
 	const auto& vs_input_info  = vertex_info.front();
 	const auto& vertex_program = programs.vertex[0];
 	const auto& pixel_program  = programs.pixel;
@@ -1093,6 +1102,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
                             vk::ShaderModule compute_module, vk::PipelineCache driver_cache, uint64_t key_hash) {
+	if (PipelineNoDriverCache()) driver_cache = nullptr;
 	EXIT_IF(compute_module == nullptr);
 
 	vk::PipelineShaderStageCreateInfo                     comp_shader_stage_info {};
