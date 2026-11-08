@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCompileDiag.h"
 
 #include <algorithm>
 #include <array>
@@ -259,8 +260,11 @@ vk::Pipeline TileManager::CreatePipeline(std::span<const uint32_t>     code,
 	create.stage          = stage;
 	create.layout         = m_pipeline_layout;
 	vk::Pipeline pipeline = nullptr;
-	const auto   result =
-	    m_graphics.device.createComputePipelines(nullptr, 1, &create, nullptr, &pipeline);
+	const std::array diag_stages {PipelineCompileDiag::Stage {"cs", code, 0}};
+	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute,
+	                                          PipelineCompileDiag::SpirvHash(code), diag_stages);
+	const auto result = m_graphics.device.createComputePipelines(nullptr, 1, &create, nullptr, &pipeline);
+	diag_compile.End(result);
 	m_graphics.device.destroyShaderModule(module, nullptr);
 	RequireVulkanSuccess(result, "create TileManager pipeline");
 	return pipeline;
@@ -804,7 +808,11 @@ void TileManager::Retile(Image& target, Image& source, std::span<const RetileJob
 		vk::ComputePipelineCreateInfo create {};
 		create.stage      = stage;
 		create.layout     = m_retile_pipeline_layout;
+		const std::array diag_stages {PipelineCompileDiag::Stage {"cs", GPU_TILER_RETILE_SPV, 0}};
+		PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute,
+		                                          PipelineCompileDiag::SpirvHash(GPU_TILER_RETILE_SPV), diag_stages);
 		const auto result = m_graphics.device.createComputePipelines(nullptr, 1, &create, nullptr, &m_retile);
+		diag_compile.End(result);
 		m_graphics.device.destroyShaderModule(module, nullptr);
 		RequireVulkanSuccess(result, "create retile pipeline");
 	}
@@ -972,7 +980,11 @@ void TileManager::AliasCopy(vk::Buffer target_linear, uint64_t target_size, cons
 		vk::ComputePipelineCreateInfo create {};
 		create.stage      = stage;
 		create.layout     = m_alias_pipeline_layout;
+		const std::array diag_stages {PipelineCompileDiag::Stage {"cs", GPU_TILER_ALIAS_COPY_SPV, 0}};
+		PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute,
+		                                          PipelineCompileDiag::SpirvHash(GPU_TILER_ALIAS_COPY_SPV), diag_stages);
 		const auto result = m_graphics.device.createComputePipelines(nullptr, 1, &create, nullptr, &m_alias_copy);
+		diag_compile.End(result);
 		m_graphics.device.destroyShaderModule(module, nullptr);
 		RequireVulkanSuccess(result, "create alias copy pipeline");
 	}

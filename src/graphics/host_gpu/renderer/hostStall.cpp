@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCompileDiag.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/videoOut.h"
 
@@ -222,6 +223,7 @@ struct HostStallWatchdog::Impl {
 		             scheduler.deferred_callbacks, static_cast<long long>(present_depth),
 		             static_cast<unsigned long long>(progress.recorder_published),
 		             static_cast<unsigned long long>(progress.recorder_recorded));
+		PipelineCompileDiag::DumpInflight("HOST_STALL");
 		HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
 		if (snapshot == INVALID_HANDLE_VALUE) {
 			std::fprintf(stderr, "HOST_STALL threads_error=%lu\n", static_cast<unsigned long>(GetLastError()));

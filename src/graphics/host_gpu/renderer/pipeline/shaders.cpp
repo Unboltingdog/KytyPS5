@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCompileDiag.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderPrecompile.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -134,6 +135,19 @@ void NotePipelineVariant(uint64_t vs_hash, uint64_t ps_hash, const PipelineVaria
 	std::fprintf(stderr, "PIPELINE_REPEAT %s vs=0x%016llx ps=0x%016llx %.0fms earlier=%zu diff=%s\n",
 	             background ? "graphics-background" : "graphics", static_cast<unsigned long long>(vs_hash),
 	             static_cast<unsigned long long>(ps_hash), ms, earlier, diff.c_str());
+}
+
+const char* PipelineDiagStageName(ShaderType stage) {
+	switch (stage) {
+		case ShaderType::Vertex: return "vs";
+		case ShaderType::Pixel: return "ps";
+		case ShaderType::Compute: return "cs";
+		case ShaderType::Mesh: return "ms";
+		case ShaderType::Local: return "ls";
+		case ShaderType::TessellationControl: return "hs";
+		case ShaderType::TessellationEvaluation: return "ds";
+		default: return "unknown";
+	}
 }
 
 } // namespace
@@ -596,7 +610,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
                             const ShaderPixelInputInfo*            ps_input_info,
                             const PipelineCache::GraphicsPrograms& programs,
                             const PipelineStaticParameters&        static_params,
-                            vk::PipelineCache                      driver_cache) {
+                            vk::PipelineCache                      driver_cache, uint64_t key_hash) {
 	const auto& vs_input_info  = vertex_info.front();
 	const auto& vertex_program = programs.vertex[0];
 	const auto& pixel_program  = programs.pixel;
@@ -620,19 +634,19 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 	vk::ShaderModule tess_control_shader_module = nullptr;
 	vk::ShaderModule tess_eval_shader_module    = nullptr;
+	RectListShaders rect_list_shaders;
 
 	if (rect_list) {
-		const auto shaders =
-		    BuildRectListShaders(vs_input_info, ps_active ? ps_input_info : nullptr);
-		tess_control_shader_module = background ? TryCompileSPV(shaders.control, graphics.device)
-		                                        : CompileSPV(shaders.control, graphics.device);
+		rect_list_shaders = BuildRectListShaders(vs_input_info, ps_active ? ps_input_info : nullptr);
+		tess_control_shader_module = background ? TryCompileSPV(rect_list_shaders.control, graphics.device)
+		                                        : CompileSPV(rect_list_shaders.control, graphics.device);
 		if (graphics_debug_dump_enabled()) {
 			LOGF("PipelineTrace: vkCreateShaderModule RectList TCS done module=%p\n",
 			     static_cast<void*>(tess_control_shader_module));
 		}
 
-		tess_eval_shader_module = background ? TryCompileSPV(shaders.evaluation, graphics.device)
-		                                     : CompileSPV(shaders.evaluation, graphics.device);
+		tess_eval_shader_module = background ? TryCompileSPV(rect_list_shaders.evaluation, graphics.device)
+		                                     : CompileSPV(rect_list_shaders.evaluation, graphics.device);
 		if (graphics_debug_dump_enabled()) {
 			LOGF("PipelineTrace: vkCreateShaderModule RectList TES done module=%p\n",
 			     static_cast<void*>(tess_eval_shader_module));
@@ -978,9 +992,21 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	if (want_stats) {
 		pipeline_info.flags |= vk::PipelineCreateFlagBits::eCaptureStatisticsKHR;
 	}
+	std::vector<PipelineCompileDiag::Stage> diag_stages;
+	for (const auto& stage: vertex_info) {
+		diag_stages.push_back(PipelineCompileDiag::ShaderStage(PipelineDiagStageName(stage.logical_stage),
+		                                                       stage.stage.program));
+	}
+	if (rect_list) {
+		diag_stages.push_back({"hs", rect_list_shaders.control, 0});
+		diag_stages.push_back({"ds", rect_list_shaders.evaluation, 0});
+	}
+	if (ps_active) diag_stages.push_back(PipelineCompileDiag::ShaderStage("ps", ps_input_info->stage.program));
+	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Graphics, key_hash, diag_stages);
 	const auto create_begin = std::chrono::steady_clock::now();
 	result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info, nullptr,
 	                                                 &pipeline.pipeline);
+	diag_compile.End(result);
 	// KYTY_TRACE_STARTUP: every graphics pipeline creation (GPU thread or background), 50 ms+ ones also as slow.
 	if (Common::StartupTrace::Enabled()) {
 		const auto ms =
@@ -1063,7 +1089,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
-                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache) {
+                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache, uint64_t key_hash) {
 	EXIT_IF(compute_module == nullptr);
 
 	vk::PipelineShaderStageCreateInfo                     comp_shader_stage_info {};
@@ -1141,9 +1167,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	if (want_stats) {
 		info.flags |= vk::PipelineCreateFlagBits::eCaptureStatisticsKHR;
 	}
+	const std::array diag_stages {PipelineCompileDiag::ShaderStage("cs", input_info.stage.program)};
+	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute, key_hash, diag_stages);
 	const auto create_begin = std::chrono::steady_clock::now();
 	result = graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr,
 	                                                &pipeline.pipeline);
+	diag_compile.End(result);
 	// KYTY_TRACE_STARTUP: every compute pipeline creation (GPU thread or background), 50 ms+ ones also as slow.
 	if (Common::StartupTrace::Enabled()) {
 		const auto ms =

@@ -1033,6 +1033,8 @@ struct CompiledShaderInfo {
 	bool                          has_address_writes  = false;
 	ShaderInfo                    info;
 	Bindings                      bindings;
+	std::shared_ptr<const std::vector<uint32_t>> diagnostic_spirv;
+	uint64_t                      diagnostic_guest_address = 0;
 };
 
 struct UniformFillPlan {

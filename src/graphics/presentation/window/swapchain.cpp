@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCompileDiag.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
@@ -766,9 +767,18 @@ void Swapchain::DrawLayer(vk::CommandBuffer command, const Presenter::Layer& lay
 		create.pColorBlendState    = &blend;
 		create.pDynamicState       = &dynamic;
 		create.layout              = m_overlay_layout;
-		RequireVulkanSuccess(
-		    device.createGraphicsPipelines(nullptr, 1, &create, nullptr, &m_overlay_pipeline),
-		    "create video-out overlay pipeline");
+		const std::array diag_stages {
+		    PipelineCompileDiag::Stage {"vs", GPU_BLIT_FS_TRIANGLE_SPV, 0},
+		    PipelineCompileDiag::Stage {"ps", GPU_VIDEO_OUT_OVERLAY_SPV, 0},
+		};
+		PipelineCompileDiag::Compile diag_compile(
+		    PipelineCompileDiag::Kind::Graphics,
+		    PipelineCompileDiag::SpirvHash(GPU_BLIT_FS_TRIANGLE_SPV) ^
+		        PipelineCompileDiag::SpirvHash(GPU_VIDEO_OUT_OVERLAY_SPV),
+		    diag_stages);
+		const auto result = device.createGraphicsPipelines(nullptr, 1, &create, nullptr, &m_overlay_pipeline);
+		diag_compile.End(result);
+		RequireVulkanSuccess(result, "create video-out overlay pipeline");
 		device.destroyShaderModule(fragment, nullptr);
 		device.destroyShaderModule(vertex, nullptr);
 	}

@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/perfCounters.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCacheTrace.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCompileDiag.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -540,6 +541,7 @@ struct PipelineCache::ProgramCache {
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
 			     static_cast<uint64_t>(result.spirv.size()), options.wave_size);
 		}
+		PipelineCompileDiag::PrepareShader(program, result.spirv, options.guest_address);
 		return {
 		    .function_code  = {function_code.begin(), function_code.end()},
 		    .specialization = std::move(specialization),
@@ -684,6 +686,7 @@ struct PipelineCache::ProgramCache {
 		options.stage       = stage;
 		options.profile     = &profile;
 		options.shader_hash = params.hash;
+		options.guest_address = params.Base();
 		options.user_data   = user_data;
 		options.back_code      = params.back_code;
 		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
@@ -1131,6 +1134,7 @@ struct PipelineCache::TableCompileJob {
 	PipelineRenderingState                 rendering;
 	PipelineVertexInputState               vertex_input;
 	PipelineStaticParameters               static_params;
+	uint64_t                               key_hash = 0;
 	std::array<ShaderVertexInputInfo, 3>   vertex_info {};
 	uint32_t                               vertex_count = 1;
 	ShaderPixelInputInfo                   ps_input_info {};
@@ -2244,7 +2248,7 @@ void PipelineCache::RecreateGraphicsPipeline(Pipeline& pipeline, const GraphicsP
                                              const ShaderPixelInputInfo* ps_input_info, const GraphicsPrograms& programs) {
 	// EvictIdlePipelines gave its objects back: created again from the same inputs.
 	CreatePipelineInternal(m_graphics, pipeline, key.rendering, key.vertex_input, vertex_info, ps_input_info, programs,
-	                       key.static_params, m_driver_cache);
+	                       key.static_params, m_driver_cache, GraphicsPipelineKeyHash {}(key));
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr || pipeline.pipeline_layout == nullptr);
 	m_recreated++;
 }
@@ -2303,7 +2307,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
 		CreatePipelineInternal(m_graphics, *cached, rendering, key.vertex_input, vertex_info,
-		                       ps_input_info, programs, static_params, m_driver_cache);
+		                       ps_input_info, programs, static_params, m_driver_cache, GraphicsPipelineKeyHash {}(key));
 	}
 	m_pipelines_since_save++;
 	LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
@@ -2424,6 +2428,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipelineAsync(
 	job->rendering       = key.rendering;
 	job->vertex_input    = key.vertex_input;
 	job->static_params   = key.static_params;
+	job->key_hash        = GraphicsPipelineKeyHash {}(key);
 	job->vertex_count    = static_cast<uint32_t>(vertex_info.size());
 	EXIT_IF(job->vertex_count == 0 || job->vertex_count > job->vertex_info.size());
 	for (uint32_t i = 0; i < job->vertex_count; i++) {
@@ -2455,7 +2460,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipelineAsync(
 		CreatePipelineInternal(m_graphics, *job->pipeline, job->rendering, job->vertex_input,
 		                       std::span<const ShaderVertexInputInfo>(job->vertex_info.data(), job->vertex_count),
 		                       job->ps_active ? &job->ps_input_info : nullptr, job->programs, job->static_params,
-		                       m_driver_cache);
+		                       m_driver_cache, job->key_hash);
 		auto& made = *job->pipeline;
 		if (made.pipeline == nullptr || made.pipeline_layout == nullptr) {
 			// A background creation gives up where the GPU thread would exit (CreatePipelineInternal): what it left is
@@ -2508,7 +2513,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
-		CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache);
+		CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache, compute_program.id);
 	}
 	m_pipelines_since_save++;
 
@@ -2533,7 +2538,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 void PipelineCache::RecreateComputePipeline(Pipeline& pipeline, const ShaderComputeInputInfo& input_info,
                                             const ShaderProgram& compute_program) {
 	// EvictIdlePipelines gave its objects back: created again from the same inputs.
-	CreatePipelineInternal(m_graphics, pipeline, input_info, compute_program.module, m_driver_cache);
+	CreatePipelineInternal(m_graphics, pipeline, input_info, compute_program.module, m_driver_cache, compute_program.id);
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr || pipeline.pipeline_layout == nullptr);
 	m_recreated++;
 }

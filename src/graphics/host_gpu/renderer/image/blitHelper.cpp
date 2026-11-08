@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCompileDiag.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 
 #include <algorithm>
@@ -113,9 +114,16 @@ vk::Pipeline BlitHelper::GetPipeline(PipelineKey key) {
 	create.layout              = m_pipeline_layout;
 
 	vk::Pipeline pipeline = nullptr;
-	RequireVulkanSuccess(
-	    m_graphics.device.createGraphicsPipelines(nullptr, 1, &create, nullptr, &pipeline),
-	    "create color-to-MS-depth pipeline");
+	const std::array diag_stages {
+	    PipelineCompileDiag::Stage {"vs", GPU_BLIT_FS_TRIANGLE_SPV, 0},
+	    PipelineCompileDiag::Stage {"ps", GPU_BLIT_COLOR_TO_MS_DEPTH_SPV, 0},
+	};
+	PipelineCompileDiag::Compile diag_compile(
+	    PipelineCompileDiag::Kind::Graphics,
+	    uint64_t {key.samples} | (static_cast<uint64_t>(static_cast<uint32_t>(key.format)) << 32u), diag_stages);
+	const auto result = m_graphics.device.createGraphicsPipelines(nullptr, 1, &create, nullptr, &pipeline);
+	diag_compile.End(result);
+	RequireVulkanSuccess(result, "create color-to-MS-depth pipeline");
 	m_pipelines.push_back({key, pipeline});
 	return pipeline;
 }

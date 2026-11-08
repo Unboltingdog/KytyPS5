@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "gpu_tiler_shaders/dcc_clear_check_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCompileDiag.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
@@ -73,8 +74,11 @@ DccClearResolver::DccClearResolver(GraphicContext& graphics, CommandScheduler& s
 	vk::ComputePipelineCreateInfo pipeline_info {};
 	pipeline_info.stage  = stage;
 	pipeline_info.layout = m_pipeline_layout;
-	const auto result =
-	    graphics.device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &m_pipeline);
+	const std::array diag_stages {PipelineCompileDiag::Stage {"cs", DCC_CLEAR_CHECK_SPV, 0}};
+	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute,
+	                                          PipelineCompileDiag::SpirvHash(DCC_CLEAR_CHECK_SPV), diag_stages);
+	const auto result = graphics.device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &m_pipeline);
+	diag_compile.End(result);
 	graphics.device.destroyShaderModule(module, nullptr);
 	RequireVulkanSuccess(result, "create DCC clear pipeline");
 	SetVulkanObjectNameF(graphics.device, m_pipeline, "Kyty.DccClearCheck");

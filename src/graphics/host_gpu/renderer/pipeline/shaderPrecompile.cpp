@@ -13,6 +13,7 @@
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCompileDiag.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kytyGitVersion.h"
@@ -2395,6 +2396,7 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 		}
 	}
 	info = std::move(result.program).TakeCompiledInfo();
+	PipelineCompileDiag::PrepareShader(info, result.spirv, 0);
 	if (keep) {
 		StoreReuse(record, key, program, std::move(plan), std::move(result.spirv), info, translate_ms, compile_ms);
 	} else if (over_budget) {
@@ -2427,7 +2429,7 @@ void ShaderPrecompiler::Compile(const PrecompileStageRecord& record, uint64_t ke
 	input.stage = {.program = &program, .resources = &resources};
 	PipelineCache::Pipeline pipeline;
 	const auto              create_begin = std::chrono::steady_clock::now();
-	CreatePipelineInternal(m_graphics, pipeline, input, module, m_driver_cache);
+	CreatePipelineInternal(m_graphics, pipeline, input, module, m_driver_cache, key);
 	const auto create_ms =
 	    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - create_begin).count();
 	const bool created = pipeline.pipeline != nullptr;
@@ -2633,7 +2635,7 @@ void ShaderPrecompiler::CompileGraphics(Job& job) {
 	PipelineCache::Pipeline pipeline;
 	const auto              create_begin = std::chrono::steady_clock::now();
 	CreatePipelineInternal(m_graphics, pipeline, record.rendering, record.vertex_input, stages, pixel, programs,
-	                       record.static_params, m_driver_cache);
+	                       record.static_params, m_driver_cache, job.key);
 	const auto create_ms =
 	    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - create_begin).count();
 	const bool created = pipeline.pipeline != nullptr;

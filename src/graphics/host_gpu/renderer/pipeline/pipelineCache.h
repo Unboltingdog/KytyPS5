@@ -366,10 +366,10 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
                             const ShaderPixelInputInfo*            ps_input_info,
                             const PipelineCache::GraphicsPrograms& programs,
                             const PipelineStaticParameters&        static_params,
-                            vk::PipelineCache                      driver_cache);
+                            vk::PipelineCache                      driver_cache, uint64_t key_hash);
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
-                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache);
+                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache, uint64_t key_hash);
 // Why the graphics CreatePipelineInternal would exit on this pipeline on this device, or null: a device feature it
 // needs or a value its state helpers reject. The stages' programs must be set. The background compiles
 // (shaderPrecompile.h) skip such records: their journal may hold another build's records.
