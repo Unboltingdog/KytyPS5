@@ -206,7 +206,7 @@ struct HostStallWatchdog::Impl {
 
 	void Dump(const Progress& progress) {
 		const auto scheduler = m_renderer.GetCommandScheduler().GetDebugState();
-		const auto present_depth = m_renderer.GetVideoOut().State().GetFlipQueue().DebugDepth();
+		const auto present_depth = m_renderer.GetVideoOut().DebugFlipQueueDepth();
 		std::fprintf(stderr,
 		             "HOST_STALL begin present=%llu gpu_progress_age_ms=%llu sched_tick=%llu sem_known=%llu\n",
 		             static_cast<unsigned long long>(progress.present),

@@ -45,6 +45,8 @@ public:
 	[[nodiscard]] bool IsSafeForRendering(int handle, int index);
 
 	[[nodiscard]] Impl& State() noexcept;
+	// KYTY_DIAG_HOST_STALL: queued flip requests, -1 when the queue is busy.
+	[[nodiscard]] int64_t DebugFlipQueueDepth() noexcept;
 
 private:
 	std::unique_ptr<Impl> m_impl;

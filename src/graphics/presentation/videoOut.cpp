@@ -639,6 +639,10 @@ VideoOutDriver::Impl& VideoOutDriver::State() noexcept {
 	return *m_impl;
 }
 
+int64_t VideoOutDriver::DebugFlipQueueDepth() noexcept {
+	return m_impl->GetFlipQueue().DebugDepth();
+}
+
 VideoOutDriver& VideoOutInit(uint32_t width, uint32_t height, Graphics::Presenter& presenter) {
 	EXIT_IF(g_video_out_driver != nullptr);
 	g_video_out_driver = std::make_unique<VideoOutDriver>(width, height, presenter);
