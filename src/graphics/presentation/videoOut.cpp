@@ -120,6 +120,19 @@ struct VideoOutBufferAttribute2 {
 	uint64_t reserved1[3];
 };
 
+struct VideoOutResolutionStatus {
+	int32_t  fullWidth       = 0;
+	int32_t  fullHeight      = 0;
+	int32_t  paneWidth       = 0;
+	int32_t  paneHeight      = 0;
+	uint64_t refreshRate     = 0;
+	float    screenSizeInch  = 50.0f;
+	uint16_t flags           = 0;
+	uint16_t reserved0       = 0;
+	uint32_t reserved1[3]    = {};
+};
+static_assert(sizeof(VideoOutResolutionStatus) == 0x30);
+
 // PS5 layout
 struct VideoOutFlipStatus {
 	uint64_t count                    = 0;
@@ -1774,6 +1787,33 @@ bool VideoOutDriver::IsSafeForRendering(int handle, int index) {
 
 	EXIT_NOT_IMPLEMENTED(!IsValidBufferIndex(index));
 	return m_impl->GetFlipQueue().IsSafeForRendering(*ctx, index);
+}
+
+KYTY_SYSV_ABI int VideoOutGetResolutionStatus(int handle, VideoOutResolutionStatus* status) {
+	PRINT_NAME();
+
+	if (status == nullptr) {
+		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+	}
+
+	auto* ctx = DriverState().Get(handle);
+	if (ctx == nullptr) {
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+
+	Common::LockGuard lock(ctx->mutex);
+	*status = {};
+	status->fullWidth = static_cast<int32_t>(ctx->width);
+	status->fullHeight = static_cast<int32_t>(ctx->height);
+	status->paneWidth = status->fullWidth;
+	status->paneHeight = status->fullHeight;
+	status->refreshRate =
+	    (ctx->output_mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ || Config::GetVblankFrequency() >= 119
+	         ? VIDEO_OUT_REFRESH_RATE_119_88HZ
+	         : VIDEO_OUT_REFRESH_RATE_59_94HZ);
+	status->flags = 0;
+
+	return OK;
 }
 
 KYTY_SYSV_ABI int VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status) {

@@ -4,6 +4,8 @@
 #include "libs/libs.h"
 #include "loader/symbolDatabase.h"
 
+#include <cstdlib>
+
 namespace Libs {
 
 namespace LibGen5 {
@@ -29,6 +31,10 @@ LIB_DEFINE(InitVideoOut_1) {
 	LIB_FUNC("oNOQn3knW6s", VideoOut::VideoOutDeleteVblankEvent);
 	LIB_FUNC("elWQ9vERF-Q", VideoOut::VideoOutDeletePreVblankStartEvent);
 	LIB_FUNC("U46NwOiJpys", VideoOut::VideoOutSubmitFlip);
+	if (const char* value = std::getenv("KYTY_FIX_VIDEOOUT_RESOLUTION_STATUS");
+	    value != nullptr && value[0] == '1') {
+		LIB_FUNC("6kPnj51T62Y", VideoOut::VideoOutGetResolutionStatus);
+	}
 	LIB_FUNC("SbU3dwp80lQ", VideoOut::VideoOutGetFlipStatus);
 	LIB_FUNC("zgXifHT9ErY", VideoOut::VideoOutIsFlipPending);
 	LIB_FUNC("1FZBKy8HeNU", VideoOut::VideoOutGetVblankStatus);

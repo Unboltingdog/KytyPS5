@@ -17,6 +17,7 @@ class Presenter;
 namespace Libs::VideoOut {
 
 struct VideoOutBufferAttribute2;
+struct VideoOutResolutionStatus;
 struct VideoOutFlipStatus;
 struct VideoOutVblankStatus;
 struct VideoOutOutputStatus;
@@ -85,6 +86,7 @@ KYTY_SYSV_ABI int VideoOutSubmitChangeBufferAttribute2(int handle, int set_index
                                                        void*                           option);
 KYTY_SYSV_ABI int VideoOutUnregisterBuffers(int handle, int set_index);
 KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg);
+KYTY_SYSV_ABI int VideoOutGetResolutionStatus(int handle, VideoOutResolutionStatus* status);
 KYTY_SYSV_ABI int VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status);
 KYTY_SYSV_ABI int VideoOutIsFlipPending(int handle);
 KYTY_SYSV_ABI int VideoOutGetVblankStatus(int handle, VideoOutVblankStatus* status);
