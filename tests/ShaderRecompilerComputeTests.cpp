@@ -37184,7 +37184,7 @@ std::array<u32, 4> Words(const LoadCase &load) {
 }
 
 CompiledShader Compile(const LoadProgram &spec, u32 host_subgroup_size, ShaderComputeInputInfo &compute,
-                       bool reference) {
+                       bool reference, int table_mode = 0) {
   using namespace IR;
   CompiledShader compiled;
   auto &program = compiled.program;
@@ -37273,9 +37273,32 @@ CompiledShader Compile(const LoadProgram &spec, u32 host_subgroup_size, ShaderCo
   compute.threads_num[1] = compute.threads_num[2] = 1;
   program.shader_info_complete = false;
   CollectShaderInfo(program, {.compute = &compute});
+  if (table_mode != 0) {
+    Require("TableFormatSpecialization", "buffer root", !program.info.buffers.empty(),
+            "the indirect formatted load has no buffer resource");
+    auto root = program.info.buffers[0];
+    root.indirect_root = 0;
+    root.descriptor_format = Prospero::BufferFormat::kInvalid;
+    root.indirect_resources = {0u};
+    program.info.buffers[0] = root;
+    const bool mixed = table_mode == 2 || table_mode == 3;
+    const auto formats = mixed
+                             ? std::array{Prospero::BufferFormat::k32UInt, Prospero::BufferFormat::k16Float}
+                             : std::array{Prospero::BufferFormat::k32UInt, Prospero::BufferFormat::k32UInt};
+    const u32 count = mixed ? 2u : 1u;
+    for (u32 index = 0; index < count; ++index) {
+      auto child = root;
+      child.descriptor_format = formats[index];
+      child.indirect_resources.clear();
+      program.info.buffers[0].indirect_resources.push_back(static_cast<u32>(program.info.buffers.size()));
+      program.info.buffers.push_back(child);
+    }
+    Spirv::SetSpirvTableFormatsOverride(table_mode == 1 || table_mode == 2);
+  }
   Spirv::SetSpirvFormattedSwitchReference(reference);
   compiled.spirv = Spirv::EmitProgram(program, {.compute = &compute});
   Spirv::SetSpirvFormattedSwitchReference(false);
+  if (table_mode != 0) Spirv::SetSpirvTableFormatsOverride(std::nullopt);
   compiled.packed_user_data.resize(program.bindings.ShaderDataDwords());
   return compiled;
 }
@@ -37439,6 +37462,33 @@ void CheckIndirectFormattedTable(VulkanHarness &vulkan) {
   Require("IndirectFormattedTable", "module size", table_words < switch_words,
           "the table modules are not smaller than the switch modules");
   std::printf("[compute] %-32s ok\n", "IndirectFormattedTable");
+}
+
+void CheckTableFormatSpecialization() {
+  constexpr const char *name = "TableFormatSpecialization";
+  const auto spec = IndirectFormattedTable::Programs({1, 1, false}, 32u).front();
+  ShaderComputeInputInfo compute_uniform_on{}, compute_uniform_off{};
+  ShaderComputeInputInfo compute_mixed_on{}, compute_mixed_off{};
+  const auto uniform_on = IndirectFormattedTable::Compile(spec, 32u, compute_uniform_on, false, 1);
+  const auto mixed_on = IndirectFormattedTable::Compile(spec, 32u, compute_mixed_on, false, 2);
+  const auto mixed_off = IndirectFormattedTable::Compile(spec, 32u, compute_mixed_off, false, 3);
+  const auto uniform_off = IndirectFormattedTable::Compile(spec, 32u, compute_uniform_off, false, 4);
+  for (const auto *shader : {&uniform_on, &uniform_off, &mixed_on, &mixed_off}) {
+    ValidateSpirv(name, shader->spirv);
+  }
+  const auto uniform_switches_on = CountSpirvOpcode(uniform_on.spirv, spv::OpSwitch);
+  const auto uniform_switches_off = CountSpirvOpcode(uniform_off.spirv, spv::OpSwitch);
+  Require(name, "uniform format switch", uniform_switches_on < uniform_switches_off,
+          "a uniform table kept the runtime format switch");
+  Require(name, "uniform module size", uniform_on.spirv.size() < uniform_off.spirv.size(),
+          "a uniform table did not shrink the module");
+  Require(name, "mixed fallback", mixed_on.spirv == mixed_off.spirv,
+          "a mixed-format table changed when the specialization was enabled");
+  std::printf("TABLE_FORMATS uniform_off_words=%zu uniform_on_words=%zu saved_words=%zu "
+              "switches_off=%zu switches_on=%zu\n",
+              uniform_off.spirv.size(), uniform_on.spirv.size(),
+              uniform_off.spirv.size() - uniform_on.spirv.size(), uniform_switches_off, uniform_switches_on);
+  std::printf("[host]    %-32s ok\n", name);
 }
 
 // --bench-indirect-formatted [pairs] [repeats] [mode]: the GPU time of a chain of formatted loads through GPU-selected
@@ -45526,6 +45576,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--shader-shrink-bench") == 0) {
     CheckShaderShrinkBench();
     CheckHalfOutlineBench();
+    CheckTableFormatSpecialization();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--thread-dimensions-only") == 0) {

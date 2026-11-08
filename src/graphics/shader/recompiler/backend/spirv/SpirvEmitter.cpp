@@ -334,6 +334,23 @@ void SetSpirvHalfOutlineOverride(std::optional<bool> enabled) {
 }
 
 namespace {
+std::atomic_int g_table_formats_override {-1};
+} // namespace
+
+bool SpirvTableFormatsEnabled() {
+	static const bool environment = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_PERF_TABLE_FORMATS");
+		return value != nullptr && value[0] == '1';
+	}();
+	const auto forced = g_table_formats_override.load(std::memory_order_relaxed);
+	return forced < 0 ? environment : forced != 0;
+}
+
+void SetSpirvTableFormatsOverride(std::optional<bool> enabled) {
+	g_table_formats_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
+}
+
+namespace {
 std::atomic_bool g_formatted_switch_reference {false};
 } // namespace
 

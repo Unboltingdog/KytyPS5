@@ -2231,10 +2231,37 @@ uint32_t LoadIndirectFormattedTable(ValueEmitContext& ctx, const IndirectBufferA
 	return ConstructU32Composite(state, channels, values);
 }
 
+Prospero::BufferFormat SpecializedIndirectTableFormat(const EmitterState& state, const IR::MemoryInfo& mem) {
+	using F = Prospero::BufferFormat;
+	if (mem.kind != IR::ResourceKind::IndirectBuffer || mem.resource >= state.program.info.buffers.size()) {
+		return F::kInvalid;
+	}
+	const auto& binding = state.program.info.buffers[mem.resource];
+	if (binding.indirect_root == IR::BufferResource::NoIndirectBuffer ||
+	    binding.indirect_root >= state.program.info.buffers.size()) {
+		return F::kInvalid;
+	}
+	const auto& root = state.program.info.buffers[binding.indirect_root];
+	auto format = F::kInvalid;
+	for (const auto index: root.indirect_resources) {
+		if (index >= state.program.info.buffers.size()) return F::kInvalid;
+		const auto candidate = state.program.info.buffers[index].descriptor_format;
+		// An invalid V# is all zero words: DST_SEL selects no memory, so any format gives the same zero result.
+		if (candidate == F::kInvalid) continue;
+		if (format == F::kInvalid) {
+			format = candidate;
+		} else if (format != candidate) {
+			return F::kInvalid;
+		}
+	}
+	return format;
+}
+
 // The whole formatted load through a GPU-selected descriptor: `channels`
 // DST_SEL channels of word 3 as `components` result dwords (D16: two 16-bit channels per dword, low first).
 uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBufferAccess& buffer, uint32_t word3,
-                                     uint32_t channels, uint32_t components, bool d16) {
+                                     uint32_t channels, uint32_t components, bool d16,
+                                     Prospero::BufferFormat table_format = Prospero::BufferFormat::kInvalid) {
 	auto&                   state      = ctx.state;
 	std::array<uint32_t, 4> selector   {};
 	std::array<uint32_t, 4> memory     {};
@@ -2289,7 +2316,10 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 			                                                           any_memory, d16);
 		                       });
 	};
-	const auto values = SpirvFormattedSwitchReference() ? format_switch() : cases();
+	const auto values = table_format != Prospero::BufferFormat::kInvalid
+	                        ? LoadIndirectFormattedElement(ctx, buffer, Format::GetFormatInfo(table_format), channels,
+	                                                     selector, memory, one, any_memory, d16)
+	                        : SpirvFormattedSwitchReference() ? format_switch() : cases();
 	if (!d16) return values;
 	std::array<uint32_t, 4> channel_values {values};
 	for (uint32_t channel = 0; channel < channels && channels > 1u; ++channel) {
@@ -2365,6 +2395,12 @@ uint32_t CallIndirectFormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, 
 	auto&       state  = ctx.state;
 	const auto& handle = *inst.Arg(0).ResolveInstruction();
 	const auto  word3  = ctx.Arg(handle, 3);
+	const auto table_format = SpirvTableFormatsEnabled() ? SpecializedIndirectTableFormat(state, ctx.Memory(inst))
+	                                                     : Prospero::BufferFormat::kInvalid;
+	if (table_format != Prospero::BufferFormat::kInvalid) {
+		return LoadIndirectFormattedVector(ctx, PrepareIndirectBuffer(ctx, inst), word3, channels, components, d16,
+		                                   table_format);
+	}
 	const auto  found  = state.indirect_formatted_load_functions.find(IndirectFormattedLoadKey(channels, components, d16));
 	if (found == state.indirect_formatted_load_functions.end() || found->second == 0u) {
 		return LoadIndirectFormattedVector(ctx, PrepareIndirectBuffer(ctx, inst), word3, channels, components, d16);
@@ -2524,7 +2560,8 @@ uint32_t LoadIndirectFormatted(ValueEmitContext& ctx, const IR::Inst& inst, uint
 
 // Compute stages (RobustBuffer): this load is a function call with no inline path, so the exec branch around it can go (IndirectCallWord3).
 bool IndirectFormattedCallTakesGuard(const EmitterState& state, uint32_t channels, uint32_t components, bool d16) {
-	if (!state.guardless) return false;
+	// Table-format specialization may inline a load for which a shape function also exists.
+	if (!state.guardless || SpirvTableFormatsEnabled()) return false;
 	// (KYTY_PERF_INDIRECT_LOAD_FAST's inline case of a listed shader reads memory with word 3 as it is.)
 	if (IndirectLoadFast::Mode() != 0 && d16 && channels == 4u && components == 2u &&
 	    IndirectLoadFast::Listed(state.program.shader_hash)) {
