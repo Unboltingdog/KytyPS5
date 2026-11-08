@@ -6,6 +6,8 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <optional>
+#include <span>
+#include <string_view>
 #include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
@@ -27,6 +29,12 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
                                   uint32_t       push_data_start_dword = 0,
                                   const Profile& profile               = DefaultProfile,
                                   bool           emit_debug_info       = false);
+
+// KYTY_DIAG_DUMP_SHADER=<guest hex>: one targeted native-IR/helper report, thread-local while EmitProgram runs.
+void BeginShaderDump(uint64_t guest_address);
+void NoteShaderMemoryHelper(std::string_view helper);
+void NoteShaderIndexSwitch(uint32_t cases);
+void EndShaderDump(const IR::Program& program, std::span<const uint32_t> spirv);
 
 // Optional image features of the device, set once by the device layer.
 struct HostImageFeatures {

@@ -74,6 +74,8 @@ inline constexpr const char* Names[] = {
 
 // Sorted (strcmp order; checked below).
 inline constexpr const char* OutputOnlyNames[] = {
+    // Native IR and memory-helper statistics of one guest shader address.
+    "KYTY_DIAG_DUMP_SHADER",
     // Precompiler report, no module made.
     "KYTY_DIAG_PRECOMPILE_FILE_MATCH",
     // Whether a dispatch is sent (shader.cpp); the translation is the same.

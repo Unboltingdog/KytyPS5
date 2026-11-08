@@ -1191,6 +1191,7 @@ auto EmitImageAccess(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t resul
 } // namespace
 
 void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
+	NoteShaderMemoryHelper("EmitImage");
 	const auto op         = inst.GetOpcode();
 	const auto image_info = IR::ImageOpcodeInfoOf(op);
 	auto&       state     = ctx.state;

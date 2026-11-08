@@ -3684,33 +3684,47 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto buffer_components = IR::BufferComponentCount(op);
 	const auto shared_components = IR::SharedComponentCount(op);
 	const auto address_info      = IR::AddressOpcodeInfoOf(op);
+	const char* helper = "LoadWord";
 	uint32_t   value;
-	if (mem.kind == IR::ResourceKind::FlatLocal)
+	if (mem.kind == IR::ResourceKind::FlatLocal) {
+		helper = "LoadLocalFlat";
 		value = LoadLocalFlat(ctx, inst);
-	else if (buffer_components > 1u || (buffer_components == 1u && mem.formatted && mem.data_bits == 16u) ||
-	         (buffer_components == 1u && mem.kind == IR::ResourceKind::IndirectBuffer && !mem.formatted &&
-	          inst.GetType() != IR::Type::U8 && inst.GetType() != IR::Type::U16))
+	} else if (buffer_components > 1u || (buffer_components == 1u && mem.formatted && mem.data_bits == 16u) ||
+	           (buffer_components == 1u && mem.kind == IR::ResourceKind::IndirectBuffer && !mem.formatted &&
+	            inst.GetType() != IR::Type::U8 && inst.GetType() != IR::Type::U16)) {
+		helper = mem.kind == IR::ResourceKind::IndirectBuffer
+		             ? (mem.formatted ? "LoadIndirectFormatted" : "LoadIndirectBuffer")
+		             : "LoadBuffer";
 		value = LoadBuffer(ctx, inst, buffer_components);
-	else if (shared_components > 1u)
+	} else if (shared_components > 1u) {
+		helper = "LoadWideShared";
 		value = LoadWideShared(ctx, inst, shared_components);
-	else if (mem.kind == IR::ResourceKind::ScalarAddress)
+	} else if (mem.kind == IR::ResourceKind::ScalarAddress) {
+		helper = "LoadBdaDword";
 		value = LoadBdaDword(ctx, GuestAddress(ctx, inst, mem));
-	else if (address_info.access == IR::AddressAccess::Read &&
-	         mem.kind != IR::ResourceKind::Scratch)
+	} else if (address_info.access == IR::AddressAccess::Read &&
+	           mem.kind != IR::ResourceKind::Scratch) {
+		helper = "LoadBda";
 		value = LoadBda(ctx, GuestAddress(ctx, inst, mem), ctx.Arg(inst, inst.NumArgs() - 1),
 		                address_info.data_bits, mem.coherent);
-	else if (op == IR::ValueOpcode::LoadBufferU32 && mem.formatted)
+	} else if (op == IR::ValueOpcode::LoadBufferU32 && mem.formatted) {
+		helper = mem.kind == IR::ResourceKind::IndirectBuffer ? "LoadIndirectFormattedX" : "FormattedLoad";
 		value = mem.kind == IR::ResourceKind::IndirectBuffer ? LoadIndirectFormattedX(ctx, inst)
 		                                                     : FormattedLoad(ctx, inst, mem);
-	else if (mem.kind == IR::ResourceKind::IndirectBuffer &&
-	         (inst.GetType() == IR::Type::U8 || inst.GetType() == IR::Type::U16))
+	} else if (mem.kind == IR::ResourceKind::IndirectBuffer &&
+	           (inst.GetType() == IR::Type::U8 || inst.GetType() == IR::Type::U16)) {
+		helper = "LoadIndirectSubword";
 		value = LoadIndirectSubword(ctx, inst, inst.GetType() == IR::Type::U8 ? 8u : 16u);
-	else if (inst.GetType() == IR::Type::U8)
+	} else if (inst.GetType() == IR::Type::U8) {
+		helper = "LoadSubword8";
 		value = LoadSubword(ctx, inst, mem, 8, false);
-	else if (inst.GetType() == IR::Type::U16)
+	} else if (inst.GetType() == IR::Type::U16) {
+		helper = "LoadSubword16";
 		value = LoadSubword(ctx, inst, mem, 16, false);
-	else
+	} else {
 		value = LoadWord(ctx, inst, mem);
+	}
+	NoteShaderMemoryHelper(helper);
 	ctx.Define(inst, value);
 	if (mem.kind == IR::ResourceKind::Lds) ctx.state.lds_pair_synced = false; // (EmitPairLdsWriteSync)
 }
@@ -3721,29 +3735,43 @@ void EmitStoreMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto  buffer_components = IR::BufferComponentCount(op);
 	const auto  shared_components = IR::SharedComponentCount(op);
 	const auto  type              = inst.Arg(inst.NumArgs() - 2).GetType();
+	const char* helper            = "StoreWord";
 	EmitPairLdsWriteSync(ctx.state, mem, true);
-	if (mem.kind == IR::ResourceKind::FlatLocal)
+	const auto formatted = IndirectFormattedStoreComponents(inst, mem);
+	if (mem.kind == IR::ResourceKind::FlatLocal) {
+		helper = "StoreLocalFlat";
 		StoreLocalFlat(ctx, inst);
-	else if (const auto formatted = IndirectFormattedStoreComponents(inst, mem); formatted != 0u)
+	} else if (formatted != 0u) {
+		helper = "StoreIndirectFormatted";
 		StoreIndirectFormatted(ctx, inst, formatted); // record-keyed: record-keyed formatted stores
-	else if (mem.kind == IR::ResourceKind::IndirectBuffer && mem.formatted)
+	} else if (mem.kind == IR::ResourceKind::IndirectBuffer && mem.formatted) {
+		helper = "UnresolvedFormattedStore";
 		ctx.Fail(inst, "formatted store through an unresolved descriptor"); // tracking stops such a store first
-	else if (mem.kind == IR::ResourceKind::IndirectBuffer && (type == IR::Type::U8 || type == IR::Type::U16))
+	} else if (mem.kind == IR::ResourceKind::IndirectBuffer && (type == IR::Type::U8 || type == IR::Type::U16)) {
+		helper = "StoreIndirectSubword";
 		StoreIndirectSubword(ctx, inst, type == IR::Type::U8 ? 8u : 16u);
-	else if (mem.kind == IR::ResourceKind::IndirectBuffer)
+	} else if (mem.kind == IR::ResourceKind::IndirectBuffer) {
+		helper = "StoreIndirectBuffer";
 		StoreIndirectBuffer(ctx, inst, std::max(buffer_components, 1u));
-	else if (buffer_components > 1u)
+	} else if (buffer_components > 1u) {
+		helper = "StoreWideBuffer";
 		StoreWideBuffer(ctx, inst, buffer_components);
-	else if (shared_components > 1u)
+	} else if (shared_components > 1u) {
+		helper = "StoreWideShared";
 		StoreWideShared(ctx, inst, shared_components);
-	else if (op == IR::ValueOpcode::StoreBufferU32 && mem.formatted)
+	} else if (op == IR::ValueOpcode::StoreBufferU32 && mem.formatted) {
+		helper = "FormattedStore";
 		FormattedStore(ctx, inst, mem);
-	else if (type == IR::Type::U8)
+	} else if (type == IR::Type::U8) {
+		helper = "StoreSubword8";
 		StoreSubword(ctx, inst, mem, 8);
-	else if (type == IR::Type::U16)
+	} else if (type == IR::Type::U16) {
+		helper = "StoreSubword16";
 		StoreSubword(ctx, inst, mem, 16);
-	else
+	} else {
 		StoreWord(ctx, inst, mem);
+	}
+	NoteShaderMemoryHelper(helper);
 	EmitPairLdsWriteSync(ctx.state, mem, false);
 }
 

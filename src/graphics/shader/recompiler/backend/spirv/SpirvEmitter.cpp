@@ -11,11 +11,37 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fmt/format.h>
+#include <map>
+#include <mutex>
 #include <optional>
+#include <string>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
 
 namespace {
+
+struct TargetedShaderDump {
+	bool                           active = false;
+	uint64_t                       guest = 0;
+	std::map<std::string, uint64_t> memory_helpers;
+	uint64_t                       index_switches = 0;
+	uint64_t                       index_switch_cases = 0;
+	uint64_t                       max_switch_cases = 0;
+};
+
+thread_local TargetedShaderDump t_shader_dump;
+std::mutex                    g_shader_dump_file_mutex;
+bool                          g_shader_dump_file_written = false;
+
+uint64_t ShaderDumpTarget() {
+	static const uint64_t target = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_DIAG_DUMP_SHADER");
+		return value == nullptr ? 0ull : std::strtoull(value, nullptr, 16);
+	}();
+	return target;
+}
 
 [[noreturn]] void Fail(const IR::Program& program, const char* reason) {
 	EXIT("SPIR-V validation failed: hash=0x%016" PRIx64 " stage=%u reason=%s\n",
@@ -276,6 +302,66 @@ bool SpirvFormattedSwitchReference() {
 
 void SetSpirvFormattedSwitchReference(bool enabled) {
 	g_formatted_switch_reference.store(enabled, std::memory_order_relaxed);
+}
+
+void BeginShaderDump(uint64_t guest_address) {
+	t_shader_dump = {};
+	t_shader_dump.guest = guest_address;
+	t_shader_dump.active = guest_address != 0 && guest_address == ShaderDumpTarget();
+}
+
+void NoteShaderMemoryHelper(std::string_view helper) {
+	if (t_shader_dump.active) t_shader_dump.memory_helpers[std::string(helper)]++;
+}
+
+void NoteShaderIndexSwitch(uint32_t cases) {
+	if (!t_shader_dump.active) return;
+	t_shader_dump.index_switches++;
+	t_shader_dump.index_switch_cases += cases;
+	t_shader_dump.max_switch_cases = std::max(t_shader_dump.max_switch_cases, static_cast<uint64_t>(cases));
+}
+
+void EndShaderDump(const IR::Program& program, std::span<const uint32_t> spirv) {
+	if (!t_shader_dump.active) return;
+	std::array<uint64_t, static_cast<size_t>(IR::ValueOpcode::Count)> opcode_counts {};
+	uint64_t instructions = 0;
+	for (const auto* block: program.blocks) {
+		for (const auto& inst: *block) {
+			opcode_counts[static_cast<size_t>(inst.GetOpcode())]++;
+			instructions++;
+		}
+	}
+	const auto path = fmt::format("_Logs/shader-{:016x}.txt", t_shader_dump.guest);
+	auto text = fmt::format(
+	    "guest=0x{:016x} shader_hash=0x{:016x} stage={} blocks={} instructions={} dispatcher_fallback={} "
+	    "scratch_dwords={} spirv_words={} index_switches={} index_switch_cases={} max_switch_cases={}\n",
+	    t_shader_dump.guest, program.shader_hash, static_cast<uint32_t>(program.stage), program.blocks.size(),
+	    instructions, program.dispatcher_fallback ? 1 : 0, program.scratch_dwords, spirv.size(),
+	    t_shader_dump.index_switches, t_shader_dump.index_switch_cases, t_shader_dump.max_switch_cases);
+	for (size_t index = 0; index < opcode_counts.size(); index++) {
+		if (opcode_counts[index] == 0) continue;
+		text += fmt::format("IR_OPCODE {} {}\n", IR::ValueOpcodeName(static_cast<IR::ValueOpcode>(index)),
+		                    opcode_counts[index]);
+	}
+	for (const auto& [helper, count]: t_shader_dump.memory_helpers) {
+		text += fmt::format("MEMORY_HELPER {} {}\n", helper, count);
+	}
+	std::lock_guard lock(g_shader_dump_file_mutex);
+	std::error_code error;
+	std::filesystem::create_directories("_Logs", error);
+	const char* mode = g_shader_dump_file_written ? "a" : "w";
+	if (std::FILE* file = std::fopen(path.c_str(), mode); file != nullptr) {
+		std::fwrite(text.data(), 1, text.size(), file);
+		std::fclose(file);
+		g_shader_dump_file_written = true;
+		std::fprintf(stderr, "SHADER_IR_STATS guest=0x%016llx file=%s\n",
+		             static_cast<unsigned long long>(t_shader_dump.guest), path.c_str());
+	} else {
+		std::fprintf(stderr, "SHADER_IR_STATS guest=0x%016llx file_error=%s\n",
+		             static_cast<unsigned long long>(t_shader_dump.guest), path.c_str());
+	}
+	std::fflush(stderr);
+	t_shader_dump = {};
 }
 
 std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo input_info,
