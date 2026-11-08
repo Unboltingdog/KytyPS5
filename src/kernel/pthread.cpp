@@ -23,6 +23,7 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <memory>
@@ -382,6 +383,7 @@ struct PthreadMutexPrivate {
 	int                     pprotocol = PTHREAD_PRIO_NONE;
 	Waiter*                 first_waiter = nullptr;
 	Waiter*                 last_waiter  = nullptr;
+	uint64_t                lock_caller  = 0; // guest caller of the lock that made the current owner own it
 };
 
 struct PthreadMutexattrPrivate {
@@ -1322,8 +1324,9 @@ static int NativeMutexLock(PthreadMutexPrivate* mutex, KernelUseconds* timeout_u
 	}
 
 	if (mutex->owner == nullptr) {
-		mutex->owner = self;
-		mutex->count = 1;
+		mutex->owner       = self;
+		mutex->count       = 1;
+		mutex->lock_caller = 0;
 		return OK;
 	}
 	if (timeout_us != nullptr && *timeout_us == 0) {
@@ -1390,8 +1393,9 @@ static int NativeMutexTrylock(PthreadMutexPrivate* mutex) {
 		return EBUSY;
 	}
 
-	mutex->owner = self;
-	mutex->count = 1;
+	mutex->owner       = self;
+	mutex->count       = 1;
+	mutex->lock_caller = 0;
 	return OK;
 }
 
@@ -1815,6 +1819,25 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex, uint64_t caller) {
 	int result = NativeMutexLock(*mutex, nullptr);
 
 	// LOGF("\tmutex lock: %s, %d\n", (*mutex)->name.c_str(), result);
+
+	if (Common::GuestWaits::Enabled()) {
+		const uint64_t this_caller = caller != 0 ? caller : reinterpret_cast<uint64_t>(__builtin_return_address(0));
+		if (result == 0 && (*mutex)->count == 1) {
+			(*mutex)->lock_caller = this_caller;
+		} else if (result == EDEADLK) {
+			// The thread already owns this non-recursive mutex: say which mutex and where it took it.
+			static std::atomic<int> reported {0};
+			if (reported.fetch_add(1, std::memory_order_relaxed) < 32) {
+				std::fprintf(stderr,
+				             "MUTEX_SELF_DEADLOCK mutex=%s@%p type=%d count=%u caller=%s owned_since=%s thread=%s\n",
+				             (*mutex)->name.empty() ? "-" : (*mutex)->name.c_str(), static_cast<void*>(mutex),
+				             (*mutex)->type, (*mutex)->count, Loader::DescribeGuestCaller(this_caller).c_str(),
+				             (*mutex)->lock_caller != 0 ? Loader::DescribeGuestCaller((*mutex)->lock_caller).c_str()
+				                                        : "trylock/timedlock/cond-reacquire",
+				             g_pthread_self != nullptr ? g_pthread_self->name.c_str() : "-");
+			}
+		}
+	}
 
 	switch (result) {
 		case 0: return OK;
