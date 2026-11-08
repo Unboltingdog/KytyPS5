@@ -18,6 +18,8 @@ void DumpShaderOriginal(const char* stage_name, uint64_t shader_hash, std::span<
 bool ValidateShaderSpirv(const char* label, uint64_t shader_hash, const std::vector<uint32_t>& spirv, bool maintenance8_enabled);
 // KYTY_TRACE_SPIRV_ALL_DIR, KYTY_TRACE_SHADER_CODE_DIR: the emitted module.
 void DumpModule(const char* stage_name, uint64_t shader_hash, const std::vector<uint32_t>& spirv);
+// KYTY_DIAG_DUMP_SPIRV_MIN_BYTES: _Logs/spirv, once per module hash before any driver call.
+void DumpBigSpirv(const char* stage_name, uint64_t guest_address, const std::vector<uint32_t>& spirv);
 // KYTY_DIAG_SPIRV_REPLACE: changes `spirv` for the listed shader.
 void ReplaceSpirv(uint64_t shader_hash, std::vector<uint32_t>& spirv);
 // KYTY_TRACE_SPIRV_TEXT.

@@ -15,8 +15,10 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <xxhash.h>
 
 // The shader dumps and traces of the pipeline cache's compile path: every one is off unless its name is set (a compile is
@@ -134,6 +136,34 @@ void DumpModule(const char* stage_name, uint64_t shader_hash, const std::vector<
 			std::fclose(f);
 		}
 	}
+}
+
+void DumpBigSpirv(const char* stage_name, uint64_t guest_address, const std::vector<uint32_t>& spirv) {
+	static const size_t min_bytes = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_DIAG_DUMP_SPIRV_MIN_BYTES");
+		return value != nullptr ? static_cast<size_t>(std::strtoull(value, nullptr, 10)) : size_t {0};
+	}();
+	const size_t byte_size = spirv.size() * sizeof(uint32_t);
+	if (min_bytes == 0 || byte_size < min_bytes || byte_size > UINT32_MAX) return;
+	const uint64_t spirv_hash = XXH3_64bits(spirv.data(), byte_size);
+	static std::mutex                dumped_mutex;
+	static std::unordered_set<uint64_t> dumped;
+	{
+		std::lock_guard lock(dumped_mutex);
+		if (!dumped.insert(spirv_hash).second) return;
+	}
+	const auto path = std::filesystem::path("_Logs") / "spirv" /
+	                  fmt::format("0x{:016x}-{:016x}-{}.spv", guest_address, spirv_hash, stage_name);
+	Common::File::CreateDirectories(path.parent_path());
+	Common::File file(path);
+	uint32_t written = 0;
+	const uint32_t bytes = static_cast<uint32_t>(byte_size);
+	if (!file.IsInvalid()) file.Write(spirv.data(), bytes, &written);
+	const bool ok = !file.IsInvalid() && written == bytes && file.Flush();
+	file.Close();
+	const auto path_text = Common::PathToString(path);
+	std::fprintf(stderr, ok ? "SPIRV_DUMP file=%s\n" : "SPIRV_DUMP_ERROR file=%s\n", path_text.c_str());
+	std::fflush(stderr);
 }
 
 void ReplaceSpirv(uint64_t shader_hash, std::vector<uint32_t>& spirv) {

@@ -13,6 +13,7 @@
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCacheTrace.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCompileDiag.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/shaderCompiler.h"
@@ -2373,6 +2374,7 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 	const double compile_ms = MillisecondsSince(compile_begin);
 	spirv_words           = result.spirv.size();
 	const auto spirv_hash = XXH3_64bits(result.spirv.data(), result.spirv.size() * sizeof(uint32_t));
+	PipelineTrace::DumpBigSpirv(StageName(record.stage), 0, result.spirv);
 	if (record.revision == Revision() && spirv_hash != record.spirv_hash) {
 		// The same build made other SPIR-V from the recorded inputs: an input is missing from the record (or a
 		// SPIR-V-changing KYTY_ switch differs from the recording run).

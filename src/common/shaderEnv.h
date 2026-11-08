@@ -85,6 +85,8 @@ inline constexpr const char* Names[] = {
 inline constexpr const char* OutputOnlyNames[] = {
     // Native IR and memory-helper statistics of one guest shader address.
     "KYTY_DIAG_DUMP_SHADER",
+    // Size-gated SPIR-V files of game and precompiler stages.
+    "KYTY_DIAG_DUMP_SPIRV_MIN_BYTES",
     // Precompiler report, no module made.
     "KYTY_DIAG_PRECOMPILE_FILE_MATCH",
     // Whether a dispatch is sent (shader.cpp); the translation is the same.

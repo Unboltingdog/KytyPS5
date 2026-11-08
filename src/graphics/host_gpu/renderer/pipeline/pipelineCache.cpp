@@ -570,6 +570,7 @@ struct PipelineCache::ProgramCache {
 		if (std::FILE* f = Common::EnvRead::ShaderStagesFile()) { std::fprintf(f, "STAGE emitted 0x%016llx%s\n", static_cast<unsigned long long>(options.shader_hash), fmt::format(" words={}", result.spirv.size()).c_str()); std::fclose(f); }
 		PipelineTrace::DumpModule(stage_name, options.shader_hash, result.spirv);
 		PipelineTrace::ReplaceSpirv(options.shader_hash, result.spirv);
+		PipelineTrace::DumpBigSpirv(stage_name, options.guest_address, result.spirv);
 		if (!PipelineTrace::ValidateShaderSpirv(options.dump_label, options.shader_hash, result.spirv,
 		                         options.profile->maintenance8)) {
 			PipelineTrace::DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
