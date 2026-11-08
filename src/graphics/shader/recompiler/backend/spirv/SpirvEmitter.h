@@ -59,6 +59,7 @@ struct HostFloatFeatures {
 	bool hardware_nan = false;
 	bool native_isnan = false;
 	bool native_minmax = false;
+	bool native_mix = false;
 };
 
 void              SetHostFloatFeatures(const HostFloatFeatures& features);

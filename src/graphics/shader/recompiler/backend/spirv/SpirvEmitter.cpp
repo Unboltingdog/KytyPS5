@@ -265,6 +265,7 @@ std::atomic_bool g_hardware_float_ops {false};
 std::atomic_bool g_hardware_nan {false};
 std::atomic_bool g_native_isnan {false};
 std::atomic_bool g_native_minmax {false};
+std::atomic_bool g_native_mix {false};
 } // namespace
 
 void SetHostFloatFeatures(const HostFloatFeatures& features) {
@@ -275,6 +276,7 @@ void SetHostFloatFeatures(const HostFloatFeatures& features) {
 	g_hardware_nan.store(features.hardware_nan, std::memory_order_relaxed);
 	g_native_isnan.store(features.native_isnan, std::memory_order_relaxed);
 	g_native_minmax.store(features.native_minmax, std::memory_order_relaxed);
+	g_native_mix.store(features.native_mix, std::memory_order_relaxed);
 }
 
 HostFloatFeatures GetHostFloatFeatures() {
@@ -284,7 +286,8 @@ HostFloatFeatures GetHostFloatFeatures() {
 	        .hardware_float_ops = g_hardware_float_ops.load(std::memory_order_relaxed),
 	        .hardware_nan       = g_hardware_nan.load(std::memory_order_relaxed),
 	        .native_isnan       = g_native_isnan.load(std::memory_order_relaxed),
-	        .native_minmax      = g_native_minmax.load(std::memory_order_relaxed)};
+	        .native_minmax      = g_native_minmax.load(std::memory_order_relaxed),
+	        .native_mix         = g_native_mix.load(std::memory_order_relaxed)};
 }
 
 namespace {

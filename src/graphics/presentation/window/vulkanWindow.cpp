@@ -655,11 +655,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		const char* no_amd_f16 = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_F16");
 		const char* no_amd_isnan = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_ISNAN");
 		const char* no_amd_minmax = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_MINMAX");
+		const char* no_amd_mix = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_MIX");
 		const bool amd_hardware_float_ops = no_amd_float_ops == nullptr || no_amd_float_ops[0] != '1';
 		const bool amd_hardware_nan = no_amd_nan == nullptr || no_amd_nan[0] != '1';
 		const bool amd_native_f16 = amd && (no_amd_f16 == nullptr || no_amd_f16[0] != '1');
 		const bool amd_native_isnan = no_amd_isnan == nullptr || no_amd_isnan[0] != '1';
 		const bool amd_native_minmax = no_amd_minmax == nullptr || no_amd_minmax[0] != '1';
+		const bool amd_native_mix = no_amd_mix == nullptr || no_amd_mix[0] != '1';
 		const bool float16 =
 		    (properties2.properties.vendorID == VendorNvidia || force_nvidia_f16 || amd_native_f16) &&
 		    supported_features12.shaderFloat16 == VK_TRUE &&
@@ -677,7 +679,8 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		                                               .hardware_float_ops = amd_hardware_float_ops,
 		                                               .hardware_nan = amd_hardware_nan,
 		                                               .native_isnan = amd_native_isnan,
-		                                               .native_minmax = amd_native_minmax});
+		                                               .native_minmax = amd_native_minmax,
+		                                               .native_mix = amd_native_mix});
 		LOGF("Vulkan exact f16 conversions in hardware: %s (shaderFloat16=%d denormPreserve16=%d rte16=%d nanPreserve16=%d "
 		     "denormIndependence=%d roundingIndependence=%d)\n",
 		     float16 ? (float16_with_float64 ? "true" : "true (not with float64)") : "false",

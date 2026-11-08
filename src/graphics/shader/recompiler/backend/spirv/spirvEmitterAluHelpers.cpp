@@ -721,6 +721,8 @@ uint32_t EmitHalfPkSaturate(EmitterState& state, uint32_t a) { return EmitHalfOp
 // FMA, both f16 operands exhaustive in pairs, the f32 one hashed over all bit patterns): 0 differences.
 uint32_t EmitHalfToF32Arith(EmitterState& state, uint32_t bits) {
 	if (!NativeExactHalf(state)) return EmitF16BitsToF32(state, bits);
+	const auto features = GetHostFloatFeatures();
+	if (features.amd && !features.native_mix) return EmitF16BitsToF32(state, bits);
 	const auto low = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeF16(state), low, HalvesOf(state, bits), 0);
 	return Unary(state, spv::OpFConvert, TypeF32(state), low);
@@ -728,6 +730,8 @@ uint32_t EmitHalfToF32Arith(EmitterState& state, uint32_t bits) {
 
 uint32_t EmitF32ToHalfArith(EmitterState& state, uint32_t f32) {
 	if (!NativeExactHalf(state)) return EmitF32ToF16Bits(state, f32);
+	const auto features = GetHostFloatFeatures();
+	if (features.amd && !features.native_mix) return EmitF32ToF16Bits(state, f32);
 	const auto pair = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 2), pair, f32, ConstantF32(state, 0));
 	return Unary(state, spv::OpBitcast, TypeU32(state), Unary(state, spv::OpFConvert, TypeF16Pair(state), pair)); // high half 0
