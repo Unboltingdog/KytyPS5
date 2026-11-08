@@ -1202,6 +1202,12 @@ int main(int argc, char** argv) {
 	}
 	if (device_selected) device_index = static_cast<int>(device);
 	if (!child_path.empty()) return RunChild(child_path, device_index, no_cache);
+	// Double-clicked with no arguments: time every .spv in spvbench_in next to the executable.
+	if (inputs.empty() && child_path.empty()) {
+		const auto folder = std::filesystem::path(executable).parent_path() / "spvbench_in";
+		std::error_code exists_error;
+		if (std::filesystem::is_directory(folder, exists_error)) inputs.emplace_back(folder.string());
+	}
 	if (inputs.empty() || timeout_seconds == 0 || timeout_seconds > UINT32_MAX / 1000u || repeat == 0 || repeat > 100000) {
 		Usage();
 		return 2;
