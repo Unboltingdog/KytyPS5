@@ -1564,6 +1564,17 @@ BufferId BufferCache::DirectBufferFor(uint64_t vaddr, uint64_t size) {
 	const uint64_t end = vaddr + size;
 	for (auto& range: m_direct_ranges) {
 		if (range.refused || end <= range.start || vaddr >= range.end) continue;
+		if (CommandScheduler::InDeferredOperation() &&
+		    (!range.active || vaddr < range.start || end > range.end)) {
+			// Growing or activating a range waits for the GPU (Finish), which a deferred scheduler operation such as
+			// GPU fault processing must not do: it would wait on itself. Use an ordinary buffer for this request.
+			static std::atomic_uint logged_deferred {0};
+			if (logged_deferred.fetch_add(1) < 8u) {
+				std::fprintf(stderr, "PERF_DIRECT_RANGES deferred request 0x%llx+0x%llx uses an ordinary buffer\n",
+				             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(size));
+			}
+			return {};
+		}
 		if (vaddr < range.start || end > range.end) {
 			// A request reaching past the range: the range grows to hold it (a direct buffer is never joined).
 			DeactivateDirect(range, false);
