@@ -1652,6 +1652,89 @@ void CheckShaderShrinkBench() {
   std::printf("[host]    %-32s ok\n", name);
 }
 
+void CheckHalfOutlineBench() {
+  constexpr const char *name = "HalfOutlineBench";
+  using namespace ShaderRecompiler;
+  constexpr u32 iterations = 25;
+  constexpr u32 conversion_instructions = 4 * iterations;
+  constexpr u32 scalar_calls = 6 * iterations;
+  const auto compile = [] {
+    using namespace ShaderRecompiler;
+    IR::Program program;
+    program.stage = ShaderType::Compute;
+    program.wave_size = 32u;
+    program.shader_hash = 0x18c0u;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    program.shader_info_complete = true;
+    program.info.inputs.push_back(
+        {IR::StageInputKind::LocalInvocationId, 0, 3, "gl_LocalInvocationID"});
+    auto *block = program.block_storage.emplace_back(std::make_unique<IR::Block>()).get();
+    program.blocks.push_back(block);
+    block->terminator.kind = CFG::TerminatorKind::Return;
+    const auto emit = [&](IR::ValueOpcode opcode,
+                          std::initializer_list<IR::Value> args) {
+      return IR::Value(&block->AppendNewInst(opcode, args));
+    };
+    const auto raw = emit(IR::ValueOpcode::GetBuiltin,
+                          {IR::Value(static_cast<u32>(IR::StageInputKind::LocalInvocationId)),
+                           IR::Value(0u)});
+    const auto half_input = emit(
+        IR::ValueOpcode::BitCastF16U16,
+        {emit(IR::ValueOpcode::ConvertU16U32, {raw})});
+    auto bits = raw;
+    for (u32 index = 0; index < iterations; index++) {
+      const auto value = emit(IR::ValueOpcode::ConvertF32F16, {half_input});
+      (void)emit(IR::ValueOpcode::ConvertF16F32, {value});
+      const auto pair = emit(IR::ValueOpcode::CompositeConstructF32x2, {value, value});
+      const auto packed = emit(IR::ValueOpcode::PackHalf2x16, {pair});
+      const auto rtz = emit(IR::ValueOpcode::PackFloat2x16Rtz, {value, value});
+      bits = emit(IR::ValueOpcode::IAdd32, {packed, rtz});
+      bits = emit(IR::ValueOpcode::IAdd32, {bits, raw});
+    }
+    ShaderComputeInputInfo compute{};
+    compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
+    compute.host_subgroup_size = 32;
+    return Spirv::EmitProgram(program, {.compute = &compute});
+  };
+
+  const auto previous_features = Spirv::GetHostFloatFeatures();
+  Spirv::SetHostFloatFeatures({});
+  Spirv::SetSpirvHalfOutlineOverride(false);
+  const auto off = compile();
+  Spirv::SetSpirvHalfOutlineOverride(true);
+  const auto on = compile();
+  Spirv::SetSpirvHalfOutlineOverride(std::nullopt);
+  ValidateSpirv(name, off);
+  ValidateSpirv(name, on);
+  const auto added_calls = CountSpirvOpcode(on, spv::OpFunctionCall) -
+                           CountSpirvOpcode(off, spv::OpFunctionCall);
+  const auto added_functions = CountSpirvOpcode(on, spv::OpFunction) -
+                               CountSpirvOpcode(off, spv::OpFunction);
+  Require(name, "one call per scalar conversion", added_calls == scalar_calls,
+          "the integer forms were not replaced at every scalar use");
+  Require(name, "one function per integer form", added_functions == 3u,
+          "the three integer conversion forms were not outlined exactly once");
+  Require(name, "outlined size", on.size() < off.size(),
+          "outlining did not shrink the 100-conversion module");
+  std::printf("HALF_OUTLINE conversion_instructions=%u scalar_calls=%u "
+              "outline_off_words=%zu outline_on_words=%zu saved_words=%zu\n",
+              conversion_instructions, scalar_calls, off.size(), on.size(),
+              off.size() - on.size());
+
+  Spirv::SetHostFloatFeatures({.exact_half = true, .exact_half_float64 = true});
+  Spirv::SetSpirvHalfOutlineOverride(false);
+  const auto native_off = compile();
+  Spirv::SetSpirvHalfOutlineOverride(true);
+  const auto native_on = compile();
+  Spirv::SetSpirvHalfOutlineOverride(std::nullopt);
+  Spirv::SetHostFloatFeatures(previous_features);
+  Require(name, "native-half path unchanged", native_off == native_on,
+          "the outlining switch changed a native-half module");
+  ValidateSpirv(name, native_on);
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckPixelParameterAliases() {
   constexpr const char *name = "PixelParameterAliases";
   ShaderPixelInputInfo pixel{};
@@ -45442,6 +45525,7 @@ int main(int argc, char **argv) {
   CheckLeastRecentlyUsedCacheOrdering();
   if (argc == 2 && std::strcmp(argv[1], "--shader-shrink-bench") == 0) {
     CheckShaderShrinkBench();
+    CheckHalfOutlineBench();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--thread-dimensions-only") == 0) {

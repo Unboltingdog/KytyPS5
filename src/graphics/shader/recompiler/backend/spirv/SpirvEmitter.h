@@ -67,6 +67,13 @@ HostFloatFeatures GetHostFloatFeatures();
 bool SpirvStoreOutlineEnabled();
 void SetSpirvStoreOutlineOverride(std::optional<bool> enabled);
 
+// KYTY_PERF_SPIRV_HALF_OUTLINE (default on; =0 off): each integer f16 <-> f32 conversion form is one
+// DontInline function per module, called per scalar component instead of expanded at every use. The instruction
+// bodies and results are unchanged. Native-half modules do not allocate or emit these helpers. The environment is
+// read once; tests may force both modes in one process (std::nullopt restores the environment).
+bool SpirvHalfOutlineEnabled();
+void SetSpirvHalfOutlineOverride(std::optional<bool> enabled);
+
 // A formatted load through a GPU-selected descriptor takes its own case for the 7 formats the game reads that way and
 // one table-driven read for every other format (spirvEmitterMemory.cpp, LoadIndirectFormattedVector and
 // LoadIndirectFormattedTable).

@@ -293,6 +293,26 @@ void SetSpirvStoreOutlineOverride(std::optional<bool> enabled) {
 }
 
 namespace {
+// -1: KYTY_PERF_SPIRV_HALF_OUTLINE decides; 0/1: forced by SetSpirvHalfOutlineOverride (tests).
+std::atomic_int g_half_outline_override {-1};
+} // namespace
+
+bool SpirvHalfOutlineEnabled() {
+	static const bool environment = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_PERF_SPIRV_HALF_OUTLINE");
+		const bool  on    = value == nullptr || value[0] != '0'; // default on (=0 off)
+		if (on) std::fprintf(stderr, "PERF_SPIRV_HALF_OUTLINE enabled\n");
+		return on;
+	}();
+	const auto forced = g_half_outline_override.load(std::memory_order_relaxed);
+	return forced < 0 ? environment : forced != 0;
+}
+
+void SetSpirvHalfOutlineOverride(std::optional<bool> enabled) {
+	g_half_outline_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
+}
+
+namespace {
 std::atomic_bool g_formatted_switch_reference {false};
 } // namespace
 

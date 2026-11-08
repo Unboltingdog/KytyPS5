@@ -26,7 +26,7 @@ uint32_t EmitCompareU32Constant(EmitterState& state, spv::Op opcode, uint32_t va
 	return ret;
 }
 
-uint32_t EmitF32ToF16RtzBits(EmitterState& state, uint32_t value) {
+static uint32_t EmitF32ToF16RtzBitsInline(EmitterState& state, uint32_t value) {
 	// Compact integer RTZ conversion (upstream 9f88043eb); bit-identical to the former one (same cases: subnormal shift
 	// capped at 31, RTZ overflow to max half, NaN keeps the top 10 payload bits with the quiet bit).
 	const auto bits = EmitBitcastF32ToU32(state, value);
@@ -63,6 +63,13 @@ uint32_t EmitF32ToF16RtzBits(EmitterState& state, uint32_t value) {
 	    state, TypeU32(state),
 	    EmitCompareU32Constant(state, spv::OpUGreaterThanEqual, abs, 0x7f800000u), special, finite);
 	return EmitOrU32(state, sign, magnitude);
+}
+
+uint32_t EmitF32ToF16RtzBits(EmitterState& state, uint32_t value) {
+	if (state.outlined_half_functions[static_cast<size_t>(OutlinedHalfHelper::F32ToF16Rtz)] != 0) {
+		return CallOutlinedHalfHelper(state, OutlinedHalfHelper::F32ToF16Rtz, {value});
+	}
+	return EmitF32ToF16RtzBitsInline(state, value);
 }
 
 F32Class EmitClassifyF32Bits(EmitterState& state, uint32_t bits) {
@@ -239,7 +246,7 @@ static uint32_t U32Const(EmitterState& state, uint32_t value) {
 }
 
 // Low 16 bits of `bits` as an IEEE half, converted exactly to float.
-static uint32_t ExactHalfToF32(EmitterState& state, uint32_t bits) {
+static uint32_t ExactHalfToF32Inline(EmitterState& state, uint32_t bits) {
 	const auto u32  = TypeU32(state);
 	const auto h    = Binary(state, spv::OpBitwiseAnd, u32, bits, U32Const(state, 0xffffu));
 	const auto sign = Binary(state, spv::OpShiftLeftLogical, u32,
@@ -268,8 +275,15 @@ static uint32_t ExactHalfToF32(EmitterState& state, uint32_t bits) {
 	return Unary(state, spv::OpBitcast, TypeF32(state), result);
 }
 
+static uint32_t ExactHalfToF32(EmitterState& state, uint32_t bits) {
+	if (state.outlined_half_functions[static_cast<size_t>(OutlinedHalfHelper::HalfToF32)] != 0) {
+		return CallOutlinedHalfHelper(state, OutlinedHalfHelper::HalfToF32, {bits});
+	}
+	return ExactHalfToF32Inline(state, bits);
+}
+
 // A float converted exactly to an IEEE half (round to nearest even), in the low 16 bits.
-static uint32_t ExactF32ToHalf(EmitterState& state, uint32_t value) {
+static uint32_t ExactF32ToHalfInline(EmitterState& state, uint32_t value) {
 	const auto u32  = TypeU32(state);
 	const auto bln  = TypeBool(state);
 	const auto bits = Unary(state, spv::OpBitcast, u32, value);
@@ -300,6 +314,13 @@ static uint32_t ExactF32ToHalf(EmitterState& state, uint32_t value) {
 	                              Select(state, u32, is_inf, U32Const(state, 0x7c00u),
 	                                     Select(state, u32, is_normal, normal, subnormal)));
 	return Binary(state, spv::OpBitwiseOr, u32, sign, half);
+}
+
+static uint32_t ExactF32ToHalf(EmitterState& state, uint32_t value) {
+	if (state.outlined_half_functions[static_cast<size_t>(OutlinedHalfHelper::F32ToHalf)] != 0) {
+		return CallOutlinedHalfHelper(state, OutlinedHalfHelper::F32ToHalf, {value});
+	}
+	return ExactF32ToHalfInline(state, value);
 }
 
 // Exact half conversions in hardware (HostFloatFeatures): OpFConvert to and from 16-bit
@@ -678,6 +699,56 @@ uint32_t EmitF32ToHalfArith(EmitterState& state, uint32_t f32) {
 	const auto pair = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 2), pair, f32, ConstantF32(state, 0));
 	return Unary(state, spv::OpBitcast, TypeU32(state), Unary(state, spv::OpFConvert, TypeF16Pair(state), pair)); // high half 0
+}
+
+void PrepareOutlinedHalfHelpers(EmitterState& state) {
+	const auto features = GetHostFloatFeatures();
+	const bool native = state.program.info.float64 ? features.exact_half_float64 : features.exact_half;
+	if (!SpirvHalfOutlineEnabled() || native) return;
+	for (auto& function: state.outlined_half_functions) {
+		function = state.builder.AllocateId();
+	}
+}
+
+uint32_t CallOutlinedHalfHelper(EmitterState& state, OutlinedHalfHelper helper,
+                                const std::vector<uint32_t>& args) {
+	const auto index    = static_cast<size_t>(helper);
+	const auto function = state.outlined_half_functions[index];
+	EXIT_IF(function == 0);
+	const auto result = state.builder.AllocateId();
+	const auto type   = helper == OutlinedHalfHelper::HalfToF32 ? TypeF32(state) : TypeU32(state);
+	state.builder.AddFunction(spv::OpFunctionCall, type, result, function, std::span(args));
+	return result;
+}
+
+void DefineOutlinedHalfHelpers(EmitterState& state) {
+	constexpr std::array names {"kyty_half_to_f32", "kyty_f32_to_half", "kyty_f32_to_f16_rtz"};
+	for (size_t index = 0; index < state.outlined_half_functions.size(); index++) {
+		const auto function = state.outlined_half_functions[index];
+		if (function == 0) continue;
+		const auto helper      = static_cast<OutlinedHalfHelper>(index);
+		const auto input_type  = helper == OutlinedHalfHelper::HalfToF32 ? TypeU32(state) : TypeF32(state);
+		const auto return_type = helper == OutlinedHalfHelper::HalfToF32 ? TypeF32(state) : TypeU32(state);
+		const std::array parameter_types {input_type};
+		const auto function_type =
+		    state.builder.Type(spv::OpTypeFunction, return_type, std::span(parameter_types));
+		state.builder.AddFunction(spv::OpFunction, return_type, function,
+		                          spv::FunctionControlDontInlineMask, function_type);
+		state.builder.AddName(function, names[index]);
+		const auto parameter = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpFunctionParameter, input_type, parameter);
+		EmitLabel(state, state.builder.AllocateId());
+		uint32_t result = 0;
+		switch (helper) {
+			case OutlinedHalfHelper::HalfToF32: result = ExactHalfToF32Inline(state, parameter); break;
+			case OutlinedHalfHelper::F32ToHalf: result = ExactF32ToHalfInline(state, parameter); break;
+			case OutlinedHalfHelper::F32ToF16Rtz: result = EmitF32ToF16RtzBitsInline(state, parameter); break;
+			default: break;
+		}
+		EXIT_IF(result == 0);
+		state.builder.AddFunction(spv::OpReturnValue, result);
+		state.builder.AddFunction(spv::OpFunctionEnd);
+	}
 }
 
 uint32_t CallOutlinedFloatHelper(EmitterState& state, OutlinedFloatHelper helper,

@@ -85,43 +85,6 @@ uint32_t EmitFMinMax3(EmitterState& state, uint32_t a, uint32_t b, uint32_t c, b
 	return EmitFMinMax3Legacy(state, a, b, c, max_value);
 }
 
-uint32_t EmitF32BitsToF16RtzBits(EmitterState& state, uint32_t bits) {
-	// Native half conversion causes regressions; use compact integer RTZ conversion.
-	const auto abs  = EmitAndConstant(state, bits, 0x7fffffffu);
-	const auto sign = EmitAndConstant(
-	    state, Binary(state, spv::OpShiftRightLogical, TypeU32(state), bits, ConstantU32(state, 16)),
-	    0x8000u);
-	const auto exp = Binary(state, spv::OpShiftRightLogical, TypeU32(state), abs,
-	                        ConstantU32(state, 23));
-	const auto mant = EmitAndConstant(state, abs, 0x007fffffu);
-
-	// Align the hidden bit to the half subnormal mantissa. Even unused shifts must be < 32.
-	const auto shift = EmitUMin32(
-	    state, Binary(state, spv::OpISub, TypeU32(state), ConstantU32(state, 126), exp),
-	    ConstantU32(state, 31));
-	const auto sub = Binary(state, spv::OpShiftRightLogical, TypeU32(state),
-	                        EmitOrU32(state, mant, ConstantU32(state, 0x00800000u)), shift);
-
-	// Drop 13 mantissa bits and rebias the exponent; finite overflow saturates to max half.
-	const auto truncated = Binary(state, spv::OpShiftRightLogical, TypeU32(state), abs,
-	                              ConstantU32(state, 13));
-	const auto normal = EmitUMin32(
-	    state, Binary(state, spv::OpISub, TypeU32(state), truncated, ConstantU32(state, 0x1c000u)),
-	    ConstantU32(state, 0x7bffu));
-	const auto finite = Select(state, TypeU32(state),
-	                           EmitCompareU32Constant(state, spv::OpULessThan, abs, 0x38800000u),
-	                           sub, normal);
-	const auto nan = EmitOrU32(state, EmitAndConstant(state, truncated, 0x03ffu),
-	                           ConstantU32(state, 0x7e00u));
-	const auto special = Select(state, TypeU32(state),
-	                            EmitCompareU32Constant(state, spv::OpIEqual, mant, 0),
-	                            ConstantU32(state, 0x7c00u), nan);
-	const auto magnitude = Select(
-	    state, TypeU32(state),
-	    EmitCompareU32Constant(state, spv::OpUGreaterThanEqual, abs, 0x7f800000u), special, finite);
-	return EmitOrU32(state, sign, magnitude);
-}
-
 uint32_t EmitFPFma32(EmitterState& state, uint32_t a, uint32_t b, uint32_t c) {
 	const auto result = EmitGlsl<GLSLstd450Fma, IR::Type::F32>(state, a, b, c);
 	state.builder.AddAnnotation(spv::OpDecorate, result, spv::DecorationNoContraction);
@@ -206,8 +169,7 @@ uint32_t EmitPackFloat2x16Rtz(EmitterState& state, uint32_t arg0, uint32_t arg1)
 	if (const auto native = EmitPackF16RtzNative(state, arg0, arg1); native != 0) return native;
 	// The low half's upper 16 bits are zero, so one bit-field insert packs the pair (upstream 10a852c2a).
 	return EmitNative<spv::OpBitFieldInsert, IR::Type::U32>(
-	    state, EmitF32BitsToF16RtzBits(state, EmitBitcastF32ToU32(state, arg0)),
-	    EmitF32BitsToF16RtzBits(state, EmitBitcastF32ToU32(state, arg1)),
+	    state, EmitF32ToF16RtzBits(state, arg0), EmitF32ToF16RtzBits(state, arg1),
 	    ConstantU32(state, 16), ConstantU32(state, 16));
 }
 

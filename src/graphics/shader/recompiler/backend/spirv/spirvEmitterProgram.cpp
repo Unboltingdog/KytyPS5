@@ -1211,6 +1211,7 @@ void EmitProgram(EmitterState& state) {
 		ctx.dispatcher_spills       = &dispatch.spills[0];
 		high.dispatcher_spills      = &dispatch.spills[1];
 	}
+	PrepareOutlinedHalfHelpers(state);
 	DefineGetBdaPointer(state);
 	FindScalarLoadGroups(state);
 	DefineIndirectFormattedLoadFunctions(ctx);
@@ -1218,6 +1219,7 @@ void EmitProgram(EmitterState& state) {
 	DefineIndirectStoreFunctions(ctx);
 	DefineBvhIntersect(state);
 	DefineTrinityFunctions(state); // upstream bfd4c34b8 / 5eab0ec73: BVH stack, BVH8
+	DefineOutlinedHalfHelpers(state);
 	DefineOutlinedFloatHelpers(state);
 	if (program.info.uses_swizzle) {
 		ctx.scratch_u32_variable = state.builder.AllocateId();
