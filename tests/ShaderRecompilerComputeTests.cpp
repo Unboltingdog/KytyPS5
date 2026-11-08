@@ -1735,6 +1735,102 @@ void CheckHalfOutlineBench() {
   std::printf("[host]    %-32s ok\n", name);
 }
 
+void CheckAmdNativeFloatBench() {
+  constexpr const char *name = "AmdNativeFloatBench";
+  using namespace ShaderRecompiler;
+  constexpr u32 iterations = 25;
+  const auto compile = [] {
+    IR::Program program;
+    program.stage = ShaderType::Compute;
+    program.wave_size = 32u;
+    program.shader_hash = 0x30a0u;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    program.shader_info_complete = true;
+    program.info.inputs.push_back(
+        {IR::StageInputKind::LocalInvocationId, 0, 3, "gl_LocalInvocationID"});
+    auto *block = program.block_storage.emplace_back(std::make_unique<IR::Block>()).get();
+    program.blocks.push_back(block);
+    block->terminator.kind = CFG::TerminatorKind::Return;
+    const auto emit = [&](IR::ValueOpcode opcode,
+                          std::initializer_list<IR::Value> args) {
+      return IR::Value(&block->AppendNewInst(opcode, args));
+    };
+    const auto raw = emit(IR::ValueOpcode::GetBuiltin,
+                          {IR::Value(static_cast<u32>(IR::StageInputKind::LocalInvocationId)),
+                           IR::Value(0u)});
+    const auto half_input = emit(
+        IR::ValueOpcode::BitCastF16U16,
+        {emit(IR::ValueOpcode::ConvertU16U32, {raw})});
+    auto bits = raw;
+    for (u32 index = 0; index < iterations; index++) {
+      const auto value = emit(IR::ValueOpcode::ConvertF32F16, {half_input});
+      (void)emit(IR::ValueOpcode::ConvertF16F32, {value});
+      const auto pair = emit(IR::ValueOpcode::CompositeConstructF32x2, {value, value});
+      const auto packed = emit(IR::ValueOpcode::PackHalf2x16, {pair});
+      const auto rtz = emit(IR::ValueOpcode::PackFloat2x16Rtz, {value, value});
+      const auto min0 = emit(IR::ValueOpcode::FPMin32, {value, value});
+      const auto max0 = emit(IR::ValueOpcode::FPMax32, {min0, value});
+      const auto min1 = emit(IR::ValueOpcode::FPMin32, {max0, value});
+      const auto max1 = emit(IR::ValueOpcode::FPMax32, {min1, value});
+      const auto rcp = emit(IR::ValueOpcode::FPRecip32, {max1});
+      (void)emit(IR::ValueOpcode::FPSqrt, {rcp});
+      bits = emit(IR::ValueOpcode::IAdd32, {packed, rtz});
+      bits = emit(IR::ValueOpcode::IAdd32, {bits, raw});
+    }
+    ShaderComputeInputInfo compute{};
+    compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
+    compute.host_subgroup_size = 32;
+    return Spirv::EmitProgram(program, {.compute = &compute});
+  };
+  const auto report = [](const char *mode, const std::vector<u32> &spirv) {
+    std::printf("AMD_FLOAT mode=%s conversions=100 minmax=100 rcp_sqrt=50 words=%zu bytes=%zu "
+                "fconvert=%zu extinst=%zu select=%zu bitcast=%zu fdiv=%zu calls=%zu\n",
+                mode, spirv.size(), spirv.size() * sizeof(u32),
+                CountSpirvOpcode(spirv, spv::OpFConvert), CountSpirvOpcode(spirv, spv::OpExtInst),
+                CountSpirvOpcode(spirv, spv::OpSelect), CountSpirvOpcode(spirv, spv::OpBitcast),
+                CountSpirvOpcode(spirv, spv::OpFDiv), CountSpirvOpcode(spirv, spv::OpFunctionCall));
+  };
+
+  const auto previous_features = Spirv::GetHostFloatFeatures();
+  Spirv::SetSpirvHalfOutlineOverride(false);
+  Spirv::SetHostFloatFeatures({.amd = true});
+  const auto off = compile();
+  Spirv::SetHostFloatFeatures({.exact_half = true,
+                               .exact_half_float64 = true,
+                               .amd = true,
+                               .hardware_float_ops = true,
+                               .hardware_nan = true,
+                               .native_f16_fma = true,
+                               .native_isnan = true,
+                               .native_minmax = true,
+                               .native_mix = true});
+  const auto on = compile();
+  ValidateSpirv(name, off);
+  ValidateSpirv(name, on);
+  Require(name, "AMD module size", on.size() < off.size(),
+          "AMD-native float paths did not shrink the synthetic module");
+  report("off", off);
+  report("on", on);
+
+  Spirv::SetHostFloatFeatures({.exact_half = true, .exact_half_float64 = true});
+  const auto non_amd_before = compile();
+  Spirv::SetHostFloatFeatures({.exact_half = true,
+                               .exact_half_float64 = true,
+                               .hardware_float_ops = true,
+                               .hardware_nan = true,
+                               .native_f16_fma = true,
+                               .native_isnan = true,
+                               .native_minmax = true,
+                               .native_mix = true});
+  const auto non_amd_after = compile();
+  Spirv::SetHostFloatFeatures(previous_features);
+  Spirv::SetSpirvHalfOutlineOverride(std::nullopt);
+  Require(name, "non-AMD byte identity", non_amd_before == non_amd_after,
+          "AMD-only flags changed the non-AMD module");
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckPixelParameterAliases() {
   constexpr const char *name = "PixelParameterAliases";
   ShaderPixelInputInfo pixel{};
@@ -45576,6 +45672,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--shader-shrink-bench") == 0) {
     CheckShaderShrinkBench();
     CheckHalfOutlineBench();
+    CheckAmdNativeFloatBench();
     CheckTableFormatSpecialization();
     return 0;
   }
