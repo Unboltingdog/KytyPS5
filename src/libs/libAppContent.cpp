@@ -5,6 +5,7 @@
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "kernel/fileSystem.h"
+#include "libs/addcontDiagnostics.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "libs/systemService.h"
@@ -330,19 +331,19 @@ static int KYTY_SYSV_ABI AppContentTemporaryDataGetAvailableSpaceKb(
 } // namespace AppContentTemporary
 
 LIB_DEFINE(InitAppContent_1_Temporary) {
-	LIB_FUNC("buYbeLOGWmA", AppContentTemporary::AppContentTemporaryDataMount2);
-	LIB_FUNC("a5N7lAG0y2Q", AppContentTemporary::AppContentTemporaryDataFormat);
-	LIB_FUNC("SaKib2Ug0yI", AppContentTemporary::AppContentTemporaryDataGetAvailableSpaceKb);
+	ADDCONT_DIAGNOSTICS_FUNC("buYbeLOGWmA", AppContentTemporary::AppContentTemporaryDataMount2);
+	ADDCONT_DIAGNOSTICS_FUNC("a5N7lAG0y2Q", AppContentTemporary::AppContentTemporaryDataFormat);
+	ADDCONT_DIAGNOSTICS_FUNC("SaKib2Ug0yI", AppContentTemporary::AppContentTemporaryDataGetAvailableSpaceKb);
 }
 
 } // namespace LibAppContentTemporary
 
 LIB_DEFINE(InitAppContent_1) {
-	LIB_FUNC("R9lA82OraNs", AppContent::AppContentInitialize);
-	LIB_FUNC("99b82IKXpH4", AppContent::AppContentAppParamGetInt);
-	LIB_FUNC("VANhIWcqYak", AppContent::AppContentAddcontMount);
-	LIB_FUNC("3rHWaV-1KC4", AppContent::AppContentAddcontUnmount);
-	LIB_FUNC("Gl6w5i0JokY", AppContent::AppContentDownloadDataGetAvailableSpaceKb);
+	ADDCONT_DIAGNOSTICS_FUNC("R9lA82OraNs", AppContent::AppContentInitialize);
+	ADDCONT_DIAGNOSTICS_FUNC("99b82IKXpH4", AppContent::AppContentAppParamGetInt);
+	ADDCONT_DIAGNOSTICS_FUNC("VANhIWcqYak", AppContent::AppContentAddcontMount);
+	ADDCONT_DIAGNOSTICS_FUNC("3rHWaV-1KC4", AppContent::AppContentAddcontUnmount);
+	ADDCONT_DIAGNOSTICS_FUNC("Gl6w5i0JokY", AppContent::AppContentDownloadDataGetAvailableSpaceKb);
 	LibAppContentTemporary::InitAppContent_1_Temporary(s);
 }
 
