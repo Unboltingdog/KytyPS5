@@ -16,6 +16,7 @@
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/shaderEnv.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/timer.h"
@@ -638,17 +639,21 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	// the 16-bit RoundingModeRTE and SignedZeroInfNanPreserve modes, which the modules declare without declaring 32-bit
 	// (or 64-bit) modes, and shaderDenormPreserveFloat16 as the sign that the device keeps f16 subnormals (the modules do
 	// not declare DenormPreserve 16: on NVIDIA it stops the f32 denormal flush of the whole module). Without that mode the
-	// f16 subnormals are the driver's default, measured exact only on NVIDIA (RTX 5070 Ti, half_check tests), so other
-	// vendors keep the integer conversions until measured. Otherwise the conversions stay integer arithmetic.
+	// f16 subnormals are the driver's default, measured exact on NVIDIA (RTX 5070 Ti, half_check tests) and used by
+	// AnyPS5 on AMD. Other vendors keep the integer conversions until measured. KYTY_NO_AMD_NATIVE_F16=1 opts AMD out.
 	{
 		using Independence = vk::ShaderFloatControlsIndependence;
 		constexpr uint32_t VendorNvidia = 0x10deu;
+		constexpr uint32_t VendorAmd    = 0x1002u;
 		const bool force_nvidia_f16 = [] {
 			const char* value = std::getenv("KYTY_FORCE_NVIDIA_F16");
 			return value != nullptr && value[0] == '1';
 		}();
+		const bool amd = properties2.properties.vendorID == VendorAmd;
+		const char* no_amd_f16 = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_F16");
+		const bool amd_native_f16 = amd && (no_amd_f16 == nullptr || no_amd_f16[0] != '1');
 		const bool float16 =
-		    (properties2.properties.vendorID == VendorNvidia || force_nvidia_f16) &&
+		    (properties2.properties.vendorID == VendorNvidia || force_nvidia_f16 || amd_native_f16) &&
 		    supported_features12.shaderFloat16 == VK_TRUE &&
 		    float_controls.shaderDenormPreserveFloat16 == VK_TRUE &&
 		    float_controls.shaderRoundingModeRTEFloat16 == VK_TRUE &&
@@ -658,7 +663,8 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		const bool float16_with_float64 = float16 && float_controls.denormBehaviorIndependence == Independence::eAll &&
 		                                  float_controls.roundingModeIndependence == Independence::eAll;
 		if (float16) features12.shaderFloat16 = VK_TRUE;
-		ShaderRecompiler::Spirv::SetHostFloatFeatures({.exact_half = float16, .exact_half_float64 = float16_with_float64});
+		ShaderRecompiler::Spirv::SetHostFloatFeatures(
+		    {.exact_half = float16, .exact_half_float64 = float16_with_float64, .amd = amd});
 		LOGF("Vulkan exact f16 conversions in hardware: %s (shaderFloat16=%d denormPreserve16=%d rte16=%d nanPreserve16=%d "
 		     "denormIndependence=%d roundingIndependence=%d)\n",
 		     float16 ? (float16_with_float64 ? "true" : "true (not with float64)") : "false",

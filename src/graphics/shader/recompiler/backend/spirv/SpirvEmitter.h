@@ -53,6 +53,8 @@ struct HostFloatFeatures {
 	bool exact_half = false;
 	// The same in a module that also uses 64-bit floats (the 16-bit modes are independent of the 64-bit ones too).
 	bool exact_half_float64 = false;
+	// AMD-only fast paths have independent KYTY_NO_AMD_* opt-outs. Other vendors keep their existing emission.
+	bool amd = false;
 };
 
 void              SetHostFloatFeatures(const HostFloatFeatures& features);
