@@ -45673,7 +45673,7 @@ int main(int argc, char **argv) {
     CheckShaderShrinkBench();
     CheckHalfOutlineBench();
     CheckAmdNativeFloatBench();
-    // CheckTableFormatSpecialization(); // crashes on Windows CI (0xC0000409) after batch 30; KYTY_PERF_TABLE_FORMATS stays off until fixed
+    CheckTableFormatSpecialization();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--thread-dimensions-only") == 0) {

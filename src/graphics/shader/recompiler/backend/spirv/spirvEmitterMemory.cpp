@@ -2508,6 +2508,9 @@ void DefineIndirectFormattedLoads(ValueEmitContext& ctx) {
 			if (index >= state.program.memory_info.size()) continue;
 			const auto& mem = state.program.memory_info[index];
 			if (mem.kind != IR::ResourceKind::IndirectBuffer || !mem.formatted) continue;
+			if (SpirvTableFormatsEnabled() && SpecializedIndirectTableFormat(state, mem) != Prospero::BufferFormat::kInvalid) {
+				continue;
+			}
 			const bool d16        = mem.data_bits == 16u;
 			const auto components = IR::BufferComponentCount(op);
 			const auto channels   = d16 ? mem.component_count : components;
@@ -2560,8 +2563,7 @@ uint32_t LoadIndirectFormatted(ValueEmitContext& ctx, const IR::Inst& inst, uint
 
 // Compute stages (RobustBuffer): this load is a function call with no inline path, so the exec branch around it can go (IndirectCallWord3).
 bool IndirectFormattedCallTakesGuard(const EmitterState& state, uint32_t channels, uint32_t components, bool d16) {
-	// Table-format specialization may inline a load for which a shape function also exists.
-	if (!state.guardless || SpirvTableFormatsEnabled()) return false;
+	if (!state.guardless) return false;
 	// (KYTY_PERF_INDIRECT_LOAD_FAST's inline case of a listed shader reads memory with word 3 as it is.)
 	if (IndirectLoadFast::Mode() != 0 && d16 && channels == 4u && components == 2u &&
 	    IndirectLoadFast::Listed(state.program.shader_hash)) {
