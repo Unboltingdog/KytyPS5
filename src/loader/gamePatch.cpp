@@ -259,11 +259,18 @@ bool Apply(const std::filesystem::path& plan_path, Program* main_program,
            const std::vector<Program*>& programs) {
 	Plan        plan;
 	std::string error;
-	if (!LoadPlan(plan_path, &plan, &error) || !ValidateGame(plan, main_program, &error)) {
+	if (!LoadPlan(plan_path, &plan, &error)) {
 		::printf("Game cheat error: %s\n", error.c_str());
 		return false;
 	}
 	if (plan.writes.empty()) {
+		return true; // no enabled mods: nothing to check or apply
+	}
+	if (!ValidateGame(plan, main_program, &error)) {
+		// A patch file written for another game version must not stop the game from booting.
+		::printf("Game cheat skipped: %s\n", error.c_str());
+		std::fprintf(stderr, "GAME_PATCH skipped: %s (patch file is for %s %s)\n", error.c_str(),
+		             plan.title_id.c_str(), plan.version.c_str());
 		return true;
 	}
 
