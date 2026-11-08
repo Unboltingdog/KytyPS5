@@ -57,6 +57,7 @@ struct HostFloatFeatures {
 	bool amd = false;
 	bool hardware_float_ops = false;
 	bool hardware_nan = false;
+	bool native_f16_fma = false;
 	bool native_isnan = false;
 	bool native_minmax = false;
 	bool native_mix = false;

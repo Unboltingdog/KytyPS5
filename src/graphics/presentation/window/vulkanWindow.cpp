@@ -653,12 +653,14 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		const char* no_amd_float_ops = Common::ShaderEnv::Read("KYTY_NO_AMD_HARDWARE_FLOAT_OPS");
 		const char* no_amd_nan = Common::ShaderEnv::Read("KYTY_NO_AMD_HARDWARE_NAN");
 		const char* no_amd_f16 = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_F16");
+		const char* no_amd_f16_fma = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_F16_FMA");
 		const char* no_amd_isnan = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_ISNAN");
 		const char* no_amd_minmax = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_MINMAX");
 		const char* no_amd_mix = Common::ShaderEnv::Read("KYTY_NO_AMD_NATIVE_MIX");
 		const bool amd_hardware_float_ops = no_amd_float_ops == nullptr || no_amd_float_ops[0] != '1';
 		const bool amd_hardware_nan = no_amd_nan == nullptr || no_amd_nan[0] != '1';
 		const bool amd_native_f16 = amd && (no_amd_f16 == nullptr || no_amd_f16[0] != '1');
+		const bool amd_native_f16_fma = no_amd_f16_fma == nullptr || no_amd_f16_fma[0] != '1';
 		const bool amd_native_isnan = no_amd_isnan == nullptr || no_amd_isnan[0] != '1';
 		const bool amd_native_minmax = no_amd_minmax == nullptr || no_amd_minmax[0] != '1';
 		const bool amd_native_mix = no_amd_mix == nullptr || no_amd_mix[0] != '1';
@@ -678,6 +680,7 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		                                               .amd = amd,
 		                                               .hardware_float_ops = amd_hardware_float_ops,
 		                                               .hardware_nan = amd_hardware_nan,
+		                                               .native_f16_fma = amd_native_f16_fma,
 		                                               .native_isnan = amd_native_isnan,
 		                                               .native_minmax = amd_native_minmax,
 		                                               .native_mix = amd_native_mix});

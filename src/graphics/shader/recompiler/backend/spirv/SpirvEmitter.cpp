@@ -263,6 +263,7 @@ std::atomic_bool g_exact_half_float64 {false};
 std::atomic_bool g_amd {false};
 std::atomic_bool g_hardware_float_ops {false};
 std::atomic_bool g_hardware_nan {false};
+std::atomic_bool g_native_f16_fma {false};
 std::atomic_bool g_native_isnan {false};
 std::atomic_bool g_native_minmax {false};
 std::atomic_bool g_native_mix {false};
@@ -274,6 +275,7 @@ void SetHostFloatFeatures(const HostFloatFeatures& features) {
 	g_amd.store(features.amd, std::memory_order_relaxed);
 	g_hardware_float_ops.store(features.hardware_float_ops, std::memory_order_relaxed);
 	g_hardware_nan.store(features.hardware_nan, std::memory_order_relaxed);
+	g_native_f16_fma.store(features.native_f16_fma, std::memory_order_relaxed);
 	g_native_isnan.store(features.native_isnan, std::memory_order_relaxed);
 	g_native_minmax.store(features.native_minmax, std::memory_order_relaxed);
 	g_native_mix.store(features.native_mix, std::memory_order_relaxed);
@@ -285,6 +287,7 @@ HostFloatFeatures GetHostFloatFeatures() {
 	        .amd                = g_amd.load(std::memory_order_relaxed),
 	        .hardware_float_ops = g_hardware_float_ops.load(std::memory_order_relaxed),
 	        .hardware_nan       = g_hardware_nan.load(std::memory_order_relaxed),
+	        .native_f16_fma     = g_native_f16_fma.load(std::memory_order_relaxed),
 	        .native_isnan       = g_native_isnan.load(std::memory_order_relaxed),
 	        .native_minmax      = g_native_minmax.load(std::memory_order_relaxed),
 	        .native_mix         = g_native_mix.load(std::memory_order_relaxed)};

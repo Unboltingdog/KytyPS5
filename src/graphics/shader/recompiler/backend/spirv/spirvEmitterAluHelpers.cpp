@@ -691,7 +691,12 @@ uint32_t FallbackHalfOp(EmitterState& state, HalfOp op, uint32_t a, uint32_t b, 
 }
 
 uint32_t EmitHalfOp(EmitterState& state, HalfOp op, uint32_t a, uint32_t b = 0, uint32_t c = 0) {
-	return NativeExactHalf(state) ? NativeHalfOp(state, op, a, b, c) : FallbackHalfOp(state, op, a, b, c);
+	if (!NativeExactHalf(state)) return FallbackHalfOp(state, op, a, b, c);
+	const auto features = GetHostFloatFeatures();
+	if (op == HalfOp::Fma && features.amd && !features.native_f16_fma) {
+		return FallbackHalfOp(state, op, a, b, c);
+	}
+	return NativeHalfOp(state, op, a, b, c);
 }
 
 } // namespace
