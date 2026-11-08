@@ -195,12 +195,12 @@ void ClampNanCheck(EmitterState& state, uint32_t is_nan, uint32_t counter) {
 	});
 }
 
-// The `.clamp` output modifier (ApplyF32ResultModifiers) and every other f32 saturate. KYTY_FIX_CLAMP_NAN=1 with
-// DX10_CLAMP: NClamp, whose NMax(NaN, 0) is 0 (GLSL.std.450: NMax returns the other operand for a NaN), as the GCN
-// clamp; equal to FClamp for every other input. DX10_CLAMP=0 keeps today's FClamp.
+// The `.clamp` output modifier (ApplyF32ResultModifiers) and every other f32 saturate. AMD's native-min/max path and
+// KYTY_FIX_CLAMP_NAN=1 with DX10_CLAMP use NClamp, whose NMax(NaN, 0) is 0 (GLSL.std.450: NMax returns the other
+// operand for a NaN), as the GCN clamp; equal to FClamp for every other input. Other paths keep FClamp.
 uint32_t EmitFPSaturate32(EmitterState& state, uint32_t arg0) {
-	// Upstream 4f1f3b1bb makes this NClamp unconditionally; here it is KYTY_FIX_CLAMP_NAN=1 (M124, with the DX10_CLAMP
-	// check), which stays the switch for that behaviour.
+	// Upstream 4f1f3b1bb makes this NClamp unconditionally; here the AMD option and KYTY_FIX_CLAMP_NAN=1 (M124, with
+	// the DX10_CLAMP check) select it.
 	const int   mode     = IR::ClampNanModeFor(state.program.shader_hash);
 	const bool  dx10     = mode != 0 && ProgramDx10Clamp(state);
 	const auto  features = GetHostFloatFeatures();

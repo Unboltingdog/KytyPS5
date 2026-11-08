@@ -143,12 +143,12 @@ uint32_t EmitClassMaskF16(EmitterState& state, uint32_t bits, uint32_t mask) {
 	return EmitClassMaskBits(state, bits, mask, true);
 }
 
-// V_MIN/MAX(3)/MED3_F32 as GLSL.std.450 NMin/NMax under the modules' f32 controls (none declared: the host's default
-// denormal flush). Checked on the RTX 5070 Ti against the emulation it replaced (ordered compare, two zeros by bits, a NaN
-// source gives the other source; test shader f32_nmin.comp, every pair of top-16-bit patterns with 4 low-bit
-// variants, 4 x 2^32 pairs): 0 differences on numbers, with one NaN operand and with signed zeros; when both are NaN only
-// the payload differs; a denormal operand is treated as a zero of its sign (the emulation passed its bits through), which
-// is the console's result under the flush mode the game runs with.
+// The native V_MIN/MAX(3)/MED3_F32 path uses GLSL.std.450 NMin/NMax under the modules' f32 controls (none declared:
+// the host's default denormal flush). AMD's opt-out uses the legacy compare/select form below. Checked on the RTX
+// 5070 Ti against that form (ordered compare, two zeros by bits, a NaN source gives the other source; test shader
+// f32_nmin.comp, every pair of top-16-bit patterns with 4 low-bit variants, 4 x 2^32 pairs): 0 differences on
+// numbers, with one NaN operand and with signed zeros; when both are NaN only the payload differs; a denormal operand
+// is treated as a zero of its sign (the emulation passed its bits through), which is the console's result under flush.
 static uint32_t EmitMinMaxF32Legacy(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
 	const auto lhs_bits = EmitBitcastF32ToU32(state, lhs);
 	const auto rhs_bits = EmitBitcastF32ToU32(state, rhs);
@@ -183,8 +183,8 @@ uint32_t EmitMinMaxF32Value(EmitterState& state, uint32_t lhs, uint32_t rhs, boo
 }
 
 uint32_t EmitFPMedTri32Inline(EmitterState& state, uint32_t a, uint32_t b, uint32_t c) {
-	// RDNA2 MED3 (upstream 3c4124daf, defb2f11d). The MIN3/MAX3 steps are host NMin/NMax too, as every V_MIN/MAX_F32 (only
-	// the payload of two NaN sources can differ, see EmitMinMaxF32Value).
+	// RDNA2 MED3 (upstream 3c4124daf, defb2f11d). The native MIN3/MAX3 steps are host NMin/NMax too (only the payload
+	// of two NaN sources can differ, see EmitMinMaxF32Value); AMD's opt-out uses the same legacy form as V_MIN/MAX_F32.
 	// The NaN path is RDNA2 MIN3, which keeps the later source when two are NaN.
 	const auto min_ba = EmitMinMaxF32Inline(state, b, a, false);
 	const auto min3   = EmitMinMaxF32Inline(state, c, min_ba, false);
@@ -380,7 +380,7 @@ void DeclareNativeHalf(EmitterState& state) {
 // EmitF32ToF16RtzBits over all 2^32 f32 patterns under the same float controls (test shader rtz.comp): 0
 // differences, 167,772,160 subnormal results.
 // "Rounded away" is back_bits > in_bits (a non-NaN lane keeps its sign through the conversion, so this equals the
-// magnitude compare; NaN lanes are replaced anyway) and both lanes' NaN encodings are built once on the packed word and
+// magnitude compare; NaN lanes are replaced when payload repair is enabled) and both lanes' NaN encodings are built once on the packed word and
 // merged with one masked XOR (package FSR3 1.84 -> 1.62 ms, Volfog 1.02 -> 0.86 ms, open world +1.4%). CPU checks
 // (verify_rtz_trim.py): away over all 2^32 inputs 0 differences, NaN merge 0 differences over 67 M random cases.
 static bool AmdHardwareNanResults() {
@@ -517,7 +517,7 @@ uint32_t EmitPackHalf2x16(EmitterState& state, uint32_t pair) {
 	if (NativeExactHalf(state)) {
 		const auto u32    = TypeU32(state);
 		const auto packed = Unary(state, spv::OpBitcast, u32, Unary(state, spv::OpFConvert, TypeF16Pair(state), pair));
-		if (HardwareNanResults(state)) return packed; // KYTY_PERF_F16_CVT_PLAIN: both lanes as converted
+		if (HardwareNanResults(state)) return packed; // Plain hardware NaN results in both lanes.
 		return Binary(
 		    state, spv::OpBitwiseOr, u32,
 		    NanHalfBits(state, low, Binary(state, spv::OpBitwiseAnd, u32, packed, U32Const(state, 0xffffu))),
@@ -719,8 +719,9 @@ uint32_t EmitHalfPkMedTri(EmitterState& state, uint32_t a, uint32_t b, uint32_t 
 }
 uint32_t EmitHalfPkSaturate(EmitterState& state, uint32_t a) { return EmitHalfOp(state, HalfOp::Saturate, a); }
 
-// Mixed-precision FMA (V_MAD_MIX*): the f16 operands of an f32 FMA and its f16 result
-// converted by hardware alone, without NanFloatBits / NanHalfBits: an f32 FMA (and its clamp/omod) returns the host's
+// Mixed-precision FMA (V_MAD_MIX*): the native path converts the f16 operands of an f32 FMA and its f16 result
+// by hardware alone, without NanFloatBits / NanHalfBits (AMD's native-mix opt-out keeps those repairs): an f32 FMA
+// (and its clamp/omod) returns the host's
 // canonical NaN whatever NaN came in, so the payload those encodings keep never reaches the result. Checked end to end
 // on the RTX 5070 Ti (test shader half_mix.comp: (f16, f32, f16), (f32, f16, f16) and a clamped (f16, f16, f32)
 // FMA, both f16 operands exhaustive in pairs, the f32 one hashed over all bit patterns): 0 differences.
