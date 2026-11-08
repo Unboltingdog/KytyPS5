@@ -39943,7 +39943,8 @@ void CheckComputeLdsLimit(VulkanHarness &vulkan) {
                 input.lds_storage == (units > limit_units),
             "compute LDS was truncated or chose backing that exceeds the device limit");
     Require(name, "pipeline creation",
-            cache.GetComputePipeline(input, program).pipeline != nullptr,
+            cache.GetComputePipeline(input, program, false) != nullptr &&
+                cache.GetComputePipeline(input, program, false)->pipeline != nullptr,
             "full-size LDS shader did not create a Vulkan compute pipeline");
     if (previous.id != 0) {
       Require(name, "guest-size cache identity",
