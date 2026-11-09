@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/gpuTimer.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/videoOut.h"
@@ -65,6 +66,7 @@ uint64_t PrepareVideoOutFlip(CommandBuffer& buffer, int handle, int index, int f
 			     "\n",
 			     result, handle, index, flip_mode, flip_arg);
 		}
+		GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Present);
 		video_out.WaitForSubmitSlot(handle);
 	}
 }

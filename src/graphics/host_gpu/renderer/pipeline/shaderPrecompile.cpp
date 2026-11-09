@@ -12,6 +12,7 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/gpuTimer.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCacheTrace.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCompileDiag.h"
@@ -2710,6 +2711,7 @@ bool ShaderPrecompiler::BeforeCompile(uint64_t key) {
 		// The GPU thread waits at normal priority: so does the worker it waits for.
 		RaiseThreadPriority(m_workers[job.worker]);
 		const auto begin = std::chrono::steady_clock::now();
+		GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Pipeline, GuestGpu::IsGpuThread());
 		WaitOnDone(lock, m_done, [&] { return job.state != JobState::Running; });
 		const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
 		if (Common::StartupTrace::Enabled()) {

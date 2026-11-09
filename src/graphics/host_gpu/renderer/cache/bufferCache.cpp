@@ -636,6 +636,7 @@ static bool SkipReadbackCeiling() {
 
 template <bool async>
 bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Readback, !async && GuestGpu::IsGpuThread());
 	KYTY_PROFILER_BLOCK("BufferCache::DownloadBufferMemory");
 	if constexpr (!async) {
 		if (SkipReadbackCeiling()) {
@@ -3060,6 +3061,7 @@ bool BufferCache::HasPendingReadback(uint64_t vaddr, uint64_t size) const {
 
 
 bool BufferCache::WaitPendingReadbacks(uint64_t vaddr, uint64_t size) {
+	GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Readback, GuestGpu::IsGpuThread());
 	// KYTY_PERF_DIRECT_RANGES: resource-table reads of guest memory (last: nothing below may reset the overlay).
 	const auto direct = [&] { return WaitDirectGpuWrites(vaddr, size, true); };
 	if (m_eager_readbacks.empty()) {

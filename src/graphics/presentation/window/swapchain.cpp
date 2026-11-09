@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
+#include "graphics/host_gpu/renderer/gpuTimer.h"
 #include "graphics/host_gpu/renderer/syncTimeline.h"
 #include "graphics/presentation/openxrHeadset.h"
 #include "graphics/presentation/performanceOverlay.h"
@@ -638,6 +639,7 @@ bool Swapchain::NeedsResize() const {
 }
 
 Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
+	GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Present);
 	EXIT_IF(m_handle == nullptr || m_frame_index >= m_image_acquired.size());
 	// Repeated frames can wrap the semaphore ring without acquiring a new source frame.
 	// Wait for the submission that consumed this slot before signaling it again.
@@ -996,6 +998,7 @@ Swapchain::Status Swapchain::Present() {
 
 	vk::Result result;
 	{
+		GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Present);
 		CommandRecorder::SyncQueue(); // before the queue lock
 		QueueLockGuard lock(m_window.graphic_ctx.queue_mutex, "swapchain.cpp:1019");
 		result = m_window.graphic_ctx.queue.presentKHR(&present);

@@ -21,6 +21,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/renderer/gpuTimer.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderPrecompile.h"
@@ -2399,6 +2400,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	}
 	LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
 	{
+		GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Pipeline, PerfIsGpuThread());
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
@@ -2654,6 +2656,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	if (!AsyncComputePipelinesEnabled()) {
 		auto cached = std::make_unique<Pipeline>();
 		{
+			GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Pipeline, PerfIsGpuThread());
 			Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 			                                         Common::DebugCounters::Counter::PipelineCreateNs,
 			                                         Common::DebugCounters::Peak::PipelineCreateNs);
@@ -2709,6 +2712,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	if (pending != m_compute_pending.end()) {
 		auto& job = *pending->second;
 		if (!job.done.load(std::memory_order_acquire)) {
+			GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Pipeline, PerfIsGpuThread());
 			std::unique_lock lock(job.mutex);
 			job.wake.wait_for(lock, AsyncComputeWait(), [&job] { return job.done.load(std::memory_order_acquire); });
 		}

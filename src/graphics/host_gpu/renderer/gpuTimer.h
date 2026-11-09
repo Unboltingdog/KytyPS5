@@ -22,9 +22,28 @@ class CommandScheduler;
 namespace GpuTimer {
 
 [[nodiscard]] int Mode();
+// KYTY_DIAG_FRAME_GAPS=1 (default off): command-buffer timing plus a five-second split of the GPU-idle gaps into
+// CPU-side guest-submit, readback, pipeline and present waits. "other" is the unattributed remainder.
+[[nodiscard]] bool FrameGapsEnabled();
 [[nodiscard]] inline bool Enabled() {
-	return Mode() != 0;
+	return Mode() != 0 || FrameGapsEnabled();
 }
+
+enum class FrameGapCause : uint32_t { GuestSubmit, Readback, Pipeline, Present, Count };
+
+class FrameGapScope {
+public:
+	explicit FrameGapScope(FrameGapCause cause, bool enabled = true);
+	~FrameGapScope();
+	FrameGapScope(const FrameGapScope&)            = delete;
+	FrameGapScope& operator=(const FrameGapScope&) = delete;
+
+private:
+	FrameGapCause                         m_cause;
+	bool                                  m_scoped = false;
+	bool                                  m_active = false;
+	std::chrono::steady_clock::time_point m_start {};
+};
 
 // Command buffer lifecycle, called by CommandScheduler on the GPU thread.
 void BeginCommandBuffer(CommandScheduler& scheduler, vk::CommandBuffer buffer);

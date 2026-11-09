@@ -1963,6 +1963,7 @@ void GuestGpu::ThreadRun(void* data) {
 			no_work = gpu->m_submission_count == 0 && !gpu->m_stopping;
 		}
 		if (no_work) {
+			GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::GuestSubmit);
 			gpu->WaitForExecution(GpuDrain::Idle);
 			uint64_t epoch = 0;
 			{
@@ -1980,6 +1981,8 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 		{
 			Common::LockGuard lock(gpu->m_queue_mutex);
+			GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::GuestSubmit,
+			                                  gpu->m_submission_count == 0 && !gpu->m_stopping);
 			while (gpu->m_submission_count == 0 && !gpu->m_stopping) {
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
@@ -3143,6 +3146,7 @@ void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_
 		GetScheduler().Flush();
 
 		SyncTimeline::WaitScope timeline(SyncTimeline::Site::FlipDone, 0, 0, 0); // KYTY_TRACE_SYNC_TIMELINE
+		GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Present);
 		m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
 		                                      static_cast<int>(display_buffer_index));
 	});
@@ -3437,6 +3441,7 @@ void CommandProcessor::RecordGlobalBarrier() {
 
 void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id, const char* packet_kind,
                                                   uint32_t interrupt_selector) {
+	GpuEventDiagnostics::NoteRequest(m_interrupt_event_id);
 	EmitCallback([this, interrupt_context_id, packet_kind, interrupt_selector] {
 		DeferEopInterrupt(interrupt_context_id, packet_kind, interrupt_selector);
 	});

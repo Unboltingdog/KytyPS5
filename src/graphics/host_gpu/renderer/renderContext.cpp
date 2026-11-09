@@ -417,6 +417,7 @@ uint32_t RenderContext::TriggerInterrupt(int event_id, uint32_t context_id, cons
 	GpuEventDiagnostics::Request(event_id >= 0x20 ? "ACB" : "DCB", static_cast<uint32_t>(event_id),
 	                             packet_kind, interrupt_selector, event_id, delivered != 0,
 	                             registrations.empty() ? "no_registered_listener" : "listener_unavailable");
+	GpuEventDiagnostics::NoteDelivery(event_id, delivered != 0);
 	return delivered;
 }
 

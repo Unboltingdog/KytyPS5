@@ -4,8 +4,10 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/gpuEventDiagnostics.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -112,6 +114,7 @@ struct State {
 	uint64_t                               other        = 0;
 	uint64_t                               marked       = 0;
 	uint64_t                               overflow     = 0;
+	std::array<uint64_t, static_cast<size_t>(FrameGapCause::Count)> frame_gap_ns {};
 	std::unordered_map<Key, Cost, KeyHash> costs;
 	std::unordered_map<Key, std::pair<ShaderIdentity, ShaderIdentity>, KeyHash> shader_identities;
 	std::unordered_set<Key, KeyHash> named_keys;
@@ -343,6 +346,24 @@ void Report(State& s) {
 	             s.window_mode, static_cast<long long>(window_ms), frame, frames, static_cast<unsigned long long>(s.cbs),
 	             static_cast<unsigned long long>(s.untimed_cbs), ms(s.busy), ms(s.gap), ms(s.cmd),
 	             static_cast<unsigned long long>(s.cmd_count), ms(s.marked), ms(s.other), static_cast<unsigned long long>(s.overflow));
+	if (FrameGapsEnabled()) {
+		const auto  per_frame = std::max(frames, 1u);
+		const auto  gap_ms    = ms(s.gap) / per_frame;
+		const auto  wait_ms   = [&](FrameGapCause cause) {
+            return static_cast<double>(s.frame_gap_ns[static_cast<size_t>(cause)]) / 1.0e6 / per_frame;
+        };
+		const double guest    = wait_ms(FrameGapCause::GuestSubmit);
+		const double readback = wait_ms(FrameGapCause::Readback);
+		const double pipeline = wait_ms(FrameGapCause::Pipeline);
+		const double present  = wait_ms(FrameGapCause::Present);
+		const double measured = guest + readback + pipeline + present;
+		std::fprintf(stderr,
+		             "FRAME_GAPS frames=%u per_frame=1 gap_ms=%.3f guest_submit_ms=%.3f readback_ms=%.3f "
+		             "pipeline_ms=%.3f present_ms=%.3f other_ms=%.3f measured_ms=%.3f\n",
+		             frames, gap_ms, guest, readback, pipeline, present, std::max(0.0, gap_ms - measured), measured);
+		GpuEventDiagnostics::ReportFrameGaps();
+		s.frame_gap_ns.fill(0);
+	}
 	if (!s.costs.empty()) {
 		std::vector<std::pair<Key, Cost>> top(s.costs.begin(), s.costs.end());
 		std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) { return x.second.ticks > y.second.ticks; });
@@ -433,6 +454,36 @@ int Mode() {
 		return value != nullptr ? std::atoi(value) : 0;
 	}();
 	return mode;
+}
+
+namespace {
+thread_local uint32_t t_frame_gap_depth = 0;
+}
+
+bool FrameGapsEnabled() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_FRAME_GAPS");
+		return value != nullptr && value[0] == '1';
+	}();
+	return on;
+}
+
+FrameGapScope::FrameGapScope(FrameGapCause cause, bool enabled): m_cause(cause) {
+	if (!enabled || !FrameGapsEnabled()) return;
+	m_scoped = true;
+	if (t_frame_gap_depth++ != 0u) return;
+	m_active = true;
+	m_start  = std::chrono::steady_clock::now();
+}
+
+FrameGapScope::~FrameGapScope() {
+	if (m_scoped) --t_frame_gap_depth;
+	if (!m_active) return;
+	const auto elapsed = static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count());
+	auto&            s = GetState();
+	std::scoped_lock lock(s.mutex);
+	s.frame_gap_ns[static_cast<size_t>(m_cause)] += elapsed;
 }
 
 void BeginCommandBuffer(CommandScheduler& scheduler, vk::CommandBuffer buffer) {
