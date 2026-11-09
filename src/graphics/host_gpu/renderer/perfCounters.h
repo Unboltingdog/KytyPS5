@@ -81,6 +81,20 @@ void CpuProbeReport();
 // spent in the readbacks that really copied GPU-written bytes and waited for the GPU ("drains").
 enum class PerfReason : uint32_t { Other, FaultGame, FaultGpu, SrtWalker, DccMeta, IndirectArgs, Invalidate, Count };
 
+inline const char* PerfReasonName(PerfReason reason) {
+	switch (reason) {
+		case PerfReason::Other: return "other";
+		case PerfReason::FaultGame: return "fault_game";
+		case PerfReason::FaultGpu: return "fault_gpu";
+		case PerfReason::SrtWalker: return "srt_walker";
+		case PerfReason::DccMeta: return "dcc_meta";
+		case PerfReason::IndirectArgs: return "indirect_args";
+		case PerfReason::Invalidate: return "invalidate";
+		case PerfReason::Count: break;
+	}
+	return "unknown";
+}
+
 inline PerfReason& PerfCurrentReason() {
 	static thread_local PerfReason reason = PerfReason::Other;
 	return reason;

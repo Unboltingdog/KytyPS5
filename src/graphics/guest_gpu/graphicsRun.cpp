@@ -1588,7 +1588,9 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 
 	(void)poll;
 	// labels at completion / KYTY_PERF_DIRECT_RANGES: labels and CP writes recorded but not yet in guest memory;
-	// other GPU writes into a direct range are waited for unless the recorded values cover the whole word.
+	// other pending writes suspend this queue unless the recorded values cover the whole word. The queue advances only
+	// after they complete (or a later attempt no longer needs them), preserving the wait's stream ordering without
+	// blocking every queue on the GPU thread. KYTY_FIX_ASYNC_LABEL_WAITS=0 restores the synchronous direct-write wait.
 	bool       covered = false;
 	T          value {};
 	const auto read = [&] {
@@ -1600,8 +1602,18 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	};
 	read();
 	if (!covered && m_renderer.GetBufferCache().InDirectRange(reinterpret_cast<uint64_t>(addr), sizeof(T))) {
+		static const bool async_label_waits = [] {
+			const char* value = std::getenv("KYTY_FIX_ASYNC_LABEL_WAITS");
+			return value == nullptr || value[0] != '0';
+		}();
+		if (async_label_waits &&
+		    m_renderer.GetBufferCache().HasPendingDirectGpuWrites(reinterpret_cast<uint64_t>(addr), sizeof(T))) {
+			SuspendPm4();
+			return;
+		}
 		RunOnExecution(GpuDrain::DirectWrites, [this, addr] {
-			m_renderer.GetBufferCache().WaitDirectGpuWrites(reinterpret_cast<uint64_t>(addr), sizeof(T));
+			m_renderer.GetBufferCache().WaitDirectGpuWrites(reinterpret_cast<uint64_t>(addr), sizeof(T), false,
+			                                              "WAIT_REG_MEM", "label_wait");
 		});
 		read();
 	}

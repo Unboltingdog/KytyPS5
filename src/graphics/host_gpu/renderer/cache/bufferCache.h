@@ -144,7 +144,7 @@ public:
 	// Publishes pending asynchronous (eager) readbacks overlapping the range: their bytes already left
 	// the GPU-dirty set but reach guest memory only when the copy completes. True: the caller puts ApplyDirectCpWrites
 	// over what it reads (WaitDirectGpuWrites with `cp_overlay`).
-	bool WaitPendingReadbacks(uint64_t vaddr, uint64_t size);
+	bool WaitPendingReadbacks(uint64_t vaddr, uint64_t size, const char* site = "unknown");
 	// True when an eager readback overlapping the range is pending (WaitPendingReadbacks would publish it):
 	// guest memory there still holds the older bytes. Changes nothing; GPU thread only, like HasGpuDirtyBytes.
 	[[nodiscard]] bool HasPendingReadback(uint64_t vaddr, uint64_t size) const;
@@ -326,7 +326,9 @@ public:
 	// thread knows) are not waited for; WaitDirectGpuWrites then returns true when such writes are still pending over
 	// the range, and the caller puts ApplyDirectCpWrites over the guest memory it reads right after.
 	[[nodiscard]] bool InDirectRange(uint64_t vaddr, uint64_t size) const;
-	bool               WaitDirectGpuWrites(uint64_t vaddr, uint64_t size, bool cp_overlay = false);
+	[[nodiscard]] bool HasPendingDirectGpuWrites(uint64_t vaddr, uint64_t size);
+	bool               WaitDirectGpuWrites(uint64_t vaddr, uint64_t size, bool cp_overlay = false,
+	                                       const char* site = "ReadMemory", const char* trigger = "cpu_access");
 	void               ApplyDirectCpWrites(uint64_t vaddr, void* data, uint64_t size) const;
 	void               UnmapDirect(uint64_t vaddr, uint64_t size);
 	// KYTY_FIX_VIRTUAL_GPU_CLOCK (virtualGpuClock.cpp), GPU thread: a value the GPU produced at an earlier, finished point
@@ -643,7 +645,7 @@ private:
 	[[nodiscard]] bool PendingReadbackCovers(uint64_t vaddr, uint64_t size) const;
 	void        RecordHotRead(uint64_t vaddr);
 	void        BumpHotGeneration(uint64_t vaddr, uint64_t size);
-	void        ApplyEagerReadbacks(uint64_t vaddr, uint64_t size, bool wait);
+	void        ApplyEagerReadbacks(uint64_t vaddr, uint64_t size, bool wait, const char* site = "eager_readback");
 	void        IssueEagerReadbacks();
 	// KYTY_TRACE_SYNC_TIMELINE: write tick and GPU-dirty bytes of what the running reader request needs.
 	void        NoteSyncTimelineNeed(uint64_t vaddr, uint64_t size);

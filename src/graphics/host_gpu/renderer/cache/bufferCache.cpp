@@ -1022,13 +1022,19 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			// A download that copied GPU-written bytes (and so waited for the GPU), timed per reason.
 			const auto timed_download = [&](Buffer& target, uint64_t address, uint64_t bytes) {
 				const auto download = [&] { return DownloadBufferMemory<false>(target, address, bytes); };
-				if (!PerfEnabled()) {
+				if (!PerfEnabled() && !GpuTimer::FrameGapsEnabled()) {
 					const bool copied = download();
 					if (copied) ReadbackBurn(); // KYTY_DIAG_GPU_BURN_AT=readback (measurement only)
 					return copied;
 				}
 				const auto start  = std::chrono::steady_clock::now();
 				const bool copied = download();
+				const auto ns     = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+				if (copied && GuestGpu::IsGpuThread()) {
+					GpuTimer::NoteReadbackWait("DownloadBufferMemory", PerfReasonName(reason), "cpu_access", address,
+					                           bytes, ns);
+				}
 				// KYTY_TRACE_GPU_READ_WAITS=<us> (diagnostic, with KYTY_TRACE_PERF; read once): the GPU thread's downloads
 				// of GPU-written bytes that took at least that long - who read (reason, the draw's marker), what (the
 				// requested range, the downloaded piece), how long - from frame 1100, first 2000 lines.
@@ -1036,28 +1042,25 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 					const char* value = std::getenv("KYTY_TRACE_GPU_READ_WAITS");
 					return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
 				}();
-				if (trace_us != 0 && GuestGpu::IsGpuThread()) {
-					const auto us = static_cast<uint64_t>(
-					    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+				if (PerfEnabled() && trace_us != 0 && GuestGpu::IsGpuThread()) {
 					static std::atomic<uint32_t> lines {0};
-					if (us >= trace_us && DebugPresentCount().load() >= 1100u && lines.fetch_add(1) < 2000u) {
+					if (ns / 1000u >= trace_us && DebugPresentCount().load() >= 1100u && lines.fetch_add(1) < 2000u) {
 						std::fprintf(stderr,
 						             "GPU_READ_WAIT us=%llu copied=%d reason=%u addr=0x%llx size=0x%llx piece=0x%llx+0x%llx frame=%u "
 						             "marker=[%s]\n",
-						             static_cast<unsigned long long>(us), copied ? 1 : 0, static_cast<uint32_t>(reason),
-						             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(size),
-						             static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes),
-						             DebugPresentCount().load(), DebugMarkerPath().c_str());
+						             static_cast<unsigned long long>(ns / 1000u), copied ? 1 : 0,
+						             static_cast<uint32_t>(reason), static_cast<unsigned long long>(vaddr),
+						             static_cast<unsigned long long>(size), static_cast<unsigned long long>(address),
+						             static_cast<unsigned long long>(bytes), DebugPresentCount().load(), DebugMarkerPath().c_str());
 					}
 				}
 				if (copied) {
 					ReadbackBurn(); // KYTY_DIAG_GPU_BURN_AT=readback (measurement only)
-					auto& stats = PerfReasons()[static_cast<uint32_t>(reason)];
-					stats.drains.fetch_add(1, std::memory_order_relaxed);
-					stats.drain_nanos.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-					                                                      std::chrono::steady_clock::now() - start)
-					                                                      .count()),
-					                            std::memory_order_relaxed);
+					if (PerfEnabled()) {
+						auto& stats = PerfReasons()[static_cast<uint32_t>(reason)];
+						stats.drains.fetch_add(1, std::memory_order_relaxed);
+						stats.drain_nanos.fetch_add(ns, std::memory_order_relaxed);
+					}
 				}
 				return copied;
 			};
@@ -1760,7 +1763,14 @@ void BufferCache::ApplyDirectCpWrites(uint64_t vaddr, void* data, uint64_t size)
 	}
 }
 
-bool BufferCache::WaitDirectGpuWrites(uint64_t vaddr, uint64_t size, bool cp_overlay) {
+bool BufferCache::HasPendingDirectGpuWrites(uint64_t vaddr, uint64_t size) {
+	return std::ranges::any_of(m_direct_gpu_writes, [&](const DirectGpuWrite& write) {
+		return write.start < vaddr + size && vaddr < write.end && !m_scheduler.IsFree(write.tick);
+	});
+}
+
+bool BufferCache::WaitDirectGpuWrites(uint64_t vaddr, uint64_t size, bool cp_overlay, const char* site,
+                                      const char* trigger) {
 	m_direct_cp_overlay.clear();
 	if (m_direct_ranges.empty()) return false;
 	// GPU thread only: the list and the scheduler belong to it. Other threads read guest memory as the console's CPU
@@ -1825,6 +1835,7 @@ bool BufferCache::WaitDirectGpuWrites(uint64_t vaddr, uint64_t size, bool cp_ove
 		const auto us = static_cast<uint64_t>(
 		    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
 		g_direct_stats.wait_us.fetch_add(us, std::memory_order_relaxed);
+		GpuTimer::NoteReadbackWait(site, PerfReasonName(PerfCurrentReason()), trigger, vaddr, size, us * 1000u);
 		if (gpu_idle) {
 			g_direct_stats.idle_waits.fetch_add(1, std::memory_order_relaxed);
 			g_direct_stats.idle_wait_us.fetch_add(us, std::memory_order_relaxed);
@@ -3060,10 +3071,12 @@ bool BufferCache::HasPendingReadback(uint64_t vaddr, uint64_t size) const {
 }
 
 
-bool BufferCache::WaitPendingReadbacks(uint64_t vaddr, uint64_t size) {
+bool BufferCache::WaitPendingReadbacks(uint64_t vaddr, uint64_t size, const char* site) {
 	GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Readback, GuestGpu::IsGpuThread());
 	// KYTY_PERF_DIRECT_RANGES: resource-table reads of guest memory (last: nothing below may reset the overlay).
-	const auto direct = [&] { return WaitDirectGpuWrites(vaddr, size, true); };
+	const auto direct = [&] {
+		return WaitDirectGpuWrites(vaddr, size, true, site, "WaitPendingReadbacks");
+	};
 	if (m_eager_readbacks.empty()) {
 		return direct();
 	}
@@ -3078,7 +3091,7 @@ bool BufferCache::WaitPendingReadbacks(uint64_t vaddr, uint64_t size) {
 		std::fprintf(stderr, "EAGER_PENDING_READ addr=0x%llx size=0x%llx (shader-data read waits for the readback)\n",
 		             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(size));
 	}
-	ApplyEagerReadbacks(vaddr, size, true);
+	ApplyEagerReadbacks(vaddr, size, true, site);
 	ReadbackBurn(); // KYTY_DIAG_GPU_BURN_AT=readback (measurement only)
 	return direct();
 }
@@ -3158,7 +3171,7 @@ void BufferCache::BumpHotGeneration(uint64_t vaddr, uint64_t size) {
 	}
 }
 
-void BufferCache::ApplyEagerReadbacks(uint64_t vaddr, uint64_t size, bool wait) {
+void BufferCache::ApplyEagerReadbacks(uint64_t vaddr, uint64_t size, bool wait, const char* site) {
 	for (size_t i = 0; i < m_eager_readbacks.size();) {
 		auto& entry = m_eager_readbacks[i];
 		if (size != 0 && !(vaddr < entry.end && entry.start < vaddr + size)) {
@@ -3176,6 +3189,11 @@ void BufferCache::ApplyEagerReadbacks(uint64_t vaddr, uint64_t size, bool wait) 
 			m_scheduler.Wait(entry.tick);
 			m_scheduler.WaitPriorityOperations(entry.tick);
 			EXIT_IF(!entry.done->load(std::memory_order_acquire));
+			GpuTimer::NoteReadbackWait(site, PerfReasonName(PerfCurrentReason()), "eager_publish", entry.start,
+			                           entry.end - entry.start,
+			                           static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			                                                     std::chrono::steady_clock::now() - wait_start)
+			                                                     .count()));
 			if (DownloadWaitTrace::Enabled()) {
 				DownloadWaitTrace::Add(open ? DownloadWaitTrace::EagerOpen : DownloadWaitTrace::EagerOld,
 				                       static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(

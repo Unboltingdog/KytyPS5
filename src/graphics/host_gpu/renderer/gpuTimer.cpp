@@ -13,8 +13,10 @@
 #include <cstdlib>
 #include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -150,6 +152,38 @@ std::mutex             g_cpu_waits_mutex;
 std::vector<CpuWait>   g_cpu_waits;
 std::atomic<int64_t>   g_cpu_base {0}; // steady ns of the first timeline buffer's recording start
 std::atomic<bool>      g_cpu_waits_printed {false};
+
+struct ReadbackKey {
+	std::string site;
+	std::string reason;
+	std::string trigger;
+	uint64_t    vaddr = 0;
+	uint64_t    size  = 0;
+	bool        operator<(const ReadbackKey& other) const {
+        return std::tie(site, reason, trigger, vaddr, size) <
+               std::tie(other.site, other.reason, other.trigger, other.vaddr, other.size);
+	}
+};
+std::mutex                       g_readback_mutex;
+std::map<ReadbackKey, Cost>      g_readback_waits;
+
+void ReportReadbackWaits(uint32_t frames) {
+	std::scoped_lock lock(g_readback_mutex);
+	std::vector<std::pair<ReadbackKey, Cost>> top(g_readback_waits.begin(), g_readback_waits.end());
+	std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second.ticks > b.second.ticks; });
+	const auto per_frame = std::max(frames, 1u);
+	for (size_t i = 0; i < top.size() && i < 10u; ++i) {
+		const auto& [key, cost] = top[i];
+		std::fprintf(stderr,
+		             "FRAME_GAPS_READBACK rank=%zu site=%s reason=%s trigger=%s range=0x%llx-0x%llx bytes=%llu "
+		             "count=%llu total_ms_per_frame=%.3f\n",
+		             i + 1u, key.site.c_str(), key.reason.c_str(), key.trigger.c_str(),
+		             static_cast<unsigned long long>(key.vaddr), static_cast<unsigned long long>(key.vaddr + key.size),
+		             static_cast<unsigned long long>(key.size), static_cast<unsigned long long>(cost.count),
+		             static_cast<double>(cost.ticks) / 1.0e6 / per_frame);
+	}
+	g_readback_waits.clear();
+}
 
 uint32_t InternMarker(State& s) {
 	auto       path = DebugMarkerPath();
@@ -362,6 +396,7 @@ void Report(State& s) {
 		             "pipeline_ms=%.3f present_ms=%.3f other_ms=%.3f measured_ms=%.3f\n",
 		             frames, gap_ms, guest, readback, pipeline, present, std::max(0.0, gap_ms - measured), measured);
 		GpuEventDiagnostics::ReportFrameGaps();
+		ReportReadbackWaits(frames);
 		s.frame_gap_ns.fill(0);
 	}
 	if (!s.costs.empty()) {
@@ -466,6 +501,15 @@ bool FrameGapsEnabled() {
 		return value != nullptr && value[0] == '1';
 	}();
 	return on;
+}
+
+void NoteReadbackWait(const char* site, const char* reason, const char* trigger, uint64_t vaddr, uint64_t size,
+                      uint64_t nanoseconds) {
+	if (!FrameGapsEnabled()) return;
+	std::scoped_lock lock(g_readback_mutex);
+	auto& cost = g_readback_waits[ReadbackKey {site, reason, trigger, vaddr, size}];
+	cost.ticks += nanoseconds;
+	cost.count++;
 }
 
 FrameGapScope::FrameGapScope(FrameGapCause cause, bool enabled): m_cause(cause) {

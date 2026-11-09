@@ -1346,7 +1346,8 @@ static bool OrdinaryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size)
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) && Graphics::GuestGpu::IsGpuThread()) {
 		auto&          buffers    = GetGpuResources().GetBufferCache();
 		const uint64_t wait_start = classes ? SrtClassesNowNs() : 0;
-		const bool     overlay    = buffers.WaitPendingReadbacks(vaddr, size);
+		Graphics::PerfReasonScope read_reason(Graphics::PerfReason::SrtWalker);
+		const bool     overlay    = buffers.WaitPendingReadbacks(vaddr, size, "ordinary");
 		if (classes) {
 			SrtClassesWait("ordinary", Graphics::ShaderRecompiler::IR::t_srt_read_class, vaddr, SrtClassesNowNs() - wait_start);
 		}
@@ -1386,7 +1387,8 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 		uint64_t wait_start  = classes ? SrtClassesNowNs() : 0;
 		// Bytes of a pending eager readback are no longer GPU-dirty, but guest memory still holds the
 		// older contents until the copy publishes; scalar/SRT reads must not see those.
-		overlay = buffers.WaitPendingReadbacks(vaddr, size);
+		Graphics::PerfReasonScope read_reason(Graphics::PerfReason::SrtWalker);
+		overlay = buffers.WaitPendingReadbacks(vaddr, size, "strict");
 		if (classes) {
 			const uint64_t now = SrtClassesNowNs();
 			SrtClassesWait("strict", Ir::t_srt_read_class, vaddr, now - wait_start);
@@ -1569,7 +1571,8 @@ static Graphics::ShaderRecompiler::IR::FastVerifyResult FastVerifyLoggedReads(
 					// A page with command-processor writes still pending is left to the
 					// readers, which put them over guest memory.
 					const uint64_t wait_start = Ir::SrtClassTrace() ? SrtClassesNowNs() : 0;
-					const bool     page_busy  = buffers.WaitPendingReadbacks(base, 4096u);
+					Graphics::PerfReasonScope read_reason(Graphics::PerfReason::SrtWalker);
+					const bool     page_busy  = buffers.WaitPendingReadbacks(base, 4096u, "verify");
 					if (Ir::SrtClassTrace()) SrtClassesWait("verify", run_class, base, SrtClassesNowNs() - wait_start);
 					if (page_busy || buffers.IsRegionGpuModified(base, 4096u)) {
 						clean = false;
