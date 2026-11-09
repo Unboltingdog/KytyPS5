@@ -2728,7 +2728,7 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 	                        ? LoadIndirectFormattedElement(ctx, buffer, Format::GetFormatInfo(table_format), channels,
 	                                                     selector, memory, one, any_memory, d16)
 	                        : SpirvFormattedSwitchReference() ? format_switch()
-	                        : SpirvFormatDecodeFlatEnabled()
+	                        : SpirvFormatDecodeFlatEnabled() && !SpirvFormatDecodeFastCasesEnabled()
 	                              ? LoadIndirectFormattedTable(ctx, buffer, channels, selector, memory, one, d16, decoded)
 	                              : cases();
 	if (!d16) return values;

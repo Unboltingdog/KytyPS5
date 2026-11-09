@@ -37802,15 +37802,17 @@ void CheckFormatDecodeBench() {
   std::filesystem::create_directories(directory, error);
   Require(name, "output directory", !error, error.message());
   const auto run = [&](const char *label, std::optional<bool> table_formats, std::optional<bool> flat,
-                       std::optional<bool> loop_format) {
+                       std::optional<bool> loop_format, std::optional<bool> fast_cases = std::nullopt) {
     ShaderRecompiler::Spirv::SetSpirvTableFormatsOverride(table_formats);
     ShaderRecompiler::Spirv::SetSpirvFormatDecodeFlatOverride(flat);
     ShaderRecompiler::Spirv::SetSpirvLoopFormatDecodeOverride(loop_format);
+    ShaderRecompiler::Spirv::SetSpirvFormatDecodeFastCasesOverride(fast_cases);
     ShaderComputeInputInfo compute{};
     auto shader = IndirectFormattedBench::Compile(pairs, 32u, compute, 0u, true);
     ShaderRecompiler::Spirv::SetSpirvTableFormatsOverride(std::nullopt);
     ShaderRecompiler::Spirv::SetSpirvFormatDecodeFlatOverride(std::nullopt);
     ShaderRecompiler::Spirv::SetSpirvLoopFormatDecodeOverride(std::nullopt);
+    ShaderRecompiler::Spirv::SetSpirvFormatDecodeFastCasesOverride(std::nullopt);
     ValidateSpirv(name, shader.spirv);
     Stats stats{.spirv = std::move(shader.spirv)};
     bool in_function = false;
@@ -37852,11 +37854,12 @@ void CheckFormatDecodeBench() {
     }
     const auto close_result = file != nullptr ? std::fclose(file) : EOF;
     Require(name, "write SPIR-V output", written == stats.spirv.size() && close_result == 0, path.string());
-    std::printf("FORMAT_DECODE_BENCH loads=%u descriptors=2 table_formats=%d flat=%d loop=%d words=%zu bytes=%zu "
+    std::printf("FORMAT_DECODE_BENCH loads=%u descriptors=2 table_formats=%d flat=%d loop=%d fast=%d words=%zu bytes=%zu "
                 "instructions=%zu OpSwitch=%zu OpPhi=%zu OpLabel=%zu OpLoopMerge=%zu OpSelect=%zu helpers=",
                 pairs * 2u, table_formats.value_or(false) ? 1 : 0, flat.value_or(false) ? 1 : 0,
-                loop_format.value_or(false) ? 1 : 0, stats.spirv.size(), stats.spirv.size() * sizeof(u32),
-                stats.instructions, stats.switches, stats.phis, stats.labels, stats.loops, stats.selects);
+                loop_format.value_or(false) ? 1 : 0, fast_cases.value_or(false) ? 1 : 0, stats.spirv.size(),
+                stats.spirv.size() * sizeof(u32), stats.instructions, stats.switches, stats.phis, stats.labels, stats.loops,
+                stats.selects);
     for (size_t i = 0; i < stats.helper_instructions.size(); ++i) {
       std::printf("%s%zu", i == 0 ? "" : ",", stats.helper_instructions[i]);
     }
@@ -37865,10 +37868,10 @@ void CheckFormatDecodeBench() {
   };
   const auto both_off = run("table0_flat0", false, false, false);
   const auto table_on = run("table1_flat0", true, false, false);
-  const auto flat_on = run("table0_flat1_loop0", false, true, false);
-  const auto flat_loop = run("table0_flat1_loop1", false, true, true);
-  const auto both_on = run("table1_flat1_loop0", true, true, false);
-  const auto both_loop = run("table1_flat1_loop1", true, true, true);
+  const auto flat_on = run("table0_flat1_loop0_fast0", false, true, false, false);
+  const auto flat_loop = run("table0_flat1_loop1_fast0", false, true, true, false);
+  const auto both_on = run("table1_flat1_loop0_fast0", true, true, false, false);
+  const auto both_loop = run("table1_flat1_loop1_fast0", true, true, true, false);
   const auto host_features = ShaderRecompiler::Spirv::GetHostFloatFeatures();
   auto amd_features = host_features;
   amd_features.amd = true;
@@ -37876,7 +37879,8 @@ void CheckFormatDecodeBench() {
   const auto amd_default = run("amd_defaults", std::nullopt, std::nullopt, std::nullopt);
   // The reference for the AMD defaults is built with the same AMD host features: the other AMD defaults (deferred BDA
   // fault, looped raw loads, native float ops) also change the module.
-  const auto amd_both_loop = run("amd_table1_flat1_loop1", true, true, true);
+  const auto amd_both_loop = run("amd_table1_flat1_loop1_fast0", true, true, true, false);
+  const auto amd_fast_loop = run("amd_table1_flat1_loop1_fast1", true, true, true, true);
   auto non_amd_features = host_features;
   non_amd_features.amd = false;
   ShaderRecompiler::Spirv::SetHostFloatFeatures(non_amd_features);
@@ -37909,6 +37913,7 @@ void CheckFormatDecodeBench() {
   check_table_access(flat_loop);
   check_table_access(both_on);
   check_table_access(both_loop);
+  check_table_access(amd_fast_loop);
   Require(name, "legacy decoder", both_off.switches != 0, "the legacy synthetic module has no format switches");
   Require(name, "flat decoder", flat_on.switches == 0 && both_on.switches == 0 &&
                                     flat_loop.switches == 0 && both_loop.switches == 0,
@@ -37917,8 +37922,12 @@ void CheckFormatDecodeBench() {
           "non-AMD default emission differs from the legacy decoder with both AMD paths disabled");
   Require(name, "non-AMD flat output", non_amd_flat_default.spirv == non_amd_flat.spirv,
           "the AMD loop setting changed non-AMD flat emission");
-  Require(name, "AMD defaults", amd_default.spirv == amd_both_loop.spirv,
-          "AMD default emission does not use table specialization and the looped flat decoder");
+  Require(name, "AMD defaults", amd_default.spirv == amd_fast_loop.spirv,
+          "AMD default emission does not use table specialization, fast cases and the looped flat fallback");
+  Require(name, "AMD fast-case opt-out", amd_both_loop.spirv != amd_fast_loop.spirv && amd_fast_loop.switches != 0,
+          "the AMD fast-case switch did not select the constant-format paths");
+  Require(name, "non-AMD fast-case byte identity", non_amd_flat_default.spirv == non_amd_flat.spirv,
+          "the AMD fast-case default changed non-AMD emission");
   Require(name, "specialized helpers",
           table_on.functions == both_off.functions + 2u && both_on.functions == flat_on.functions + 2u &&
               both_loop.functions == flat_loop.functions + 2u,

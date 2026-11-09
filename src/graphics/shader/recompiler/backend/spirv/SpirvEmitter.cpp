@@ -359,6 +359,7 @@ void SetSpirvTableFormatsOverride(std::optional<bool> enabled) {
 namespace {
 std::atomic_int g_format_decode_flat_override {-1};
 std::atomic_int g_loop_format_decode_override {-1};
+std::atomic_int g_format_decode_fast_cases_override {-1};
 } // namespace
 
 bool SpirvFormatDecodeFlatEnabled() {
@@ -384,6 +385,14 @@ bool SpirvLoopFormatDecodeEnabled() {
 	return value == nullptr || value[0] != '1';
 }
 
+bool SpirvFormatDecodeFastCasesEnabled() {
+	if (!SpirvFormatDecodeFlatEnabled() || !GetHostFloatFeatures().amd) return false;
+	const auto forced = g_format_decode_fast_cases_override.load(std::memory_order_relaxed);
+	if (forced >= 0) return forced != 0;
+	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_FORMAT_DECODE_FAST_CASES");
+	return value == nullptr || value[0] != '1';
+}
+
 bool SpirvDeferBdaFaultEnabled() {
 	if (!GetHostFloatFeatures().amd) return false;
 	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_DEFER_BDA_FAULT");
@@ -398,6 +407,11 @@ void SetSpirvFormatDecodeFlatOverride(std::optional<bool> enabled) {
 void SetSpirvLoopFormatDecodeOverride(std::optional<bool> enabled) {
 	g_loop_format_decode_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1,
 	                                    std::memory_order_relaxed);
+}
+
+void SetSpirvFormatDecodeFastCasesOverride(std::optional<bool> enabled) {
+	g_format_decode_fast_cases_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1,
+	                                          std::memory_order_relaxed);
 }
 
 uint64_t CurrentShaderGuestAddress() {

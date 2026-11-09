@@ -107,8 +107,13 @@ bool SpirvLoopRawLoadsEnabled();
 // decodes its channels and source components in DontUnroll loops, so AMD's forced inlining does not duplicate four
 // straight-line copies at every call. Other vendors keep the original helper byte-for-byte.
 bool SpirvLoopFormatDecodeEnabled();
+// AMD default with the flat decoder (KYTY_NO_AMD_FORMAT_DECODE_FAST_CASES=1 opts out): the generic helper tries its
+// constant-format cases before the flat fallback. The runtime format makes the choice, so another dispatch's V# needs no
+// new pipeline and always retains the generic path. Other vendors keep their existing emission byte-for-byte.
+bool SpirvFormatDecodeFastCasesEnabled();
 void SetSpirvFormatDecodeFlatOverride(std::optional<bool> enabled);
 void SetSpirvLoopFormatDecodeOverride(std::optional<bool> enabled);
+void SetSpirvFormatDecodeFastCasesOverride(std::optional<bool> enabled);
 
 // Guest address supplied by the translation options, or zero for a host-built program without one.
 uint64_t CurrentShaderGuestAddress();
