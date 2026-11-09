@@ -338,16 +338,26 @@ std::atomic_int g_table_formats_override {-1};
 } // namespace
 
 bool SpirvTableFormatsEnabled() {
-	static const bool environment = [] {
+	static const int environment = [] {
 		const char* value = Common::ShaderEnv::Read("KYTY_PERF_TABLE_FORMATS");
-		return value != nullptr && value[0] == '1';
+		if (value != nullptr && value[0] == '0') return 0;
+		if (value != nullptr && value[0] == '1') return 1;
+		return -1;
 	}();
 	const auto forced = g_table_formats_override.load(std::memory_order_relaxed);
-	return forced < 0 ? environment : forced != 0;
+	if (forced >= 0) return forced != 0;
+	if (environment >= 0) return environment != 0;
+	if (!GetHostFloatFeatures().amd) return false;
+	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_TABLE_FORMATS");
+	return value == nullptr || value[0] != '1';
 }
 
 void SetSpirvTableFormatsOverride(std::optional<bool> enabled) {
 	g_table_formats_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
+}
+
+uint64_t CurrentShaderGuestAddress() {
+	return t_shader_dump.guest;
 }
 
 namespace {

@@ -37574,16 +37574,20 @@ void CheckTableFormatSpecialization() {
   }
   const auto uniform_switches_on = CountSpirvOpcode(uniform_on.spirv, spv::OpSwitch);
   const auto uniform_switches_off = CountSpirvOpcode(uniform_off.spirv, spv::OpSwitch);
-  Require(name, "uniform format switch", uniform_switches_on < uniform_switches_off,
-          "a uniform table kept the runtime format switch");
-  Require(name, "uniform module size", uniform_on.spirv.size() < uniform_off.spirv.size(),
-          "a uniform table did not shrink the module");
+  const auto uniform_functions_on = CountSpirvOpcode(uniform_on.spirv, spv::OpFunction);
+  const auto uniform_functions_off = CountSpirvOpcode(uniform_off.spirv, spv::OpFunction);
+  Require(name, "specialized helper", uniform_functions_on == uniform_functions_off + 1u,
+          "a uniform table did not add exactly one format-specific load helper");
+  Require(name, "guarded generic fallback", uniform_switches_on == uniform_switches_off &&
+          CountSpirvOpcode(uniform_on.spirv, spv::OpBranchConditional) >
+              CountSpirvOpcode(uniform_off.spirv, spv::OpBranchConditional),
+          "the specialized load did not retain its guarded generic slow path");
   Require(name, "mixed fallback", mixed_on.spirv == mixed_off.spirv,
           "a mixed-format table changed when the specialization was enabled");
-  std::printf("TABLE_FORMATS uniform_off_words=%zu uniform_on_words=%zu saved_words=%zu "
-              "switches_off=%zu switches_on=%zu\n",
-              uniform_off.spirv.size(), uniform_on.spirv.size(),
-              uniform_off.spirv.size() - uniform_on.spirv.size(), uniform_switches_off, uniform_switches_on);
+  std::printf("TABLE_FORMATS uniform_off_words=%zu uniform_on_words=%zu "
+              "switches_off=%zu switches_on=%zu functions_off=%zu functions_on=%zu\n",
+              uniform_off.spirv.size(), uniform_on.spirv.size(), uniform_switches_off, uniform_switches_on,
+              uniform_functions_off, uniform_functions_on);
   std::printf("[host]    %-32s ok\n", name);
 }
 
@@ -45673,8 +45677,8 @@ int main(int argc, char **argv) {
     CheckShaderShrinkBench();
     CheckHalfOutlineBench();
     CheckAmdNativeFloatBench();
-    // CheckTableFormatSpecialization(); // still fail-fast on Windows CI after batch 31; KYTY_PERF_TABLE_FORMATS stays off
-    return 0;
+    RunStep("CheckTableFormatSpecialization", CheckTableFormatSpecialization);
+    return g_failed_steps.empty() ? 0 : 1;
   }
   if (argc == 2 && std::strcmp(argv[1], "--thread-dimensions-only") == 0) {
     VulkanHarness vulkan;

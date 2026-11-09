@@ -82,11 +82,15 @@ void SetSpirvStoreOutlineOverride(std::optional<bool> enabled);
 bool SpirvHalfOutlineEnabled();
 void SetSpirvHalfOutlineOverride(std::optional<bool> enabled);
 
-// KYTY_PERF_TABLE_FORMATS (default off; =1 on): a formatted load whose table candidates all have one format emits only
-// that format's load instead of the runtime format switch. Mixed or unknown tables keep the switch. The candidate formats
-// are already in the pipeline's resource specialization. Tests may force both modes (std::nullopt reads the environment).
+// KYTY_PERF_TABLE_FORMATS (=1 forces on, =0 forces off): a formatted load whose table candidates all have one format
+// calls a helper for that format when the runtime format matches, and the generic helper otherwise. AMD defaults on;
+// KYTY_NO_AMD_TABLE_FORMATS=1 opts out. Other vendors default off. Mixed or unknown tables use only the generic helper.
+// Tests may force both modes (std::nullopt reads the environment).
 bool SpirvTableFormatsEnabled();
 void SetSpirvTableFormatsOverride(std::optional<bool> enabled);
+
+// Guest address supplied by the translation options, or zero for a host-built program without one.
+uint64_t CurrentShaderGuestAddress();
 
 // A formatted load through a GPU-selected descriptor takes its own case for the 7 formats the game reads that way and
 // one table-driven read for every other format (spirvEmitterMemory.cpp, LoadIndirectFormattedVector and
