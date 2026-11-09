@@ -356,6 +356,23 @@ void SetSpirvTableFormatsOverride(std::optional<bool> enabled) {
 	g_table_formats_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
 }
 
+namespace {
+std::atomic_int g_format_decode_flat_override {-1};
+} // namespace
+
+bool SpirvFormatDecodeFlatEnabled() {
+	const auto forced = g_format_decode_flat_override.load(std::memory_order_relaxed);
+	if (forced >= 0) return forced != 0;
+	if (!GetHostFloatFeatures().amd) return false;
+	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_FORMAT_DECODE_FLAT");
+	return value == nullptr || value[0] != '1';
+}
+
+void SetSpirvFormatDecodeFlatOverride(std::optional<bool> enabled) {
+	g_format_decode_flat_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1,
+	                                    std::memory_order_relaxed);
+}
+
 uint64_t CurrentShaderGuestAddress() {
 	return t_shader_dump.guest;
 }

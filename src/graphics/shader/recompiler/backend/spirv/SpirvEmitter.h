@@ -89,6 +89,11 @@ void SetSpirvHalfOutlineOverride(std::optional<bool> enabled);
 bool SpirvTableFormatsEnabled();
 void SetSpirvTableFormatsOverride(std::optional<bool> enabled);
 
+// AMD defaults the branch-reduced runtime format decoder on; KYTY_NO_AMD_FORMAT_DECODE_FLAT=1 opts out. Other vendors
+// keep the original decoder. Tests may force both modes (std::nullopt reads the environment).
+bool SpirvFormatDecodeFlatEnabled();
+void SetSpirvFormatDecodeFlatOverride(std::optional<bool> enabled);
+
 // Guest address supplied by the translation options, or zero for a host-built program without one.
 uint64_t CurrentShaderGuestAddress();
 

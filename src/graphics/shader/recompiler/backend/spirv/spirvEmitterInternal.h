@@ -170,6 +170,7 @@ struct EmitterState {
 	std::map<uint32_t, uint32_t>                     indirect_formatted_load_functions;
 	// SpecializedIndirectTableFormat helpers; the shape key's bits 16..22 hold the captured format.
 	std::map<uint32_t, uint32_t>                     indirect_specialized_load_functions;
+	uint32_t                                         formatted_table_variable = 0;
 	uint32_t                                         indirect_raw_function = 0;
 	uint32_t                                         indirect_raw_coherent_function = 0; // GLC accesses (MemoryInfo::coherent)
 	// F1 (grouped IndirectBuffer reads): indirect_raw_x<N>[_coherent], index (N - 2) + 3 * coherent (0: not defined).

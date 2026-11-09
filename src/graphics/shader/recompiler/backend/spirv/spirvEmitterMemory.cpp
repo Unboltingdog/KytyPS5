@@ -2113,20 +2113,43 @@ uint32_t LoadIndirectFormattedTable(ValueEmitContext& ctx, const IndirectBufferA
 	const auto u32     = TypeU32(state);
 	const auto u64     = TypeU64(state);
 	const auto boolean = TypeBool(state);
-	// The format's five table words: a constant u32[5] picked by a switch over the format (one phi per word, no code in
-	// the cases; FORMAT values past the last format take case 0, kInvalid, as the format switch's default). A Private
-	// table indexed by the format (25.10, first version) gave the same values but cost +1.2 ms of GPU time per frame:
-	// the driver set up the 390-word array in every invocation (CS 8457901d 0.44 -> 1.28 ms per dispatch).
+	// FORMAT values past the last format select the invalid entry, matching the switch's default.
 	static constexpr auto table_words = BuildFormattedTable();
 	const auto            entry_type =
 	    state.builder.Type(spv::OpTypeArray, TypeU32(state), ConstantU32(state, FormattedTableWords));
-	const auto picked = EmitIndexSwitch(state, buffer.format, FormattedTableFormats, entry_type, [&](uint32_t format) {
+	const auto constant_entry = [&](uint32_t format) {
 		std::array<uint32_t, FormattedTableWords> ids {};
 		for (uint32_t i = 0; i < FormattedTableWords; ++i) {
 			ids[i] = ConstantU32(state, table_words[format * FormattedTableWords + i]);
 		}
 		return state.builder.Constant(spv::OpConstantComposite, entry_type, std::span<const uint32_t>(ids));
-	});
+	};
+	const auto picked = [&]() {
+		if (!SpirvFormatDecodeFlatEnabled()) {
+			return EmitIndexSwitch(state, buffer.format, FormattedTableFormats, entry_type, constant_entry);
+		}
+		if (state.formatted_table_variable == 0u) {
+			const auto table_type = state.builder.Type(spv::OpTypeArray, entry_type,
+			                                           ConstantU32(state, FormattedTableFormats));
+			std::array<uint32_t, FormattedTableFormats> entries {};
+			for (uint32_t format = 0; format < FormattedTableFormats; ++format) entries[format] = constant_entry(format);
+			const auto initializer =
+			    state.builder.Constant(spv::OpConstantComposite, table_type, std::span<const uint32_t>(entries));
+			state.formatted_table_variable = state.builder.DefineInitializedGlobalVariable(
+			    TypePointer(state, spv::StorageClassPrivate, table_type), spv::StorageClassPrivate, initializer);
+			state.builder.AddName(state.formatted_table_variable, "formatted_format_table");
+		}
+		const auto index = Select(
+		    state, u32,
+		    Binary(state, spv::OpULessThan, boolean, buffer.format, ConstantU32(state, FormattedTableFormats)),
+		    buffer.format, ConstantU32(state, 0));
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain, TypePointer(state, spv::StorageClassPrivate, entry_type), pointer,
+		                          state.formatted_table_variable, ConstantU32(state, 0), index);
+		const auto value = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLoad, entry_type, value, pointer);
+		return value;
+	}();
 	const auto field   = [&](uint32_t word, uint32_t first, uint32_t count) {
         return EmitBitFieldUExtract(state, word, ConstantU32(state, first), ConstantU32(state, count));
 	};
