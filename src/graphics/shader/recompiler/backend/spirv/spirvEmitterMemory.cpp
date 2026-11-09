@@ -2598,8 +2598,10 @@ uint32_t CallIndirectFormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, 
 			                                         table_format);
 		};
 		const auto elements = [&](uint32_t composite) {
+			// One component is a plain u32; otherwise every element (the first too) is extracted from the composite.
 			std::array<uint32_t, 4> values {composite};
-			for (uint32_t item = 1; item < components; ++item) {
+			if (components == 1u) return values;
+			for (uint32_t item = 0; item < components; ++item) {
 				values[item] = state.builder.AllocateId();
 				state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), values[item], composite, item);
 			}
