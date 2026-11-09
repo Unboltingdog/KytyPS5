@@ -2239,9 +2239,10 @@ std::array<uint32_t, 4> EmitIndirectFormattedLoop(EmitterState& state, uint32_t 
 		held[c]     = state.builder.AllocateId();
 		held_phi[c] = state.builder.AddDeferredPhi(u32, held[c], 2);
 	}
+	// The condition goes before OpLoopMerge: the merge must be the header's second-to-last instruction.
+	const auto keep_going = Binary(state, spv::OpULessThan, boolean, i, ConstantU32(state, count));
 	state.builder.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlDontUnrollMask);
-	state.builder.AddFunction(spv::OpBranchConditional,
-	                          Binary(state, spv::OpULessThan, boolean, i, ConstantU32(state, count)), loop, merge);
+	state.builder.AddFunction(spv::OpBranchConditional, keep_going, loop, merge);
 	EmitLabel(state, loop);
 	const auto next = body(i, held);
 	state.builder.AddFunction(spv::OpBranch, cont);
@@ -2312,9 +2313,9 @@ uint32_t LoadIndirectFormattedTableLoop(ValueEmitContext& ctx, const IndirectBuf
 		component[c]     = state.builder.AllocateId();
 		component_phi[c] = state.builder.AddDeferredPhi(u32, component[c], 2);
 	}
+	const auto keep_going = Binary(state, spv::OpULessThan, boolean, channel, ConstantU32(state, channels));
 	state.builder.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlDontUnrollMask);
-	state.builder.AddFunction(spv::OpBranchConditional,
-	                          Binary(state, spv::OpULessThan, boolean, channel, ConstantU32(state, channels)), loop, merge);
+	state.builder.AddFunction(spv::OpBranchConditional, keep_going, loop, merge);
 	EmitLabel(state, loop);
 	const auto current_component = Binary(
 	    state, spv::OpUMod, u32,
