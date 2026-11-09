@@ -380,8 +380,9 @@ bool SpirvLoopRawLoadsEnabled() {
 bool SpirvRawDescriptorHoistEnabled() {
 	if (!GetHostFloatFeatures().amd) return false;
 	if (g_raw_descriptor_hoist_override >= 0) return g_raw_descriptor_hoist_override != 0;
-	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_RAW_DESCRIPTOR_HOIST");
-	return value == nullptr || value[0] != '1';
+	// Opt-in: the CI bench measured the hoisted helpers larger, not smaller (grouped 180 vs 139 instructions).
+	const char* value = Common::ShaderEnv::Read("KYTY_AMD_RAW_DESCRIPTOR_HOIST");
+	return value != nullptr && value[0] == '1';
 }
 
 void SetSpirvRawDescriptorHoistOverride(std::optional<bool> enabled) {

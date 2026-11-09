@@ -38010,14 +38010,12 @@ void CheckRawDescriptorHoistBench() {
   const auto non_amd_default = run("non_amd_default", std::nullopt);
   const auto non_amd_forced = run("non_amd_forced", true);
   ShaderRecompiler::Spirv::SetHostFloatFeatures(host_features);
-  Require(name, "AMD default", amd_default.spirv == amd_on.spirv,
-          "AMD default emission did not select descriptor hoisting");
+  // Opt-in (KYTY_AMD_RAW_DESCRIPTOR_HOIST=1): in this bench the hoisted helpers came out larger (group 180 vs 139,
+  // 38304 vs 32688 inlined), so the AMD default keeps the original emission.
+  Require(name, "AMD default", amd_default.spirv == amd_off.spirv,
+          "AMD default emission selected descriptor hoisting");
   Require(name, "non-AMD byte identity", non_amd_default.spirv == non_amd_forced.spirv,
           "descriptor hoisting changed non-AMD emission");
-  Require(name, "group helper size", amd_on.group_helper < amd_off.group_helper,
-          "descriptor hoisting did not shrink the grouped raw-load helper");
-  Require(name, "scalar helper size", amd_on.scalar_helper < amd_off.scalar_helper,
-          "descriptor hoisting did not shrink the per-dword raw-load helper");
   std::printf("[host]    %-32s ok\n", name);
 }
 

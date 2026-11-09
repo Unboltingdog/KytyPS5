@@ -103,7 +103,7 @@ bool SpirvDeferBdaFaultEnabled();
 // GPU-selected descriptor calls indirect_raw_dword once in a DontUnroll loop instead of once per dword. Measured on
 // the RX 9070 XT: 0x802184cc00 58.5 s -> 46.3 s, 0x808d22eb00 75.9 s -> 51.4 s. Same values; other vendors unchanged.
 bool SpirvLoopRawLoadsEnabled();
-// AMD default (KYTY_NO_AMD_RAW_DESCRIPTOR_HOIST=1 opts out): raw indirect loads decode each V# once at its resource
+// AMD opt-in (KYTY_AMD_RAW_DESCRIPTOR_HOIST=1; the CI bench measured the helpers larger, so off by default): raw indirect loads decode each V# once at its resource
 // definition and pass the fields to the grouped/per-dword helpers. Grouped loads use one whole-range fast check and
 // partial masks only for out-of-range modes 0 and 3. Other vendors keep byte-identical emission.
 bool SpirvRawDescriptorHoistEnabled();

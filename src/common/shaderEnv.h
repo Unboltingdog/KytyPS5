@@ -33,6 +33,7 @@ namespace Common::ShaderEnv {
 // Sorted (strcmp order; checked below).
 inline constexpr const char* Names[] = {
     "KYTY_AMD_FORMAT_DECODE_FAST_CASES",
+    "KYTY_AMD_RAW_DESCRIPTOR_HOIST",
     // Read in src/graphics/shader (the recompiler, the stage code):
     "KYTY_BINDLESS",
     "KYTY_BINDLESS_R128",
@@ -65,7 +66,6 @@ inline constexpr const char* Names[] = {
     "KYTY_NO_AMD_NATIVE_ISNAN",
     "KYTY_NO_AMD_NATIVE_MINMAX",
     "KYTY_NO_AMD_NATIVE_MIX",
-    "KYTY_NO_AMD_RAW_DESCRIPTOR_HOIST",
     "KYTY_NO_AMD_TABLE_FORMATS",
     "KYTY_OUTLINE_HELPERS",
     // BufferCache::BdaEntryShareMode (bufferCache.cpp), read by the SPIR-V emitter.
