@@ -220,7 +220,7 @@ Compile::Compile(Kind kind, uint64_t key_hash, std::span<const Stage> stages) {
 	Slots()[m_slot].active.store(record, std::memory_order_release);
 }
 
-void Compile::End(vk::Result result) {
+void Compile::End(vk::Result result, int cache_hit) {
 	if (m_record == nullptr) return;
 	const auto elapsed_ms = ElapsedMs(*m_record, Clock::now());
 	Slots()[m_slot].active.store(nullptr, std::memory_order_release);
@@ -228,10 +228,10 @@ void Compile::End(vk::Result result) {
 		for (const auto& stage: m_record->stages) {
 			std::fprintf(stderr,
 			             "PIPELINE_COMPILE kind=%s stage=%s hash=0x%016" PRIx64 " spirv_hash=0x%016" PRIx64
-			             " spirv_bytes=%zu ms=%" PRIu64 " guest=0x%016" PRIx64 " result=%s\n",
+			             " spirv_bytes=%zu ms=%" PRIu64 " guest=0x%016" PRIx64 " result=%s cache_hit=%d\n",
 			             m_record->kind == Kind::Compute ? "compute" : "graphics", stage.name, m_record->key_hash,
 			             stage.hash, stage.spirv.size() * sizeof(uint32_t), elapsed_ms, stage.guest_address,
-			             vk::to_string(result).c_str());
+			             vk::to_string(result).c_str(), cache_hit);
 		}
 		std::fflush(stderr);
 	}

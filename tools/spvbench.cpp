@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <string>
@@ -122,6 +123,7 @@ struct VulkanApi {
 	PFN_vkDestroyPipelineLayout DestroyPipelineLayout = nullptr;
 	PFN_vkCreatePipelineCache CreatePipelineCache = nullptr;
 	PFN_vkDestroyPipelineCache DestroyPipelineCache = nullptr;
+	PFN_vkGetPipelineCacheData GetPipelineCacheData = nullptr;
 	PFN_vkCreateComputePipelines CreateComputePipelines = nullptr;
 	PFN_vkDestroyPipeline DestroyPipeline = nullptr;
 
@@ -181,6 +183,7 @@ struct VulkanApi {
 		SPVBENCH_DEVICE_FN(DestroyPipelineLayout);
 		SPVBENCH_DEVICE_FN(CreatePipelineCache);
 		SPVBENCH_DEVICE_FN(DestroyPipelineCache);
+		SPVBENCH_DEVICE_FN(GetPipelineCacheData);
 		SPVBENCH_DEVICE_FN(CreateComputePipelines);
 		SPVBENCH_DEVICE_FN(DestroyPipeline);
 #undef SPVBENCH_DEVICE_FN
@@ -300,6 +303,9 @@ public:
 
 	const VkPhysicalDeviceDescriptorIndexingProperties& DescriptorLimits() const { return descriptor_properties; }
 	uint64_t LastCompileMs() const { return last_compile_ms; }
+	// --cache-test: the cache file to load before the compile and to save after it, and what happened.
+	std::filesystem::path cache_file;
+	std::string           cache_report;
 
 private:
 	VkResult SelectQueue() {
@@ -885,9 +891,25 @@ VkResult VulkanSession::Compile(const std::vector<uint32_t>& words, const Reflec
 		cleanup();
 		return result;
 	}
-	if (!no_cache) {
+	std::vector<char> cache_data;
+	if (!cache_file.empty()) {
+		std::ifstream input(cache_file, std::ios::binary);
+		if (input) cache_data.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+	}
+	if (!no_cache || !cache_file.empty()) {
 		VkPipelineCacheCreateInfo cache_create {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+		cache_create.initialDataSize = cache_data.size();
+		cache_create.pInitialData    = cache_data.empty() ? nullptr : cache_data.data();
 		result = api.CreatePipelineCache(device, &cache_create, nullptr, &cache);
+		if (result != VK_SUCCESS && !cache_data.empty()) {
+			cache_report += " cache_load=rejected";
+			cache_data.clear();
+			cache_create.initialDataSize = 0;
+			cache_create.pInitialData    = nullptr;
+			result = api.CreatePipelineCache(device, &cache_create, nullptr, &cache);
+		} else if (!cache_file.empty()) {
+			cache_report += cache_data.empty() ? " cache_load=empty" : " cache_load=" + std::to_string(cache_data.size());
+		}
 		if (result != VK_SUCCESS) {
 			cleanup();
 			return result;
@@ -920,6 +942,23 @@ VkResult VulkanSession::Compile(const std::vector<uint32_t>& words, const Reflec
 	const auto begin = Clock::now();
 	result = api.CreateComputePipelines(device, cache, 1, &create, nullptr, &pipeline);
 	last_compile_ms = Milliseconds(begin);
+	if (!cache_file.empty() && result == VK_SUCCESS && cache != VK_NULL_HANDLE) {
+		// The same pipeline again with the same cache object: an in-process cache hit.
+		VkPipeline again = VK_NULL_HANDLE;
+		const auto again_begin = Clock::now();
+		const VkResult again_result = api.CreateComputePipelines(device, cache, 1, &create, nullptr, &again);
+		cache_report += " warm_ms=" + std::to_string(Milliseconds(again_begin));
+		if (again_result == VK_SUCCESS) api.DestroyPipeline(device, again, nullptr);
+		size_t size = 0;
+		if (api.GetPipelineCacheData(device, cache, &size, nullptr) == VK_SUCCESS && size != 0) {
+			std::vector<char> data(size);
+			if (api.GetPipelineCacheData(device, cache, &size, data.data()) == VK_SUCCESS) {
+				std::ofstream out(cache_file, std::ios::binary | std::ios::trunc);
+				out.write(data.data(), static_cast<std::streamsize>(size));
+				cache_report += out.good() ? " cache_saved=" + std::to_string(size) : " cache_saved=write_failed";
+			}
+		}
+	}
 	if (result == VK_SUCCESS && out_pipeline != nullptr) {
 		*out_pipeline = pipeline;
 		pipeline = VK_NULL_HANDLE;
@@ -939,9 +978,12 @@ bool ReadSpirv(const std::filesystem::path& path, std::vector<uint32_t>& words) 
 	return input.good() || input.eof();
 }
 
+bool g_cache_test = false; // --cache-test
+
 int RunChild(const std::filesystem::path& path, int device_index, bool no_cache) {
 	VkResult result = VK_ERROR_INITIALIZATION_FAILED;
 	uint64_t compile_ms = 0;
+	std::string cache_report;
 	std::vector<uint32_t> words;
 	if (!ReadSpirv(path, words)) {
 		std::fprintf(stderr, "SPVBENCH cannot read %s\n", path.string().c_str());
@@ -954,15 +996,17 @@ int RunChild(const std::filesystem::path& path, int device_index, bool no_cache)
 			VulkanSession session;
 			result = session.Init(device_index);
 			if (result == VK_SUCCESS) {
+				if (g_cache_test) session.cache_file = std::filesystem::path(path).concat(".pcache");
 				result = session.Compile(words, reflection, no_cache);
 				compile_ms = session.LastCompileMs();
+				cache_report = session.cache_report;
 			}
 		}
 	}
 	std::printf("SPVBENCH file=%s bytes=%zu result=%s", path.string().c_str(), words.size() * sizeof(uint32_t),
 	            ResultName(result));
 	if (ResultName(result) == std::string_view("VK_RESULT")) std::printf("(%d)", static_cast<int>(result));
-	std::printf(" ms=%" PRIu64 "\n", compile_ms);
+	std::printf(" ms=%" PRIu64 "%s\n", compile_ms, cache_report.c_str());
 	std::fflush(stdout);
 	return 0;
 }
@@ -1012,6 +1056,7 @@ ChildResult RunIsolated(const std::string& executable, const std::filesystem::pa
 	std::string command = QuoteWindows(executable) + " --child " + QuoteWindows(path.string());
 	if (device_index >= 0) command += " --device " + std::to_string(device_index);
 	if (no_cache) command += " --no-cache";
+	if (g_cache_test) command += " --cache-test";
 	STARTUPINFOA startup {sizeof(startup)};
 	startup.dwFlags = STARTF_USESTDHANDLES;
 	startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
@@ -1080,6 +1125,7 @@ ChildResult RunIsolated(const std::string& executable, const std::filesystem::pa
 			args.push_back(index.c_str());
 		}
 		if (no_cache) args.push_back("--no-cache");
+		if (g_cache_test) args.push_back("--cache-test");
 		args.push_back(nullptr);
 		execv(executable.c_str(), const_cast<char* const*>(args.data()));
 		_Exit(127);
@@ -1139,7 +1185,7 @@ void Trim(std::string& text) {
 
 void Usage() {
 	std::fprintf(stderr,
-	             "usage: kyty_spvbench [--timeout SEC=20] [--repeat N=1] [--device INDEX] [--no-cache] "
+	             "usage: kyty_spvbench [--timeout SEC=20] [--repeat N=1] [--device INDEX] [--no-cache] [--cache-test] "
 	             "[--out FILE] <file.spv | directory>...\n");
 }
 
@@ -1156,6 +1202,25 @@ int main(int argc, char** argv) {
 	bool no_cache = false;
 	bool device_selected = false;
 	const std::string executable = ExecutablePath(argc > 0 ? argv[0] : "kyty_spvbench");
+	// Double-clicked (no arguments): spvbench-args.txt next to the executable may hold options, one per line or
+	// separated by spaces (for example "--cache-test --timeout 90"), so a run needs no command line.
+	std::vector<std::string> arguments;
+	for (int i = 0; i < argc; i++) arguments.emplace_back(argv[i]);
+	if (argc <= 1) {
+		std::ifstream options(std::filesystem::path(executable).parent_path() / "spvbench-args.txt");
+		for (std::string word; options >> word;) {
+			if (!word.empty() && word.front() == '#') {
+				std::string rest;
+				std::getline(options, rest);
+				continue;
+			}
+			arguments.push_back(word);
+		}
+	}
+	std::vector<char*> argument_pointers;
+	for (auto& argument: arguments) argument_pointers.push_back(argument.data());
+	argc = static_cast<int>(argument_pointers.size());
+	argv = argument_pointers.data();
 	for (int i = 1; i < argc; i++) {
 		const std::string_view argument = argv[i];
 		uint64_t* number = nullptr;
@@ -1180,6 +1245,8 @@ int main(int argc, char** argv) {
 			child_path = argv[i];
 		} else if (argument == "--no-cache") {
 			no_cache = true;
+		} else if (argument == "--cache-test") {
+			g_cache_test = true;
 		} else if (argument == "--out") {
 			if (++i >= argc) {
 				Usage();

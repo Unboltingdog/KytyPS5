@@ -32,6 +32,11 @@ void PrepareShader(ShaderRecompiler::IR::CompiledShaderInfo& info, std::span<con
                    uint64_t guest_address);
 [[nodiscard]] Stage ShaderStage(const char* name, const ShaderRecompiler::IR::CompiledShaderInfo* info);
 [[nodiscard]] bool DisableOptimization(Kind kind, std::span<const Stage> stages);
+// 1 when the driver reported an application pipeline cache hit, 0 when it reported a miss, -1 when it gave no feedback.
+[[nodiscard]] inline int CacheHit(const vk::PipelineCreationFeedback& feedback) {
+	if (!(feedback.flags & vk::PipelineCreationFeedbackFlagBits::eValid)) return -1;
+	return (feedback.flags & vk::PipelineCreationFeedbackFlagBits::eApplicationPipelineCacheHit) ? 1 : 0;
+}
 
 class Compile {
 public:
@@ -39,7 +44,9 @@ public:
 	~Compile() = default;
 	KYTY_CLASS_NO_COPY(Compile);
 
-	void End(vk::Result result);
+	// cache_hit: VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT of the pipeline feedback
+	// (1 hit, 0 miss, -1 not reported), printed as cache_hit= on the PIPELINE_COMPILE line.
+	void End(vk::Result result, int cache_hit = -1);
 
 private:
 	Record*  m_record = nullptr;

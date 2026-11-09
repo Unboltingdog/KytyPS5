@@ -1015,10 +1015,18 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		pipeline_info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
 	}
 	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Graphics, key_hash, diag_stages);
+	// KYTY_DIAG_PIPELINE_COMPILE: ask the driver whether the pipeline came from the pipeline cache.
+	vk::PipelineCreationFeedback           feedback {};
+	vk::PipelineCreationFeedbackCreateInfo feedback_info {};
+	if (PipelineCompileDiag::Enabled()) {
+		feedback_info.pPipelineCreationFeedback = &feedback;
+		feedback_info.pNext                     = pipeline_info.pNext;
+		pipeline_info.pNext                     = &feedback_info;
+	}
 	const auto create_begin = std::chrono::steady_clock::now();
 	result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info, nullptr,
 	                                                 &pipeline.pipeline);
-	diag_compile.End(result);
+	diag_compile.End(result, PipelineCompileDiag::CacheHit(feedback));
 	// KYTY_TRACE_STARTUP: every graphics pipeline creation (GPU thread or background), 50 ms+ ones also as slow.
 	if (Common::StartupTrace::Enabled()) {
 		const auto ms =
@@ -1190,10 +1198,18 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
 	}
 	PipelineCompileDiag::Compile diag_compile(PipelineCompileDiag::Kind::Compute, key_hash, diag_stages);
+	// KYTY_DIAG_PIPELINE_COMPILE: ask the driver whether the pipeline came from the pipeline cache.
+	vk::PipelineCreationFeedback           feedback {};
+	vk::PipelineCreationFeedbackCreateInfo feedback_info {};
+	if (PipelineCompileDiag::Enabled()) {
+		feedback_info.pPipelineCreationFeedback = &feedback;
+		feedback_info.pNext                     = info.pNext;
+		info.pNext                              = &feedback_info;
+	}
 	const auto create_begin = std::chrono::steady_clock::now();
 	result = graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr,
 	                                                &pipeline.pipeline);
-	diag_compile.End(result);
+	diag_compile.End(result, PipelineCompileDiag::CacheHit(feedback));
 	// KYTY_TRACE_STARTUP: every compute pipeline creation (GPU thread or background), 50 ms+ ones also as slow.
 	if (Common::StartupTrace::Enabled()) {
 		const auto ms =
