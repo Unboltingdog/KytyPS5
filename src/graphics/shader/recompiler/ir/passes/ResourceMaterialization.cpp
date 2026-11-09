@@ -3013,6 +3013,37 @@ ImageResource ImageHeapResource(const ImageResource& root, uint32_t kind) {
 	return resource;
 }
 
+bool HasUniformTableFormat(const ResourcePlan& program, const ResourceSpecialization& specialization) {
+	for (size_t index = 0; index < specialization.buffers.size(); ++index) {
+		const auto& binding = specialization.buffers[index];
+		const size_t base_index = index < program.info.buffers.size() ? index : binding.indirect_root;
+		if (base_index >= program.info.buffers.size()) continue;
+		const auto& base = program.info.buffers[base_index];
+		const auto* source = Source(program, base.source);
+		if (!base.formatted || source == nullptr || !source->indirect_descriptor.has_value()) continue;
+		if (binding.indirect_root == BufferResource::NoIndirectBuffer) {
+			if (binding.descriptor_format != Prospero::BufferFormat::kInvalid) return true;
+			continue;
+		}
+		if (binding.indirect_root >= specialization.buffers.size()) continue;
+		auto format = Prospero::BufferFormat::kInvalid;
+		bool mixed  = false;
+		for (const auto& candidate: specialization.buffers) {
+			if (candidate.indirect_root != binding.indirect_root ||
+			    candidate.descriptor_format == Prospero::BufferFormat::kInvalid)
+				continue;
+			if (format == Prospero::BufferFormat::kInvalid) {
+				format = candidate.descriptor_format;
+			} else if (format != candidate.descriptor_format) {
+				mixed = true;
+				break;
+			}
+		}
+		if (format != Prospero::BufferFormat::kInvalid && !mixed) return true;
+	}
+	return false;
+}
+
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {
 	EXIT_IF(!program.resource_tracking_complete || program.shader_info_complete);
 	EXIT_IF(program.info.buffers.size() > specialization.buffers.size() ||

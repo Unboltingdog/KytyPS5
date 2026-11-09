@@ -351,6 +351,13 @@ double MillisecondsSince(std::chrono::steady_clock::time_point begin) {
 	return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
 }
 
+void SelectTableFormatVariant(const ShaderRecompiler::IR::ResourcePlan& plan,
+                              ShaderRecompiler::IR::ResourceSpecialization& specialization) {
+	specialization.table_format_specialization =
+	    ShaderRecompiler::Spirv::SpirvTableFormatsEnabled() &&
+	    ShaderRecompiler::IR::HasUniformTableFormat(plan, specialization);
+}
+
 // The driver cache file passed 4 GiB once (4.83 GB): Common::File reads and writes 32-bit sizes, so the
 // payload goes in 1 GiB pieces. Returns the bytes done (short on an error).
 static constexpr uint64_t PipelineCacheFileChunk = uint64_t {1} << 30u;
@@ -692,6 +699,7 @@ struct PipelineCache::ProgramCache {
 				if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) { // KYTY_TRACE_DISPATCH_CENSUS
 					t_compute_program_path = resolved ? 3u : 2u;
 				}
+				SelectTableFormatVariant(cached.resource_plan, out_specialization);
 				KYTY_PROFILER_BLOCK("ProgramCache::FindPermutation");
 				{
 					const DispatchSubTimer permutation_timer(std::is_same_v<InputInfo, ShaderComputeInputInfo>
@@ -873,12 +881,14 @@ struct PipelineCache::ProgramCache {
 			entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated->program);
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(entry->second.resource_plan, runtime,
 			                                                     entry->second.Resources(), entry->second.specialization));
+			SelectTableFormatVariant(entry->second.resource_plan, entry->second.specialization);
 			if (auto* permutation = entry->second.FindPermutation<true>(push_data_cursor, entry->second.specialization)) {
 				input_info.stage = {.program = &permutation->program, .resources = &entry->second.Resources()};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
 				return permutation->handle;
 			}
 		}
+		SelectTableFormatVariant(entry->second.resource_plan, entry->second.specialization);
 		const double materialize_ms = MillisecondsSince(materialize_begin);
 		if (std::FILE* f = Common::EnvRead::ShaderStagesFile()) { std::fprintf(f, "STAGE compile 0x%016llx\n", static_cast<unsigned long long>(options.shader_hash)); std::fclose(f); }
 		PipelineTrace::TracePermutation(options.shader_hash, LastSpecialization(entry->second.permutations),
@@ -1091,6 +1101,7 @@ struct PipelineCache::ProgramCache {
 		r.null_share_kinds = r.plan->scratch[ResolveScratchSlot].null_share_kinds;
 		StageF::BuildResolveRecord(renderer, r.resources, r.record); // FindBuffers' sources for this snapshot
 		g_resolve_stats.made.fetch_add(1, std::memory_order_relaxed);
+		SelectTableFormatVariant(*r.plan, r.specialization);
 		Permutation* permutation = nullptr;
 		{
 			std::shared_lock lock(programs_mutex);
@@ -1115,6 +1126,7 @@ struct PipelineCache::ProgramCache {
 			auto& r     = results.stages[i];
 			auto& entry = *static_cast<SourceEntry*>(r.entry);
 			ShaderRecompiler::IR::ApplyNullFormattedShare(*r.plan, r.null_share_kinds, r.specialization);
+			SelectTableFormatVariant(*r.plan, r.specialization);
 			auto*      permutation = static_cast<Permutation*>(r.permutation);
 			const bool shared      = std::ranges::find(r.null_share_kinds, uint8_t {1}) != r.null_share_kinds.end();
 			if (permutation == nullptr || shared || !permutation->program.bindings.PushStartMatches(cursor)) {

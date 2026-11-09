@@ -334,7 +334,7 @@ void SetSpirvHalfOutlineOverride(std::optional<bool> enabled) {
 }
 
 namespace {
-std::atomic_int g_table_formats_override {-1};
+thread_local int g_table_formats_override = -1;
 } // namespace
 
 bool SpirvTableFormatsEnabled() {
@@ -344,7 +344,7 @@ bool SpirvTableFormatsEnabled() {
 		if (value != nullptr && value[0] == '1') return 1;
 		return -1;
 	}();
-	const auto forced = g_table_formats_override.load(std::memory_order_relaxed);
+	const auto forced = g_table_formats_override;
 	if (forced >= 0) return forced != 0;
 	if (environment >= 0) return environment != 0;
 	if (!GetHostFloatFeatures().amd) return false;
@@ -353,7 +353,7 @@ bool SpirvTableFormatsEnabled() {
 }
 
 void SetSpirvTableFormatsOverride(std::optional<bool> enabled) {
-	g_table_formats_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
+	g_table_formats_override = enabled.has_value() ? (*enabled ? 1 : 0) : -1;
 }
 
 namespace {

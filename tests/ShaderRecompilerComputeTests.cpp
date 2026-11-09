@@ -37351,9 +37351,11 @@ CompiledShader Compile(const LoadProgram &spec, u32 host_subgroup_size, ShaderCo
   memory.data_dwords = components;
   memory.formatted = true;
   memory.offen = true;
+  memory.resource = 0;
   program.memory_info.push_back(memory);
   MemoryInfo out{};
   out.kind = ResourceKind::IndirectBuffer;
+  out.resource = 1;
   out.data_bits = 32;
   out.component_count = components;
   out.data_dwords = components;
@@ -37361,6 +37363,8 @@ CompiledShader Compile(const LoadProgram &spec, u32 host_subgroup_size, ShaderCo
   out.offen = true;
   out.record_keyed = true;
   program.memory_info.push_back(out);
+  program.info.buffers.resize(2);
+  program.info.buffers[0].formatted = true;
   program.info.uses_dma = true;
 
   compute = ShaderComputeInputInfo{};
@@ -37374,23 +37378,30 @@ CompiledShader Compile(const LoadProgram &spec, u32 host_subgroup_size, ShaderCo
     Require("TableFormatSpecialization", "buffer root", !program.info.buffers.empty(),
             "the indirect formatted load has no buffer resource");
     auto root = program.info.buffers[0];
-    root.indirect_root = 0;
-    root.descriptor_format = Prospero::BufferFormat::kInvalid;
-    root.indirect_resources = {0u};
-    program.info.buffers[0] = root;
-    const bool mixed = table_mode == 2 || table_mode == 3;
-    const auto formats = mixed
-                             ? std::array{Prospero::BufferFormat::k32UInt, Prospero::BufferFormat::k16Float}
-                             : std::array{Prospero::BufferFormat::k32UInt, Prospero::BufferFormat::k32UInt};
-    const u32 count = mixed ? 2u : 1u;
-    for (u32 index = 0; index < count; ++index) {
-      auto child = root;
-      child.descriptor_format = formats[index];
-      child.indirect_resources.clear();
-      program.info.buffers[0].indirect_resources.push_back(static_cast<u32>(program.info.buffers.size()));
-      program.info.buffers.push_back(child);
+    if (table_mode == 5) {
+      root.indirect_root = IR::BufferResource::NoIndirectBuffer;
+      root.descriptor_format = Prospero::BufferFormat::k32UInt;
+      root.indirect_resources.clear();
+      program.info.buffers[0] = root;
+    } else {
+      root.indirect_root = 0;
+      root.descriptor_format = Prospero::BufferFormat::kInvalid;
+      root.indirect_resources = {0u};
+      program.info.buffers[0] = root;
+      const bool mixed = table_mode == 2 || table_mode == 3;
+      const auto formats = mixed
+                               ? std::array{Prospero::BufferFormat::k32UInt, Prospero::BufferFormat::k16Float}
+                               : std::array{Prospero::BufferFormat::k32UInt, Prospero::BufferFormat::k32UInt};
+      const u32 count = mixed ? 2u : 1u;
+      for (u32 index = 0; index < count; ++index) {
+        auto child = root;
+        child.descriptor_format = formats[index];
+        child.indirect_resources.clear();
+        program.info.buffers[0].indirect_resources.push_back(static_cast<u32>(program.info.buffers.size()));
+        program.info.buffers.push_back(child);
+      }
     }
-    Spirv::SetSpirvTableFormatsOverride(table_mode == 1 || table_mode == 2);
+    Spirv::SetSpirvTableFormatsOverride(table_mode == 1 || table_mode == 2 || table_mode == 5);
   }
   Spirv::SetSpirvFormattedSwitchReference(reference);
   compiled.spirv = Spirv::EmitProgram(program, {.compute = &compute});
@@ -37565,12 +37576,13 @@ void CheckTableFormatSpecialization() {
   constexpr const char *name = "TableFormatSpecialization";
   const auto spec = IndirectFormattedTable::Programs({1, 1, false}, 32u).front();
   ShaderComputeInputInfo compute_uniform_on{}, compute_uniform_off{};
-  ShaderComputeInputInfo compute_mixed_on{}, compute_mixed_off{};
+  ShaderComputeInputInfo compute_mixed_on{}, compute_mixed_off{}, compute_single_on{};
   const auto uniform_on = IndirectFormattedTable::Compile(spec, 32u, compute_uniform_on, false, 1);
   const auto mixed_on = IndirectFormattedTable::Compile(spec, 32u, compute_mixed_on, false, 2);
   const auto mixed_off = IndirectFormattedTable::Compile(spec, 32u, compute_mixed_off, false, 3);
   const auto uniform_off = IndirectFormattedTable::Compile(spec, 32u, compute_uniform_off, false, 4);
-  for (const auto *shader : {&uniform_on, &uniform_off, &mixed_on, &mixed_off}) {
+  const auto single_on = IndirectFormattedTable::Compile(spec, 32u, compute_single_on, false, 5);
+  for (const auto *shader : {&uniform_on, &uniform_off, &mixed_on, &mixed_off, &single_on}) {
     ValidateSpirv(name, shader->spirv);
   }
   const auto uniform_switches_on = CountSpirvOpcode(uniform_on.spirv, spv::OpSwitch);
@@ -37579,6 +37591,9 @@ void CheckTableFormatSpecialization() {
   const auto uniform_functions_off = CountSpirvOpcode(uniform_off.spirv, spv::OpFunction);
   Require(name, "specialized helper", uniform_functions_on == uniform_functions_off + 1u,
           "a uniform table did not add exactly one format-specific load helper");
+  Require(name, "single-candidate helper",
+          CountSpirvOpcode(single_on.spirv, spv::OpFunction) == uniform_functions_off + 1u,
+          "a captured root format without an indirect mapping was not specialized");
   Require(name, "guarded generic fallback", uniform_switches_on == uniform_switches_off &&
           CountSpirvOpcode(uniform_on.spirv, spv::OpBranchConditional) >
               CountSpirvOpcode(uniform_off.spirv, spv::OpBranchConditional),
@@ -37676,12 +37691,15 @@ CompiledShader Compile(u32 pairs, u32 host_subgroup_size, ShaderComputeInputInfo
   memory.offen = true;
   memory.component_count = 1u;
   memory.data_dwords = 1u;
+  memory.resource = 0;
   program.memory_info.push_back(memory);
   memory.component_count = 2u;
   memory.data_dwords = 2u;
+  memory.resource = 1;
   program.memory_info.push_back(memory);
   MemoryInfo out{};
   out.kind = ResourceKind::IndirectBuffer;
+  out.resource = 2;
   out.data_bits = 32;
   out.component_count = 2u;
   out.data_dwords = 2u;
@@ -37689,6 +37707,9 @@ CompiledShader Compile(u32 pairs, u32 host_subgroup_size, ShaderComputeInputInfo
   out.offen = true;
   out.record_keyed = true;
   program.memory_info.push_back(out);
+  program.info.buffers.resize(3);
+  program.info.buffers[0].formatted = mode != 2u;
+  program.info.buffers[1].formatted = mode != 2u;
   program.info.uses_dma = true;
 
   compute = ShaderComputeInputInfo{};
@@ -37773,7 +37794,7 @@ void CheckFormatDecodeBench() {
   std::error_code error;
   std::filesystem::create_directories(directory, error);
   Require(name, "output directory", !error, error.message());
-  const auto run = [&](const char *label, bool table_formats, bool flat) {
+  const auto run = [&](const char *label, std::optional<bool> table_formats, std::optional<bool> flat) {
     ShaderRecompiler::Spirv::SetSpirvTableFormatsOverride(table_formats);
     ShaderRecompiler::Spirv::SetSpirvFormatDecodeFlatOverride(flat);
     ShaderComputeInputInfo compute{};
@@ -37804,18 +37825,50 @@ void CheckFormatDecodeBench() {
     Require(name, "write SPIR-V output", written == stats.spirv.size() && close_result == 0, path.string());
     std::printf("FORMAT_DECODE_BENCH loads=%u descriptors=2 table_formats=%d flat=%d words=%zu bytes=%zu "
                 "instructions=%zu OpSwitch=%zu OpPhi=%zu OpLabel=%zu file=%s\n",
-                pairs * 2u, table_formats ? 1 : 0, flat ? 1 : 0, stats.spirv.size(),
-                stats.spirv.size() * sizeof(u32), stats.instructions, stats.switches, stats.phis, stats.labels,
-                path.string().c_str());
+                pairs * 2u, table_formats.value_or(false) ? 1 : 0, flat.value_or(false) ? 1 : 0,
+                stats.spirv.size(), stats.spirv.size() * sizeof(u32), stats.instructions, stats.switches, stats.phis,
+                stats.labels, path.string().c_str());
     return stats;
   };
   const auto both_off = run("table0_flat0", false, false);
   const auto table_on = run("table1_flat0", true, false);
   const auto flat_on = run("table0_flat1", false, true);
   const auto both_on = run("table1_flat1", true, true);
+  const auto host_features = ShaderRecompiler::Spirv::GetHostFloatFeatures();
+  auto non_amd_features = host_features;
+  non_amd_features.amd = false;
+  ShaderRecompiler::Spirv::SetHostFloatFeatures(non_amd_features);
+  const auto non_amd_off = run("non_amd_off", false, false);
+  const auto non_amd_default = run("non_amd_defaults", std::nullopt, std::nullopt);
+  ShaderRecompiler::Spirv::SetHostFloatFeatures(host_features);
+  const auto check_table_access = [&](const Stats &stats) {
+    u32 table = 0;
+    size_t accesses = 0;
+    for (size_t offset = 5; offset < stats.spirv.size();) {
+      const auto words = stats.spirv[offset] >> spv::WordCountShift;
+      const auto opcode = stats.spirv[offset] & spv::OpCodeMask;
+      if (opcode == spv::OpName && words >= 3) {
+        const auto *text = reinterpret_cast<const char *>(stats.spirv.data() + offset + 2);
+        if (std::string_view(text, (words - 2u) * sizeof(u32)).starts_with("formatted_format_table")) {
+          table = stats.spirv[offset + 1];
+        }
+      } else if (opcode == spv::OpAccessChain && words >= 5 && stats.spirv[offset + 3] == table) {
+        ++accesses;
+        Require(name, "one-index format table", words == 5,
+                "the Private format-table access chain does not have exactly one index");
+      }
+      offset += words;
+    }
+    Require(name, "format table coverage", table != 0 && accesses != 0,
+            "the flat module has no formatted_format_table access to check");
+  };
+  check_table_access(flat_on);
+  check_table_access(both_on);
   Require(name, "legacy decoder", both_off.switches != 0, "the legacy synthetic module has no format switches");
   Require(name, "flat decoder", flat_on.switches == 0 && both_on.switches == 0,
           "the flat synthetic modules retained a format switch");
+  Require(name, "non-AMD defaults", non_amd_default.spirv == non_amd_off.spirv,
+          "non-AMD default emission differs from the legacy decoder with both AMD paths disabled");
   Require(name, "specialized helpers",
           table_on.functions == both_off.functions + 2u && both_on.functions == flat_on.functions + 2u,
           "the two captured descriptor formats did not each add one specialized helper");
@@ -45767,8 +45820,8 @@ int main(int argc, char **argv) {
     CheckShaderShrinkBench();
     CheckHalfOutlineBench();
     CheckAmdNativeFloatBench();
-    // RunStep("CheckTableFormatSpecialization", CheckTableFormatSpecialization);
-    // RunStep("CheckFormatDecodeBench", CheckFormatDecodeBench);
+    RunStep("CheckTableFormatSpecialization", CheckTableFormatSpecialization);
+    RunStep("CheckFormatDecodeBench", CheckFormatDecodeBench);
     return g_failed_steps.empty() ? 0 : 1;
   }
   if (argc == 2 && std::strcmp(argv[1], "--thread-dimensions-only") == 0) {

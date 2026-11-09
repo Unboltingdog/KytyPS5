@@ -54,9 +54,13 @@ struct ResourceSpecialization {
 	std::vector<Buffer>  buffers;
 	std::vector<Image>   images;
 	std::vector<Sampler> samplers;
+	// Live uniform-table modules and flat precompiled modules have different permutation and precompile/reuse keys.
+	bool table_format_specialization = false;
 
 	bool operator==(const ResourceSpecialization&) const = default;
 };
+
+bool HasUniformTableFormat(const ResourcePlan& program, const ResourceSpecialization& specialization);
 
 // Extracts the descriptor/SRT value graph before resource specialization. The returned plan owns
 // its values and is independent of the translated shader CFG.

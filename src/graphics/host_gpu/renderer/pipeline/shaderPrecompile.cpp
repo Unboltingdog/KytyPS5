@@ -183,7 +183,7 @@ bool FileMatchDiag() {
 }
 
 uint64_t SpecializationHash(const ShaderRecompiler::IR::ResourceSpecialization& s, std::string* images_text) {
-	std::vector<uint32_t> words;
+	std::vector<uint32_t> words {uint32_t {s.table_format_specialization}};
 	for (const auto& b: s.buffers) {
 		words.insert(words.end(), {b.packed_stride, static_cast<uint32_t>(b.descriptor_format), b.descriptor_swizzle,
 		                           uint32_t {b.zero_stride_oob} | uint32_t {b.scalar_empty} << 1u, b.indirect_root,
@@ -650,6 +650,7 @@ std::vector<uint32_t> Serialize(const PrecompileStageRecord& record) {
 	WriteSpecialization(w, record.specialization);
 	w.U64(record.spirv_hash);
 	w.U64(record.revision);
+	w.U32(uint32_t {record.specialization.table_format_specialization});
 	return std::move(w.words);
 }
 
@@ -666,6 +667,7 @@ bool Deserialize(std::span<const uint32_t> words, PrecompileStageRecord& record,
 	if (!r.ok || !ReadSpecialization(r, record.specialization)) return false;
 	record.spirv_hash = r.U64();
 	record.revision   = r.U64();
+	record.specialization.table_format_specialization = !r.AtEnd() && r.U32() != 0u;
 	if (!r.ok || !r.AtEnd() || (record.code.empty() && !hint)) return false;
 	BuildStageStaticKey(record.compute, record.static_key);
 	return true;
@@ -689,6 +691,7 @@ std::vector<uint32_t> SerializeStage(const PrecompileStageRecord& record) {
 	WriteSpecialization(w, record.specialization);
 	w.U64(record.spirv_hash);
 	w.U64(record.revision);
+	w.U32(uint32_t {record.specialization.table_format_specialization});
 	return std::move(w.words);
 }
 
@@ -712,6 +715,7 @@ bool DeserializeStage(std::span<const uint32_t> words, PrecompileStageRecord& re
 	if (!r.ok || !ReadSpecialization(r, record.specialization)) return false;
 	record.spirv_hash = r.U64();
 	record.revision   = r.U64();
+	record.specialization.table_format_specialization = !r.AtEnd() && r.U32() != 0u;
 	if (!r.ok || !r.AtEnd() || (record.code.empty() && !hint)) return false;
 	if (record.stage == ShaderType::Pixel) {
 		BuildStageStaticKey(record.pixel, record.static_key);
@@ -1128,6 +1132,7 @@ uint64_t PrecompileKey(ShaderType stage, uint64_t shader_hash, uint32_t user_dat
 	w.Words(static_key);
 	w.U32(push_data_start);
 	WriteSpecialization(w, specialization);
+	w.U32(uint32_t {specialization.table_format_specialization});
 	if (stage != ShaderType::Compute) {
 		w.U32(static_cast<uint32_t>(stage));
 	}
@@ -2261,14 +2266,20 @@ void ShaderPrecompiler::Worker(uint32_t index) {
 	}
 }
 
-// Translates and compiles a recorded permutation with the GPU thread's options (ProgramCache::Get): its module (when
-// `need_module`) and compiled program. False when it gives no module. the shader reuse: the SPIR-V, the program
+// Translates and compiles a recorded permutation with the GPU thread's options (ProgramCache::Get), except that no
+// live table contents are available and table-format specialization stays flat: its module (when `need_module`) and
+// compiled program. False when it gives no module. the shader reuse: the SPIR-V, the program
 // info and (for the program's first use) the resource plan go to the store, unless the GPU thread compiled the
 // permutation already.
-bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint64_t key, bool need_module,
+bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint64_t& key, bool need_module,
                                       vk::ShaderModule& module, ShaderRecompiler::IR::CompiledShaderInfo& info,
                                       size_t& spirv_words) {
 	const Common::StartupTrace::Scope startup_scope(Common::StartupTrace::Counter::ShaderBackground);
+	auto flat_specialization = record.specialization;
+	flat_specialization.table_format_specialization = false;
+	key = PrecompileKey(record.stage, record.shader_hash, static_cast<uint32_t>(record.user_data.size()),
+	                    static_cast<uint32_t>(record.code.size()), record.static_key, record.push_data_start,
+	                    flat_specialization);
 	ShaderVertexInputInfo  vertex  = record.vertex;
 	ShaderPixelInputInfo   pixel   = record.pixel;
 	ShaderComputeInputInfo compute = record.compute;
@@ -2369,13 +2380,16 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 	}
 	const double translate_ms  = MillisecondsSince(translate_begin);
 	const auto   compile_begin = std::chrono::steady_clock::now();
-	auto result = ShaderRecompiler::CompileProgram(std::move(translated), options, record.specialization,
+	ShaderRecompiler::Spirv::SetSpirvTableFormatsOverride(false);
+	auto result = ShaderRecompiler::CompileProgram(std::move(translated), options, flat_specialization,
 	                                               record.push_data_start);
+	ShaderRecompiler::Spirv::SetSpirvTableFormatsOverride(std::nullopt);
 	const double compile_ms = MillisecondsSince(compile_begin);
 	spirv_words           = result.spirv.size();
 	const auto spirv_hash = XXH3_64bits(result.spirv.data(), result.spirv.size() * sizeof(uint32_t));
 	PipelineTrace::DumpBigSpirv(StageName(record.stage), 0, result.spirv);
-	if (record.revision == Revision() && spirv_hash != record.spirv_hash) {
+	if (!record.specialization.table_format_specialization && record.revision == Revision() &&
+	    spirv_hash != record.spirv_hash) {
 		// The same build made other SPIR-V from the recorded inputs: an input is missing from the record (or a
 		// SPIR-V-changing KYTY_ switch differs from the recording run).
 		std::fprintf(stderr, "SHADER_PRECOMPILE_MISMATCH hash=0x%016llx stage=%s key=%s (the game's SPIR-V differs)\n",
@@ -2850,8 +2864,11 @@ bool ShaderPrecompiler::TakeReusedCompile(uint64_t key, const PrecompileReuseIde
 		m_reuse_taken.insert(key);
 		if (const auto found = m_reuse.find(key); found != m_reuse.end()) {
 			auto& entry = found->second;
-			same        = SameProgram(*entry.record, identity) && entry.record->push_data_start == push_data_start &&
-			       entry.record->specialization == specialization;
+			auto recorded = entry.record->specialization;
+			// The key already identifies the emitted variant; the record retains the live variant that queued it.
+			recorded.table_format_specialization = specialization.table_format_specialization;
+			same = SameProgram(*entry.record, identity) && entry.record->push_data_start == push_data_start &&
+			       recorded == specialization;
 			if (entry.plan.has_value()) {
 				const auto [first, last] = m_reuse_programs.equal_range(entry.program);
 				for (auto it = first; it != last; ++it) {

@@ -85,7 +85,8 @@ void SetSpirvHalfOutlineOverride(std::optional<bool> enabled);
 // KYTY_PERF_TABLE_FORMATS (=1 forces on, =0 forces off): a formatted load whose table candidates all have one format
 // calls a helper for that format when the runtime format matches, and the generic helper otherwise. AMD defaults on;
 // KYTY_NO_AMD_TABLE_FORMATS=1 opts out. Other vendors default off. Mixed or unknown tables use only the generic helper.
-// Tests may force both modes (std::nullopt reads the environment).
+// Tests may force both modes (std::nullopt reads the environment). The override is thread-local so background
+// precompiles can force flat modules without changing a live compile on another thread.
 bool SpirvTableFormatsEnabled();
 void SetSpirvTableFormatsOverride(std::optional<bool> enabled);
 

@@ -355,8 +355,8 @@ private:
 	// `stage_jobs`: the shader reuse, the stage-only jobs (queued after all others).
 	void LoadGraphics(const std::unordered_set<uint64_t>& skipped, std::vector<Job>& jobs, std::vector<Job>& stage_jobs);
 	void Worker(uint32_t index);
-	// `key`: the record's key. `need_module`: false for a warm job's permutation (no pipeline is made from it).
-	bool CompileModule(const PrecompileStageRecord& record, uint64_t key, bool need_module, vk::ShaderModule& module,
+	// `key`: the live lookup key on entry, the flat module's key on return. `need_module`: false for a warm job.
+	bool CompileModule(const PrecompileStageRecord& record, uint64_t& key, bool need_module, vk::ShaderModule& module,
 	                   ShaderRecompiler::IR::CompiledShaderInfo& info, size_t& spirv_words);
 	void Compile(const PrecompileStageRecord& record, uint64_t key, bool warm);
 	// The shader reuse (workers). `any_size`: wanted also with the store at its budget.
