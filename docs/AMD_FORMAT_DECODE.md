@@ -25,3 +25,12 @@ The precompiler has no live table contents at compile time, so its modules use t
 - `KYTY_FORMAT_DECODE_BENCH_DIR=<directory>`: choose where the host-side format decode benchmark writes its SPIR-V variants.
 
 Non-AMD emission retains the legacy decoder. The compute host tests validate every emitted variant, check that flat modules contain no format `OpSwitch`, check the format table's single-index access chain, and compare non-AMD defaults byte-for-byte with both AMD paths disabled.
+
+## Measuring a shader on your own GPU
+
+`kyty_spvbench.exe` ships next to `kyty_emulator.exe` in every Windows release. Put `.spv` files (from
+`KYTY_DIAG_PIPELINE_COMPILE=1`, which writes `_Logs/slow-*.spv`, or `KYTY_DIAG_DUMP_SPIRV_MIN_BYTES`) into a
+`spvbench_in` folder beside it and run it with no arguments. It builds the pipeline layout from each module's own
+bindings, compiles each one in a separate child process with a 20 s limit, and writes the times to
+`spvbench_in/spvbench.txt`. The scripts in `tools/spirv_variants/` make the experimental variants that located the
+cause.

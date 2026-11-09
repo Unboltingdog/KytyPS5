@@ -863,6 +863,7 @@ if(WIN32 OR LINUX)
 	target_link_libraries(kyty_spvbench Vulkan::Headers ${CMAKE_DL_LIBS})
 	target_include_directories(kyty_spvbench PRIVATE "${KYTY_THIRD_PARTY_DIR}/SPIRV-Headers/include")
 	install(TARGETS kyty_spvbench DESTINATION .)
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tools/spirv_variants/" DESTINATION tools/spirv_variants)
 endif()
 
 add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
