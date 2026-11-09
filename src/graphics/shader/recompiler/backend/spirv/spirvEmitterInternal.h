@@ -96,7 +96,7 @@ struct ImageDefinition {
 uint32_t IfConversionLimit();
 bool     OutlineHelpersEnabled();
 
-using IndirectFormattedDescriptorInfo = std::array<uint32_t, 6>;
+using IndirectFormattedDescriptorInfo = std::array<uint32_t, 5>;
 
 struct EmitterState {
 	EmitterState(IR::Program& program_, ShaderStageInputInfo input_info_, const Profile& profile_)

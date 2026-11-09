@@ -1967,8 +1967,9 @@ uint32_t LoadIndirectFormattedElement(ValueEmitContext& ctx, const IndirectBuffe
 //   word 1 + s (source component s): bits 0-1 its dword, 2-3 its byte offset within the dword, 4-8 its packed bit
 //           offset, 9-14 its bits (0 past the format's components), 15 sign-extended, 16-20 conversion (FormattedConv).
 // Same values: a component is BitField[US]Extract(dword, 8 * ((base + byte offset) & 3) + packed offset, bits) - what
-// the case's shift and mask (or its extract) compute -, converted by the case's own NormalizeFormatComponent (a switch
-// over the conversions keeps every constant divisor a constant); the same dwords are read under the same conditions,
+// the case's shift and mask (or its extract) compute -, converted by the case's own NormalizeFormatComponent. The legacy
+// path switches over conversions to keep every divisor constant; the flat path computes the same divisors from `bits`.
+// The same dwords are read under the same conditions,
 // so the page lookups and fault records are the case's. An unknown format, and a FORMAT value past the last one (the
 // switch's default is case 0), gives 0 in every channel.
 enum class FormattedConv : uint32_t {
@@ -2049,6 +2050,61 @@ constexpr Format::BufferFormatInfo FormattedConvInfo(FormattedConv conv) {
 			}
 	}
 	return info;
+}
+
+uint32_t NormalizeFormattedTableComponent(EmitterState& state, uint32_t conv, uint32_t bits, uint32_t raw) {
+	const auto u32     = TypeU32(state);
+	const auto f32     = TypeF32(state);
+	const auto boolean = TypeBool(state);
+	const auto code    = [&](FormattedConv kind) { return ConstantU32(state, static_cast<uint32_t>(kind)); };
+	const auto equal   = [&](FormattedConv kind) {
+        return Binary(state, spv::OpIEqual, boolean, conv, code(kind));
+	};
+	const auto at_most = [&](FormattedConv kind) {
+        return Binary(state, spv::OpULessThanEqual, boolean, conv, code(kind));
+	};
+	const auto unsigned_float = [&](uint32_t value) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpConvertUToF, f32, result, value);
+		return result;
+	};
+	const auto signed_float = [&](uint32_t value) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpConvertSToF, f32, result, EmitTBufferBitcastU32ToI32(state, value));
+		return result;
+	};
+	const auto divide = [&](uint32_t numerator, uint32_t denominator) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpFDiv, f32, result, numerator, denominator);
+		return result;
+	};
+	const auto safe_bits = EmitUMin32(state, EmitUMax32(state, bits, ConstantU32(state, 2)), ConstantU32(state, 16));
+	const auto unsigned_max = Binary(state, spv::OpISub, u32,
+	                                 Binary(state, spv::OpShiftLeftLogical, u32, ConstantU32(state, 1), safe_bits),
+	                                 ConstantU32(state, 1));
+	const auto signed_max = Binary(
+	    state, spv::OpISub, u32,
+	    Binary(state, spv::OpShiftLeftLogical, u32, ConstantU32(state, 1),
+	           Binary(state, spv::OpISub, u32, safe_bits, ConstantU32(state, 1))),
+	    ConstantU32(state, 1));
+	const auto unsigned_value = unsigned_float(raw);
+	const auto signed_value   = signed_float(raw);
+	const auto unorm          = divide(unsigned_value, unsigned_float(unsigned_max));
+	const auto snorm_value    = divide(signed_value, unsigned_float(signed_max));
+	const auto snorm          = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpExtInst, f32, snorm, GlslStd450(state), GLSLstd450FMax, snorm_value,
+	                          ConstantF32Value(state, -1.0f));
+	const auto scaled  = Select(state, f32, equal(FormattedConv::Uscaled), unsigned_value, signed_value);
+	const auto half    = EmitBitcastF32ToU32(state, EmitF16BitsToF32(state, raw));
+	const auto ufloat  = Select(state, u32, equal(FormattedConv::UFloat11), EmitUFloatToF32Bits(state, raw, 11),
+	                            EmitUFloatToF32Bits(state, raw, 10));
+	const auto floats  = Select(state, u32, equal(FormattedConv::Float16), half, ufloat);
+	const auto norms   = Select(state, u32, at_most(FormattedConv::Unorm16), EmitBitcastF32ToU32(state, unorm),
+	                            EmitBitcastF32ToU32(state, snorm));
+	const auto decoded = Select(state, u32, at_most(FormattedConv::Snorm16), norms, floats);
+	const auto result  = Select(state, u32, at_most(FormattedConv::Sscaled), EmitBitcastF32ToU32(state, scaled), decoded);
+	const auto valid   = Binary(state, spv::OpULessThan, boolean, conv, code(FormattedConv::Count));
+	return Select(state, u32, valid, Select(state, u32, equal(FormattedConv::Identity), raw, result), raw);
 }
 
 constexpr std::array<uint32_t, FormattedTableFormats * FormattedTableWords> BuildFormattedTable() {
@@ -2159,21 +2215,8 @@ std::array<uint32_t, FormattedTableWords> DecodeFormattedTableWords(EmitterState
 	return words;
 }
 
-IndirectFormattedDescriptorInfo DecodeIndirectFormattedDescriptor(EmitterState& state, uint32_t format,
-                                                                 bool include_class = true) {
-	IndirectFormattedDescriptorInfo info {};
-	const auto words = DecodeFormattedTableWords(state, format);
-	std::copy(words.begin(), words.end(), info.begin());
-	info[5] = ConstantU32(state, 0);
-	if (include_class) {
-		for (uint32_t k = 0; k < IndirectFormattedFastFormats.size(); ++k) {
-			info[5] = Select(state, TypeU32(state),
-			                 Binary(state, spv::OpIEqual, TypeBool(state), format,
-			                        ConstantU32(state, static_cast<uint32_t>(IndirectFormattedFastFormats[k]))),
-			                 ConstantU32(state, k + 1u), info[5]);
-		}
-	}
-	return info;
+IndirectFormattedDescriptorInfo DecodeIndirectFormattedDescriptor(EmitterState& state, uint32_t format) {
+	return DecodeFormattedTableWords(state, format);
 }
 
 // The `channels` channel values of LoadIndirectFormattedVector's format switch, from the table.
@@ -2185,7 +2228,7 @@ uint32_t LoadIndirectFormattedTable(ValueEmitContext& ctx, const IndirectBufferA
 	const auto u32     = TypeU32(state);
 	const auto u64     = TypeU64(state);
 	const auto boolean = TypeBool(state);
-	const auto local = decoded != nullptr ? *decoded : DecodeIndirectFormattedDescriptor(state, buffer.format, false);
+	const auto local = decoded != nullptr ? *decoded : DecodeIndirectFormattedDescriptor(state, buffer.format);
 	const auto field   = [&](uint32_t word, uint32_t first, uint32_t count) {
         return EmitBitFieldUExtract(state, word, ConstantU32(state, first), ConstantU32(state, count));
 	};
@@ -2240,9 +2283,11 @@ uint32_t LoadIndirectFormattedTable(ValueEmitContext& ctx, const IndirectBufferA
 		const auto raw      = Select(state, u32, flag(desc, 15), EmitBitFieldSExtract(state, value, position, bits),
 		                             EmitBitFieldUExtract(state, value, position, bits));
 		const auto convert  = [&]() {
+			const auto conv = field(desc, 16, 5);
+			if (SpirvFormatDecodeFlatEnabled()) return NormalizeFormattedTableComponent(state, conv, bits, raw);
 			return EmitIndexSwitch(
-			    state, field(desc, 16, 5), static_cast<uint32_t>(FormattedConv::Count), u32, [&](uint32_t conv) {
-				    const auto kind = static_cast<FormattedConv>(conv);
+			    state, conv, static_cast<uint32_t>(FormattedConv::Count), u32, [&](uint32_t item) {
+				    const auto kind = static_cast<FormattedConv>(item);
 				    return kind == FormattedConv::Identity ? raw
 				                                           : NormalizeFormatComponent(state, FormattedConvInfo(kind), 0u, raw);
 			    });
@@ -2356,8 +2401,8 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 			    return LoadIndirectFormattedElement(ctx, buffer, info, channels, selector, memory, one, any_memory, d16);
 		    });
 	};
-	// The census formats as their own cases - each the format switch's case, which the compiler specializes -, every other
-	// format through the table (LoadIndirectFormattedTable). The table alone decoded runtime layout words generically:
+	// With the flat decoder off, the census formats have their own cases and every other format goes through the table.
+	// The table alone decoded runtime layout words generically:
 	// 2.4x the GPU time per load of the case (--bench-indirect-formatted: 1016 vs 428 ns per k16UInt index + k16_16Float
 	// vertex pair); at the inn the triangle searches 4d6df08d/15f485d4/c089d15d went 8.1 -> 3.6 ms and the card 47.4 ->
 	// 42.4 ms per frame, fps +7.7% (two pairs, 12.8 -> 13.8); in-game check 1.8e10 loads, 0 differences (27.10, k60).
@@ -2367,14 +2412,12 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 	// (SetSpirvFormattedSwitchReference).
 	const auto cases = [&]() {
 		const auto u32  = TypeU32(state);
-		auto       pick = decoded != nullptr ? (*decoded)[5] : ConstantU32(state, 0);
-		if (decoded == nullptr) {
-			for (uint32_t k = 0; k < IndirectFormattedFastFormats.size(); ++k) {
-				pick = Select(state, u32,
-				              Binary(state, spv::OpIEqual, TypeBool(state), buffer.format,
-				                     ConstantU32(state, static_cast<uint32_t>(IndirectFormattedFastFormats[k]))),
-				              ConstantU32(state, k + 1u), pick);
-			}
+		auto       pick = ConstantU32(state, 0);
+		for (uint32_t k = 0; k < IndirectFormattedFastFormats.size(); ++k) {
+			pick = Select(state, u32,
+			              Binary(state, spv::OpIEqual, TypeBool(state), buffer.format,
+			                     ConstantU32(state, static_cast<uint32_t>(IndirectFormattedFastFormats[k]))),
+			              ConstantU32(state, k + 1u), pick);
 		}
 		return EmitIndexSwitch(state, pick, static_cast<uint32_t>(IndirectFormattedFastFormats.size()) + 1u,
 		                       TypeU32Composite(state, channels), [&](uint32_t item) {
@@ -2390,7 +2433,10 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 	const auto values = table_format != Prospero::BufferFormat::kInvalid
 	                        ? LoadIndirectFormattedElement(ctx, buffer, Format::GetFormatInfo(table_format), channels,
 	                                                     selector, memory, one, any_memory, d16)
-	                        : SpirvFormattedSwitchReference() ? format_switch() : cases();
+	                        : SpirvFormattedSwitchReference() ? format_switch()
+	                        : SpirvFormatDecodeFlatEnabled()
+	                              ? LoadIndirectFormattedTable(ctx, buffer, channels, selector, memory, one, d16, decoded)
+	                              : cases();
 	if (!d16) return values;
 	std::array<uint32_t, 4> channel_values {values};
 	for (uint32_t channel = 0; channel < channels && channels > 1u; ++channel) {
