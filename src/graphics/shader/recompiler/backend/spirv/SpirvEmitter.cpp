@@ -360,6 +360,7 @@ namespace {
 std::atomic_int g_format_decode_flat_override {-1};
 std::atomic_int g_loop_format_decode_override {-1};
 std::atomic_int g_format_decode_fast_cases_override {-1};
+thread_local int g_raw_descriptor_hoist_override = -1;
 } // namespace
 
 bool SpirvFormatDecodeFlatEnabled() {
@@ -374,6 +375,17 @@ bool SpirvLoopRawLoadsEnabled() {
 	if (!GetHostFloatFeatures().amd) return false;
 	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_LOOP_RAW_LOADS");
 	return value == nullptr || value[0] != '1';
+}
+
+bool SpirvRawDescriptorHoistEnabled() {
+	if (!GetHostFloatFeatures().amd) return false;
+	if (g_raw_descriptor_hoist_override >= 0) return g_raw_descriptor_hoist_override != 0;
+	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_RAW_DESCRIPTOR_HOIST");
+	return value == nullptr || value[0] != '1';
+}
+
+void SetSpirvRawDescriptorHoistOverride(std::optional<bool> enabled) {
+	g_raw_descriptor_hoist_override = enabled.has_value() ? (*enabled ? 1 : 0) : -1;
 }
 
 bool SpirvLoopFormatDecodeEnabled() {

@@ -1268,6 +1268,34 @@ void EmitScalarLoadGroup(ValueEmitContext& ctx, const IR::Inst& leader, const Em
 	ctx.Define(leader, values[0]);
 }
 
+IndirectRawDescriptorInfo DecodeIndirectRawDescriptor(EmitterState& state, uint32_t word1, uint32_t word3) {
+	const auto field = [&](uint32_t word, uint32_t first, uint32_t count) {
+		return EmitBitFieldUExtract(state, word, ConstantU32(state, first), ConstantU32(state, count));
+	};
+	const auto nonzero = [&](uint32_t value) {
+		return Binary(state, spv::OpINotEqual, TypeBool(state), value, ConstantU32(state, 0));
+	};
+	const auto stride = field(word1, 16, 14);
+	return {
+	    .base_high    = field(word1, 0, 16),
+	    .stride       = stride,
+	    .swizzle      = AndCondition(state, nonzero(stride), nonzero(field(word1, 31, 1))),
+	    .valid_format = nonzero(field(word3, 12, 7)),
+	    .index_stride = field(word3, 21, 2),
+	    .mode         = field(word3, 28, 2),
+	};
+}
+
+IndirectRawDescriptorInfo PrepareIndirectRawDescriptor(ValueEmitContext& ctx, const IR::Inst& handle) {
+	auto& cache = ctx.state.indirect_raw_descriptor_info[ctx.half];
+	if (const auto found = cache.find(&handle); found != cache.end()) return found->second;
+	return DecodeIndirectRawDescriptor(ctx.state, ctx.Arg(handle, 1), ctx.Arg(handle, 3));
+}
+
+void AppendIndirectRawDescriptor(std::vector<uint32_t>& words, const IndirectRawDescriptorInfo& info) {
+	words.insert(words.end(), {info.base_high, info.stride, info.swizzle, info.valid_format, info.index_stride, info.mode});
+}
+
 struct IndirectBufferAccess {
 	uint32_t address;
 	uint32_t offset;
@@ -1677,25 +1705,30 @@ uint32_t LoadIndirectBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_
 		const auto offset = immediate == 0u ? ctx.Arg(inst, 2)
 		                                    : Binary(state, spv::OpIAdd, TypeU32(state), ctx.Arg(inst, 2),
 		                                             ConstantU32(state, immediate));
+		const bool hoist = SpirvRawDescriptorHoistEnabled();
+		const auto descriptor = hoist ? PrepareIndirectRawDescriptor(ctx, handle) : IndirectRawDescriptorInfo {};
 		// F1: the whole X2..X4 load in one call (DefineIndirectRawDword).
 		const auto group = components >= 2u && components <= 4u
 		                       ? state.indirect_raw_group_functions[(components - 2u) + (ctx.Memory(inst).coherent ? 3u : 0u)]
 		                       : 0u;
 		if (group != 0u) {
 			const auto result = state.builder.AllocateId();
-			state.builder.AddFunction(spv::OpFunctionCall, TypeU32Composite(state, components), result, group,
-			                          ctx.Arg(handle, 0), ctx.Arg(handle, 1), ctx.Arg(handle, 2),
-			                          IndirectCallWord3(state, word3), index, offset, ctx.Arg(inst, 3));
+			std::vector<uint32_t> words {spv::OpFunctionCall, TypeU32Composite(state, components), result, group,
+			                             ctx.Arg(handle, 0), ctx.Arg(handle, 1), ctx.Arg(handle, 2),
+			                             IndirectCallWord3(state, word3), index, offset, ctx.Arg(inst, 3)};
+			if (hoist) AppendIndirectRawDescriptor(words, descriptor);
+			state.builder.AddFunction(std::span<const uint32_t>(words));
 			return result;
 		}
 		std::array<uint32_t, 4> values {};
 		const auto call_word3 = IndirectCallWord3(state, word3);
 		for (uint32_t component = 0; component < components; ++component) {
 			values[component] = state.builder.AllocateId();
-			state.builder.AddFunction(spv::OpFunctionCall, TypeU32(state), values[component],
-			                          outlined, ctx.Arg(handle, 0), ctx.Arg(handle, 1),
-			                          ctx.Arg(handle, 2), call_word3, index, offset, ctx.Arg(inst, 3),
-			                          ConstantU32(state, component * 4u));
+			std::vector<uint32_t> words {spv::OpFunctionCall, TypeU32(state), values[component], outlined,
+			                             ctx.Arg(handle, 0), ctx.Arg(handle, 1), ctx.Arg(handle, 2), call_word3,
+			                             index, offset, ctx.Arg(inst, 3), ConstantU32(state, component * 4u)};
+			if (hoist) AppendIndirectRawDescriptor(words, descriptor);
+			state.builder.AddFunction(std::span<const uint32_t>(words));
 		}
 		return ConstructU32Composite(state, components, values);
 	}
@@ -3398,11 +3431,242 @@ void DefineIndirectFormattedLoadFunctions(ValueEmitContext& ctx) {
 	DefineIndirectFormattedLoads(ctx);
 }
 
+void DefineIndirectRawDwordHoisted(ValueEmitContext& ctx) {
+	auto& state = ctx.state;
+	if (state.bda_pointer_function == 0u) return;
+	for (const auto* block: state.program.blocks) {
+		for (const auto& inst: *block) {
+			const auto components = IR::BufferComponentCount(inst.GetOpcode());
+			if (components < 1u || components > 4u || IR::BufferAccessOf(inst.GetOpcode()) != IR::BufferAccess::Read) continue;
+			const auto index = inst.Flags<IR::MemoryFlags>().index;
+			if (index >= state.program.memory_info.size()) continue;
+			const auto& mem = state.program.memory_info[index];
+			if (mem.kind == IR::ResourceKind::IndirectBuffer && !mem.formatted) {
+				state.indirect_raw_descriptors.insert(inst.Arg(0).ResolveInstruction());
+			}
+		}
+	}
+	for (const bool coherent: {false, true}) {
+		if (std::ranges::none_of(state.program.memory_info, [&](const IR::MemoryInfo& memory) {
+			    return memory.kind == IR::ResourceKind::IndirectBuffer && !memory.formatted && memory.coherent == coherent;
+		    }))
+			continue;
+		const auto u32     = TypeU32(state);
+		const auto u64     = TypeU64(state);
+		const auto boolean = TypeBool(state);
+		std::vector<uint32_t> parameter_types(8u + IndirectRawDescriptorWords, u32);
+		const auto function_type = state.builder.Type(spv::OpTypeFunction, u32, std::span(parameter_types));
+		auto&      function      = coherent ? state.indirect_raw_coherent_function : state.indirect_raw_function;
+		function                 = state.builder.AllocateId();
+		state.builder.AddName(function, coherent ? "indirect_raw_dword_coherent_hoisted" : "indirect_raw_dword_hoisted");
+		state.builder.AddFunction(spv::OpFunction, u32, function, spv::FunctionControlDontInlineMask, function_type);
+		const auto parameter = [&]() {
+			const auto id = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpFunctionParameter, u32, id);
+			return id;
+		};
+		const auto word0        = parameter();
+		const auto word1        = parameter();
+		const auto records      = parameter();
+		const auto word3        = parameter();
+		const auto index        = parameter();
+		const auto offset       = parameter();
+		const auto soffset      = parameter();
+		const auto displacement = parameter();
+		(void)word1;
+		(void)word3;
+		IndirectRawDescriptorInfo descriptor {};
+		descriptor.base_high    = parameter();
+		descriptor.stride       = parameter();
+		descriptor.swizzle      = parameter();
+		descriptor.valid_format = parameter();
+		descriptor.index_stride = parameter();
+		descriptor.mode         = parameter();
+		EmitLabel(state, state.builder.AllocateId());
+		IndirectBufferAccess buffer {};
+		buffer.stride  = descriptor.stride;
+		buffer.swizzle = descriptor.swizzle;
+		const auto address = CalculateBufferAddress(state, index, offset, soffset, 0u, descriptor.stride,
+		                                            descriptor.swizzle, descriptor.index_stride);
+		const auto base    = PackU64(state, word0, descriptor.base_high);
+		buffer.address     = Binary(state, spv::OpIAdd, u64, base, Unary(state, spv::OpUConvert, u64, address.byte));
+		buffer.offset      = Binary(state, spv::OpIAdd, u32, address.offset, displacement);
+		buffer.mode        = descriptor.mode;
+		buffer.records     = records;
+		buffer.index_in_bounds     = Binary(state, spv::OpULessThan, boolean, index, records);
+		buffer.scalar_in_bounds    = Binary(state, spv::OpULessThanEqual, boolean, soffset, records);
+		buffer.raw_records         = Binary(state, spv::OpISub, u32, records, soffset);
+		buffer.raw_index_in_bounds = Binary(state, spv::OpULessThan, boolean, index, buffer.raw_records);
+		buffer.coherent            = coherent;
+		const auto dword_address = Binary(state, spv::OpIAdd, u64,
+		                                  Binary(state, spv::OpBitwiseAnd, u64, buffer.address,
+		                                         ConstantU64(state, ~uint64_t {3})),
+		                                  Unary(state, spv::OpUConvert, u64, displacement));
+		const auto result = EmitValueOrZeroIfCondition(
+		    state, AndCondition(state, descriptor.valid_format, IndirectBufferInBounds(state, buffer, 0u, 4u, false)),
+		    [&]() { return LoadBdaDword(ctx, dword_address, coherent); });
+		state.builder.AddFunction(spv::OpReturnValue, result);
+		state.builder.AddFunction(spv::OpFunctionEnd);
+	}
+	for (const auto* block: state.program.blocks) {
+		for (const auto& inst: *block) {
+			const auto components = IR::BufferComponentCount(inst.GetOpcode());
+			if (components < 2u || components > 4u || IR::BufferAccessOf(inst.GetOpcode()) != IR::BufferAccess::Read) continue;
+			const auto index = inst.Flags<IR::MemoryFlags>().index;
+			if (index >= state.program.memory_info.size()) continue;
+			const auto& mem = state.program.memory_info[index];
+			if (mem.kind != IR::ResourceKind::IndirectBuffer || mem.formatted) continue;
+			const auto per_dword = mem.coherent ? state.indirect_raw_coherent_function : state.indirect_raw_function;
+			if (per_dword == 0u) continue;
+			state.indirect_raw_group_functions[(components - 2u) + (mem.coherent ? 3u : 0u)] = per_dword;
+		}
+	}
+	for (uint32_t slot = 0; slot < state.indirect_raw_group_functions.size(); ++slot) {
+		if (state.indirect_raw_group_functions[slot] == 0u) continue;
+		const uint32_t components = slot % 3u + 2u;
+		const bool     coherent   = slot >= 3u;
+		const auto     u32        = TypeU32(state);
+		const auto     u64        = TypeU64(state);
+		const auto     boolean    = TypeBool(state);
+		const auto     result_type = TypeU32Composite(state, components);
+		std::vector<uint32_t> parameter_types(7u + IndirectRawDescriptorWords, u32);
+		const auto function_type = state.builder.Type(spv::OpTypeFunction, result_type, std::span(parameter_types));
+		const auto function      = state.builder.AllocateId();
+		state.indirect_raw_group_functions[slot] = function;
+		std::string name = "indirect_raw_x" + std::to_string(components) + "_hoisted";
+		if (coherent) name += "_coherent";
+		state.builder.AddName(function, name.c_str());
+		state.builder.AddFunction(spv::OpFunction, result_type, function, spv::FunctionControlDontInlineMask, function_type);
+		const auto parameter = [&]() {
+			const auto id = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpFunctionParameter, u32, id);
+			return id;
+		};
+		const auto word0   = parameter();
+		const auto word1   = parameter();
+		const auto records = parameter();
+		const auto word3   = parameter();
+		const auto index   = parameter();
+		const auto offset  = parameter();
+		const auto soffset = parameter();
+		(void)word1;
+		(void)word3;
+		IndirectRawDescriptorInfo descriptor {};
+		descriptor.base_high    = parameter();
+		descriptor.stride       = parameter();
+		descriptor.swizzle      = parameter();
+		descriptor.valid_format = parameter();
+		descriptor.index_stride = parameter();
+		descriptor.mode         = parameter();
+		EmitLabel(state, state.builder.AllocateId());
+		IndirectBufferAccess buffer {};
+		buffer.stride  = descriptor.stride;
+		buffer.swizzle = descriptor.swizzle;
+		const auto address = CalculateBufferAddress(state, index, offset, soffset, 0u, descriptor.stride,
+		                                            descriptor.swizzle, descriptor.index_stride);
+		const auto base    = PackU64(state, word0, descriptor.base_high);
+		buffer.address     = Binary(state, spv::OpIAdd, u64, base, Unary(state, spv::OpUConvert, u64, address.byte));
+		buffer.offset      = address.offset;
+		buffer.mode        = descriptor.mode;
+		buffer.records     = records;
+		buffer.index_in_bounds     = Binary(state, spv::OpULessThan, boolean, index, records);
+		buffer.scalar_in_bounds    = Binary(state, spv::OpULessThanEqual, boolean, soffset, records);
+		buffer.raw_records         = Binary(state, spv::OpISub, u32, records, soffset);
+		buffer.raw_index_in_bounds = Binary(state, spv::OpULessThan, boolean, index, buffer.raw_records);
+		buffer.coherent            = coherent;
+		const auto first_in_bounds = IndirectBufferInBounds(state, buffer, 0u, 4u, false);
+		auto all = AndCondition(state, descriptor.valid_format, first_in_bounds);
+		if (components > 1u) {
+			all = AndCondition(state, all,
+			                   IndirectBufferInBounds(state, buffer, (components - 1u) * 4u, 4u, false));
+		}
+		const auto first = Binary(state, spv::OpBitwiseAnd, u64, buffer.address, ConstantU64(state, ~uint64_t {3}));
+		const auto fast  = AndCondition(state, all, InOnePage(state, first, components * 4u));
+		const auto partial = Binary(state, spv::OpLogicalOr, boolean,
+		                            Binary(state, spv::OpIEqual, boolean, descriptor.mode, ConstantU32(state, 0)),
+		                            Binary(state, spv::OpIEqual, boolean, descriptor.mode, ConstantU32(state, 3)));
+		const auto load_dword = [&](uint32_t displacement) {
+			const auto partial_bounds = IndirectBufferInBounds(state, buffer, displacement, 4u, false);
+			const auto in_bounds = Select(state, boolean, partial, partial_bounds, first_in_bounds);
+			const auto dword_address = Binary(state, spv::OpIAdd, u64, first, Unary(state, spv::OpUConvert, u64, displacement));
+			return EmitValueOrZeroIfCondition(state, AndCondition(state, descriptor.valid_format, in_bounds),
+			                                  [&]() { return LoadBdaDword(ctx, dword_address, coherent); });
+		};
+		const auto today = [&]() {
+			std::array<uint32_t, 4> values {};
+			if (SpirvLoopRawLoadsEnabled()) {
+				const auto entry  = state.current_label;
+				const auto header = state.builder.AllocateId();
+				const auto body   = state.builder.AllocateId();
+				const auto cont   = state.builder.AllocateId();
+				const auto merge  = state.builder.AllocateId();
+				state.builder.AddFunction(spv::OpBranch, header);
+				EmitLabel(state, header);
+				const auto i_id  = state.builder.AllocateId();
+				const auto i_phi = state.builder.AddDeferredPhi(u32, i_id, 2);
+				std::array<uint32_t, 4> held {};
+				std::array<DeferredPhi, 4> held_phi {};
+				for (uint32_t c = 0; c < components; ++c) {
+					held[c]     = state.builder.AllocateId();
+					held_phi[c] = state.builder.AddDeferredPhi(u32, held[c], 2);
+				}
+				const auto more = Binary(state, spv::OpULessThan, boolean, i_id, ConstantU32(state, components));
+				state.builder.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlDontUnrollMask);
+				state.builder.AddFunction(spv::OpBranchConditional, more, body, merge);
+				EmitLabel(state, body);
+				const auto displacement = Binary(state, spv::OpShiftLeftLogical, u32, i_id, ConstantU32(state, 2));
+				const auto value        = load_dword(displacement);
+				std::array<uint32_t, 4> next {};
+				for (uint32_t c = 0; c < components; ++c) {
+					next[c] = Select(state, u32, Binary(state, spv::OpIEqual, boolean, i_id, ConstantU32(state, c)), value,
+					                 held[c]);
+				}
+				state.builder.AddFunction(spv::OpBranch, cont);
+				EmitLabel(state, cont);
+				const auto next_i = Binary(state, spv::OpIAdd, u32, i_id, ConstantU32(state, 1));
+				state.builder.AddFunction(spv::OpBranch, header);
+				state.builder.PatchDeferredPhi(i_phi, 0, ConstantU32(state, 0), entry);
+				state.builder.PatchDeferredPhi(i_phi, 1, next_i, cont);
+				for (uint32_t c = 0; c < components; ++c) {
+					state.builder.PatchDeferredPhi(held_phi[c], 0, ConstantU32(state, 0), entry);
+					state.builder.PatchDeferredPhi(held_phi[c], 1, next[c], cont);
+				}
+				EmitLabel(state, merge);
+				return held;
+			}
+			for (uint32_t i = 0; i < components; ++i) values[i] = load_dword(ConstantU32(state, i * 4u));
+			return values;
+		};
+		const auto values = EmitIfElseU32s(
+		    state, fast, components,
+		    [&]() {
+			    const auto bda     = GetBdaPointer(state, first);
+			    const auto present = Binary(state, spv::OpINotEqual, boolean, bda, ConstantU64(state, 0));
+			    const auto loaded  = EmitValueOrDefaultIfCondition(
+			         state, present, result_type, ConstantU32CompositeZero(state, components),
+			         [&]() { return ConstructU32Composite(state, components, LoadBdaDwordsAt(state, bda, components, coherent)); });
+			    std::array<uint32_t, 4> fresh {};
+			    for (uint32_t i = 0; i < components; ++i) {
+				    fresh[i] = state.builder.AllocateId();
+				    state.builder.AddFunction(spv::OpCompositeExtract, u32, fresh[i], loaded, i);
+			    }
+			    return fresh;
+		    },
+		    today);
+		state.builder.AddFunction(spv::OpReturnValue, ConstructU32Composite(state, components, values));
+		state.builder.AddFunction(spv::OpFunctionEnd);
+	}
+}
+
 // A raw dword load through a GPU-selected buffer descriptor
 // (bounds check + BDA translation + load) is emitted once as a non-inlined function and called per
 // component, instead of being expanded at every load. Same result; much smaller SPIR-V for shaders
 // with hundreds of such loads (driver compile time and memory).
 void DefineIndirectRawDword(ValueEmitContext& ctx) {
+	if (SpirvRawDescriptorHoistEnabled()) {
+		DefineIndirectRawDwordHoisted(ctx);
+		return;
+	}
 	auto& state = ctx.state;
 	if (state.bda_pointer_function == 0u) return;
 	// A GLC load (MemoryInfo::coherent) calls its own copy, whose load is coherent.
@@ -4293,6 +4557,10 @@ uint32_t EmitGetBufferResource(ValueEmitContext& ctx, const IR::Inst& inst) {
 		const auto format = EmitBitFieldUExtract(state, ctx.Arg(inst, 3), ConstantU32(state, 12),
 		                                         ConstantU32(state, 7));
 		state.indirect_formatted_descriptor_info[ctx.half][&inst] = DecodeIndirectFormattedDescriptor(state, format);
+	}
+	if (state.indirect_raw_descriptors.contains(&inst)) {
+		state.indirect_raw_descriptor_info[ctx.half][&inst] =
+		    DecodeIndirectRawDescriptor(state, ctx.Arg(inst, 1), ctx.Arg(inst, 3));
 	}
 	return 0;
 }

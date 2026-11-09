@@ -65,6 +65,7 @@ inline constexpr const char* Names[] = {
     "KYTY_NO_AMD_NATIVE_ISNAN",
     "KYTY_NO_AMD_NATIVE_MINMAX",
     "KYTY_NO_AMD_NATIVE_MIX",
+    "KYTY_NO_AMD_RAW_DESCRIPTOR_HOIST",
     "KYTY_NO_AMD_TABLE_FORMATS",
     "KYTY_OUTLINE_HELPERS",
     // BufferCache::BdaEntryShareMode (bufferCache.cpp), read by the SPIR-V emitter.

@@ -37945,6 +37945,82 @@ void CheckFormatDecodeBench() {
   std::printf("[host]    %-32s ok\n", name);
 }
 
+void CheckRawDescriptorHoistBench() {
+  constexpr const char *name = "RawDescriptorHoistBench";
+  constexpr u32 pairs = 144u;
+  struct Stats {
+    std::vector<u32> spirv;
+    size_t group_helper = 0;
+    size_t scalar_helper = 0;
+    size_t module_instructions = 0;
+  };
+  const auto run = [&](const char *label, std::optional<bool> hoist) {
+    ShaderRecompiler::Spirv::SetSpirvRawDescriptorHoistOverride(hoist);
+    ShaderComputeInputInfo compute{};
+    auto shader = IndirectFormattedBench::Compile(pairs, 32u, compute, 2u, true);
+    ShaderRecompiler::Spirv::SetSpirvRawDescriptorHoistOverride(std::nullopt);
+    ValidateSpirv(name, shader.spirv);
+    Stats stats{.spirv = std::move(shader.spirv)};
+    bool in_function = false;
+    size_t function_instructions = 0;
+    size_t parameters = 0;
+    for (size_t offset = 5; offset < stats.spirv.size();) {
+      const auto words = stats.spirv[offset] >> spv::WordCountShift;
+      const auto opcode = stats.spirv[offset] & spv::OpCodeMask;
+      Require(name, "instruction bounds", words != 0 && offset + words <= stats.spirv.size(),
+              "malformed emitted SPIR-V");
+      ++stats.module_instructions;
+      if (opcode == spv::OpFunction) {
+        in_function = true;
+        function_instructions = 0;
+        parameters = 0;
+      }
+      if (in_function) {
+        ++function_instructions;
+        if (opcode == spv::OpFunctionParameter) ++parameters;
+        if (opcode == spv::OpFunctionEnd) {
+          const auto group_parameters = hoist.value_or(false) ? 13u : 7u;
+          const auto scalar_parameters = hoist.value_or(false) ? 14u : 8u;
+          if (parameters == group_parameters) stats.group_helper = function_instructions;
+          if (parameters == scalar_parameters) stats.scalar_helper = function_instructions;
+          in_function = false;
+        }
+      }
+      offset += words;
+    }
+    Require(name, "group helper", stats.group_helper != 0, label);
+    Require(name, "scalar helper", stats.scalar_helper != 0, label);
+    const auto inlined = pairs * (stats.group_helper + stats.scalar_helper);
+    std::printf("RAW_LOAD_BENCH variant=%s loads=%u grouped=%u scalar=%u group_helper=%zu scalar_helper=%zu "
+                "inlined_load_instructions=%zu module_instructions=%zu words=%zu\n",
+                label, pairs * 2u, pairs, pairs, stats.group_helper, stats.scalar_helper, inlined,
+                stats.module_instructions, stats.spirv.size());
+    return stats;
+  };
+  const auto host_features = ShaderRecompiler::Spirv::GetHostFloatFeatures();
+  auto amd_features = host_features;
+  amd_features.amd = true;
+  ShaderRecompiler::Spirv::SetHostFloatFeatures(amd_features);
+  const auto amd_off = run("amd_off", false);
+  const auto amd_on = run("amd_on", true);
+  const auto amd_default = run("amd_default", std::nullopt);
+  auto non_amd_features = host_features;
+  non_amd_features.amd = false;
+  ShaderRecompiler::Spirv::SetHostFloatFeatures(non_amd_features);
+  const auto non_amd_default = run("non_amd_default", std::nullopt);
+  const auto non_amd_forced = run("non_amd_forced", true);
+  ShaderRecompiler::Spirv::SetHostFloatFeatures(host_features);
+  Require(name, "AMD default", amd_default.spirv == amd_on.spirv,
+          "AMD default emission did not select descriptor hoisting");
+  Require(name, "non-AMD byte identity", non_amd_default.spirv == non_amd_forced.spirv,
+          "descriptor hoisting changed non-AMD emission");
+  Require(name, "group helper size", amd_on.group_helper < amd_off.group_helper,
+          "descriptor hoisting did not shrink the grouped raw-load helper");
+  Require(name, "scalar helper size", amd_on.scalar_helper < amd_off.scalar_helper,
+          "descriptor hoisting did not shrink the per-dword raw-load helper");
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckFiniteInlineSamplerPhi(VulkanHarness &vulkan) {
   TestCase test;
   test.name = "FiniteInlineSamplerPhi";
@@ -45889,6 +45965,7 @@ int main(int argc, char **argv) {
     CheckAmdNativeFloatBench();
     RunStep("CheckTableFormatSpecialization", CheckTableFormatSpecialization);
     RunStep("CheckFormatDecodeBench", CheckFormatDecodeBench);
+    RunStep("CheckRawDescriptorHoistBench", CheckRawDescriptorHoistBench);
     return g_failed_steps.empty() ? 0 : 1;
   }
   if (argc == 2 && std::strcmp(argv[1], "--thread-dimensions-only") == 0) {

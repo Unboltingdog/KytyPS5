@@ -34,6 +34,16 @@ namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 // spirvEmitterLaneShare.cpp: with lane_count == 2 every IR
 // instruction is emitted once per emulated wave half. A value that is provably the same in both halves
 // is emitted by the low half only; the high half reuses its id.
+struct IndirectRawDescriptorInfo {
+	uint32_t base_high    = 0;
+	uint32_t stride       = 0;
+	uint32_t swizzle      = 0;
+	uint32_t valid_format = 0;
+	uint32_t index_stride = 0;
+	uint32_t mode         = 0;
+};
+constexpr size_t IndirectRawDescriptorWords = 6;
+
 struct LaneShareState {
 	bool active = false; // a lane_count == 2 compute shader
 	// Instructions the high half does not emit (subset of `uniform`: not Ballot/ReadFirstLane/handles).
@@ -181,6 +191,9 @@ struct EmitterState {
 	                                                 indirect_formatted_descriptor_info;
 	uint32_t                                         indirect_raw_function = 0;
 	uint32_t                                         indirect_raw_coherent_function = 0; // GLC accesses (MemoryInfo::coherent)
+	std::unordered_set<const IR::Inst*>              indirect_raw_descriptors;
+	std::array<std::unordered_map<const IR::Inst*, IndirectRawDescriptorInfo>, 2>
+	                                                 indirect_raw_descriptor_info;
 	// F1 (grouped IndirectBuffer reads): indirect_raw_x<N>[_coherent], index (N - 2) + 3 * coherent (0: not defined).
 	std::array<uint32_t, 6>                          indirect_raw_group_functions {};
 	// KYTY_PERF_SPIRV_STORE_OUTLINE (DefineIndirectStoreFunctions): one function per shape of the stores through a
