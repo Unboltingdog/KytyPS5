@@ -37400,6 +37400,8 @@ CompiledShader Compile(const LoadProgram &spec, u32 host_subgroup_size, ShaderCo
         program.info.buffers[0].indirect_resources.push_back(static_cast<u32>(program.info.buffers.size()));
         program.info.buffers.push_back(child);
       }
+      // CollectShaderInfo ran before the table was attached: the root's GPU mapping needs the flattened SRT binding.
+      program.info.uses_flattened_srt = true;
     }
     Spirv::SetSpirvTableFormatsOverride(table_mode == 1 || table_mode == 2 || table_mode == 5);
   }
@@ -37736,6 +37738,8 @@ CompiledShader Compile(u32 pairs, u32 host_subgroup_size, ShaderComputeInputInfo
       program.info.buffers[root_index] = root;
       program.info.buffers.push_back(child);
     }
+    // CollectShaderInfo ran before the tables were attached: their GPU mappings need the flattened SRT binding.
+    program.info.uses_flattened_srt = true;
   }
   Spirv::SetSpirvFormattedSwitchReference(mode == 1u);
   compiled.spirv = Spirv::EmitProgram(program, {.compute = &compute});
