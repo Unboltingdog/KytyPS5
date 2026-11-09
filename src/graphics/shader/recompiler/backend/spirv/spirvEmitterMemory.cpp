@@ -3279,6 +3279,50 @@ void DefineIndirectRawDword(ValueEmitContext& ctx) {
 		const auto fast  = AndCondition(state, all, InOnePage(state, first, components * 4u));
 		const auto today = [&]() {
 			std::array<uint32_t, 4> values {};
+			if (components > 1u && SpirvLoopRawLoadsEnabled()) {
+				// SpirvLoopRawLoadsEnabled: one indirect_raw_dword call in a DontUnroll loop instead of `components`
+				// calls, so AMD's compiler (which inlines every call) inlines the per-dword path once per load.
+				const auto entry  = state.current_label;
+				const auto header = state.builder.AllocateId();
+				const auto body   = state.builder.AllocateId();
+				const auto cont   = state.builder.AllocateId();
+				const auto merge  = state.builder.AllocateId();
+				state.builder.AddFunction(spv::OpBranch, header);
+				EmitLabel(state, header);
+				const auto i_id   = state.builder.AllocateId();
+				const auto i_phi  = state.builder.AddDeferredPhi(u32, i_id, 2);
+				std::array<uint32_t, 4> held {};
+				std::array<DeferredPhi, 4> held_phi {};
+				for (uint32_t c = 0; c < components; ++c) {
+					held[c]     = state.builder.AllocateId();
+					held_phi[c] = state.builder.AddDeferredPhi(u32, held[c], 2);
+				}
+				const auto more = Binary(state, spv::OpULessThan, boolean, i_id, ConstantU32(state, components));
+				state.builder.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlDontUnrollMask);
+				state.builder.AddFunction(spv::OpBranchConditional, more, body, merge);
+				EmitLabel(state, body);
+				const auto displacement = Binary(state, spv::OpShiftLeftLogical, u32, i_id, ConstantU32(state, 2));
+				const auto value        = state.builder.AllocateId();
+				state.builder.AddFunction(spv::OpFunctionCall, u32, value, per_dword, word0, word1, records, word3, index,
+				                          offset, soffset, displacement);
+				std::array<uint32_t, 4> next {};
+				for (uint32_t c = 0; c < components; ++c) {
+					next[c] = Select(state, u32, Binary(state, spv::OpIEqual, boolean, i_id, ConstantU32(state, c)), value,
+					                 held[c]);
+				}
+				state.builder.AddFunction(spv::OpBranch, cont);
+				EmitLabel(state, cont);
+				const auto next_i = Binary(state, spv::OpIAdd, u32, i_id, ConstantU32(state, 1));
+				state.builder.AddFunction(spv::OpBranch, header);
+				state.builder.PatchDeferredPhi(i_phi, 0, ConstantU32(state, 0), entry);
+				state.builder.PatchDeferredPhi(i_phi, 1, next_i, cont);
+				for (uint32_t c = 0; c < components; ++c) {
+					state.builder.PatchDeferredPhi(held_phi[c], 0, ConstantU32(state, 0), entry);
+					state.builder.PatchDeferredPhi(held_phi[c], 1, next[c], cont);
+				}
+				EmitLabel(state, merge);
+				return held;
+			}
 			for (uint32_t i = 0; i < components; ++i) {
 				values[i] = state.builder.AllocateId();
 				state.builder.AddFunction(spv::OpFunctionCall, u32, values[i], per_dword, word0, word1, records, word3,

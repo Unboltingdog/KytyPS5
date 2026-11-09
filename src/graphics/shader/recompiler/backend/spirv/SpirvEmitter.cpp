@@ -368,6 +368,12 @@ bool SpirvFormatDecodeFlatEnabled() {
 	return value == nullptr || value[0] != '1';
 }
 
+bool SpirvLoopRawLoadsEnabled() {
+	if (!GetHostFloatFeatures().amd) return false;
+	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_LOOP_RAW_LOADS");
+	return value == nullptr || value[0] != '1';
+}
+
 bool SpirvDeferBdaFaultEnabled() {
 	if (!GetHostFloatFeatures().amd) return false;
 	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_DEFER_BDA_FAULT");

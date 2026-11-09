@@ -99,6 +99,10 @@ bool SpirvFormatDecodeFlatEnabled();
 // was ~40% of the compile time of Yotei's 57-75 s compute shaders. Only the last page per invocation is reported;
 // the others are reported by later dispatches. Other vendors keep the immediate report.
 bool SpirvDeferBdaFaultEnabled();
+// AMD default (KYTY_NO_AMD_LOOP_RAW_LOADS=1 opts out): the slow path of a grouped 2-4 dword raw load through a
+// GPU-selected descriptor calls indirect_raw_dword once in a DontUnroll loop instead of once per dword. Measured on
+// the RX 9070 XT: 0x802184cc00 58.5 s -> 46.3 s, 0x808d22eb00 75.9 s -> 51.4 s. Same values; other vendors unchanged.
+bool SpirvLoopRawLoadsEnabled();
 void SetSpirvFormatDecodeFlatOverride(std::optional<bool> enabled);
 
 // Guest address supplied by the translation options, or zero for a host-built program without one.
