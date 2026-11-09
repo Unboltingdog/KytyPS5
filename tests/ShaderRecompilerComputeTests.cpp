@@ -37979,10 +37979,10 @@ void CheckRawDescriptorHoistBench() {
         ++function_instructions;
         if (opcode == spv::OpFunctionParameter) ++parameters;
         if (opcode == spv::OpFunctionEnd) {
-          const auto group_parameters = hoist.value_or(false) ? 13u : 7u;
-          const auto scalar_parameters = hoist.value_or(false) ? 14u : 8u;
-          if (parameters == group_parameters) stats.group_helper = function_instructions;
-          if (parameters == scalar_parameters) stats.scalar_helper = function_instructions;
+          // 7/8 parameters unhoisted, 13/14 hoisted. Which one depends on the vendor too (non-AMD ignores a forced
+          // override), so either shape is counted.
+          if (parameters == 7u || parameters == 13u) stats.group_helper = function_instructions;
+          if (parameters == 8u || parameters == 14u) stats.scalar_helper = function_instructions;
           in_function = false;
         }
       }
