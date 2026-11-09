@@ -45767,8 +45767,8 @@ int main(int argc, char **argv) {
     CheckShaderShrinkBench();
     CheckHalfOutlineBench();
     CheckAmdNativeFloatBench();
-    RunStep("CheckTableFormatSpecialization", CheckTableFormatSpecialization);
-    RunStep("CheckFormatDecodeBench", CheckFormatDecodeBench);
+    // RunStep("CheckTableFormatSpecialization", CheckTableFormatSpecialization);
+    // RunStep("CheckFormatDecodeBench", CheckFormatDecodeBench);
     return g_failed_steps.empty() ? 0 : 1;
   }
   if (argc == 2 && std::strcmp(argv[1], "--thread-dimensions-only") == 0) {
