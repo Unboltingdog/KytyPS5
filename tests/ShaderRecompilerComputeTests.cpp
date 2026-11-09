@@ -82,6 +82,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <initializer_list>
 #include <limits>
 #include <memory>
@@ -37607,7 +37608,8 @@ constexpr u32 OutputSlot = 0x7000u;
 
 // mode: 0 the emitter's path, 1 the 78-case format switch (SetSpirvFormattedSwitchReference), 2 raw dword loads of the
 // same addresses (the descriptors read unformatted: the floor of a load through the page table).
-CompiledShader Compile(u32 pairs, u32 host_subgroup_size, ShaderComputeInputInfo &compute, u32 mode) {
+CompiledShader Compile(u32 pairs, u32 host_subgroup_size, ShaderComputeInputInfo &compute, u32 mode,
+                       bool uniform_formats = false) {
   using namespace IR;
   using F = Prospero::BufferFormat;
   CompiledShader compiled;
@@ -37696,6 +37698,24 @@ CompiledShader Compile(u32 pairs, u32 host_subgroup_size, ShaderComputeInputInfo
   compute.threads_num[1] = compute.threads_num[2] = 1;
   program.shader_info_complete = false;
   CollectShaderInfo(program, {.compute = &compute});
+  if (uniform_formats) {
+    const std::array formats{F::k16UInt, F::k16_16Float};
+    for (u32 index = 0; index < formats.size(); ++index) {
+      const auto root_index = program.memory_info[index].resource;
+      Require("FormatDecodeBench", "buffer root", root_index < program.info.buffers.size(),
+              "an indirect formatted load has no buffer resource");
+      auto root = program.info.buffers[root_index];
+      root.indirect_root = root_index;
+      root.descriptor_format = F::kInvalid;
+      root.indirect_resources = {root_index};
+      auto child = root;
+      child.descriptor_format = formats[index];
+      child.indirect_resources.clear();
+      root.indirect_resources.push_back(static_cast<u32>(program.info.buffers.size()));
+      program.info.buffers[root_index] = root;
+      program.info.buffers.push_back(child);
+    }
+  }
   Spirv::SetSpirvFormattedSwitchReference(mode == 1u);
   compiled.spirv = Spirv::EmitProgram(program, {.compute = &compute});
   Spirv::SetSpirvFormattedSwitchReference(false);
@@ -37734,6 +37754,76 @@ void Run(VulkanHarness &vulkan, u32 pairs, u32 repeats, u32 mode) {
 }
 
 } // namespace IndirectFormattedBench
+
+void CheckFormatDecodeBench() {
+  constexpr const char *name = "FormatDecodeBench";
+  constexpr u32 pairs = 56u;
+  struct Stats {
+    std::vector<u32> spirv;
+    size_t instructions = 0;
+    size_t switches = 0;
+    size_t phis = 0;
+    size_t labels = 0;
+    size_t functions = 0;
+  };
+  const char *requested = std::getenv("KYTY_FORMAT_DECODE_BENCH_DIR");
+  const std::filesystem::path directory =
+      requested != nullptr && *requested != '\0' ? std::filesystem::path(requested)
+                                                 : std::filesystem::path("spvbench_in");
+  std::error_code error;
+  std::filesystem::create_directories(directory, error);
+  Require(name, "output directory", !error, error.message());
+  const auto run = [&](const char *label, bool table_formats, bool flat) {
+    ShaderRecompiler::Spirv::SetSpirvTableFormatsOverride(table_formats);
+    ShaderRecompiler::Spirv::SetSpirvFormatDecodeFlatOverride(flat);
+    ShaderComputeInputInfo compute{};
+    auto shader = IndirectFormattedBench::Compile(pairs, 32u, compute, 0u, true);
+    ShaderRecompiler::Spirv::SetSpirvTableFormatsOverride(std::nullopt);
+    ShaderRecompiler::Spirv::SetSpirvFormatDecodeFlatOverride(std::nullopt);
+    ValidateSpirv(name, shader.spirv);
+    Stats stats{.spirv = std::move(shader.spirv)};
+    for (size_t offset = 5; offset < stats.spirv.size();) {
+      const auto words = stats.spirv[offset] >> spv::WordCountShift;
+      Require(name, "instruction bounds", words != 0 && offset + words <= stats.spirv.size(),
+              "malformed emitted SPIR-V");
+      ++stats.instructions;
+      offset += words;
+    }
+    stats.switches = CountSpirvOpcode(stats.spirv, spv::OpSwitch);
+    stats.phis = CountSpirvOpcode(stats.spirv, spv::OpPhi);
+    stats.labels = CountSpirvOpcode(stats.spirv, spv::OpLabel);
+    stats.functions = CountSpirvOpcode(stats.spirv, spv::OpFunction);
+    const auto path = directory / (std::string("format_decode_") + label + ".spv");
+    std::FILE *file = std::fopen(path.string().c_str(), "wb");
+    Require(name, "open SPIR-V output", file != nullptr, path.string());
+    size_t written = 0;
+    if (file != nullptr) {
+      written = std::fwrite(stats.spirv.data(), sizeof(u32), stats.spirv.size(), file);
+    }
+    const auto close_result = file != nullptr ? std::fclose(file) : EOF;
+    Require(name, "write SPIR-V output", written == stats.spirv.size() && close_result == 0, path.string());
+    std::printf("FORMAT_DECODE_BENCH loads=%u descriptors=2 table_formats=%d flat=%d words=%zu bytes=%zu "
+                "instructions=%zu OpSwitch=%zu OpPhi=%zu OpLabel=%zu file=%s\n",
+                pairs * 2u, table_formats ? 1 : 0, flat ? 1 : 0, stats.spirv.size(),
+                stats.spirv.size() * sizeof(u32), stats.instructions, stats.switches, stats.phis, stats.labels,
+                path.string().c_str());
+    return stats;
+  };
+  const auto both_off = run("table0_flat0", false, false);
+  const auto table_on = run("table1_flat0", true, false);
+  const auto flat_on = run("table0_flat1", false, true);
+  const auto both_on = run("table1_flat1", true, true);
+  Require(name, "legacy decoder", both_off.switches != 0, "the legacy synthetic module has no format switches");
+  Require(name, "flat decoder", flat_on.switches == 0 && both_on.switches == 0,
+          "the flat synthetic modules retained a format switch");
+  Require(name, "specialized helpers",
+          table_on.functions == both_off.functions + 2u && both_on.functions == flat_on.functions + 2u,
+          "the two captured descriptor formats did not each add one specialized helper");
+  Require(name, "flat module size", flat_on.spirv.size() < both_off.spirv.size() &&
+                                      both_on.spirv.size() < table_on.spirv.size(),
+          "the flat decoder did not shrink the 112-load synthetic module");
+  std::printf("[host]    %-32s ok\n", name);
+}
 
 void CheckFiniteInlineSamplerPhi(VulkanHarness &vulkan) {
   TestCase test;
@@ -45678,6 +45768,7 @@ int main(int argc, char **argv) {
     CheckHalfOutlineBench();
     CheckAmdNativeFloatBench();
     RunStep("CheckTableFormatSpecialization", CheckTableFormatSpecialization);
+    RunStep("CheckFormatDecodeBench", CheckFormatDecodeBench);
     return g_failed_steps.empty() ? 0 : 1;
   }
   if (argc == 2 && std::strcmp(argv[1], "--thread-dimensions-only") == 0) {
