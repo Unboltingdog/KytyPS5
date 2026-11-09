@@ -164,23 +164,39 @@ struct ReadbackKey {
                std::tie(other.site, other.reason, other.trigger, other.vaddr, other.size);
 	}
 };
+struct ReadbackCost {
+	uint64_t ticks = 0;
+	uint64_t count = 0;
+	uint64_t wait_ns = 0;
+	uint64_t copy_ns = 0;
+	uint64_t publish_ns = 0;
+	uint64_t bytes = 0;
+	uint64_t pages = 0;
+};
 std::mutex                       g_readback_mutex;
-std::map<ReadbackKey, Cost>      g_readback_waits;
+std::map<ReadbackKey, ReadbackCost> g_readback_waits;
 
 void ReportReadbackWaits(uint32_t frames) {
 	std::scoped_lock lock(g_readback_mutex);
-	std::vector<std::pair<ReadbackKey, Cost>> top(g_readback_waits.begin(), g_readback_waits.end());
+	std::vector<std::pair<ReadbackKey, ReadbackCost>> top(g_readback_waits.begin(), g_readback_waits.end());
 	std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second.ticks > b.second.ticks; });
 	const auto per_frame = std::max(frames, 1u);
 	for (size_t i = 0; i < top.size() && i < 10u; ++i) {
 		const auto& [key, cost] = top[i];
+		const auto  per_read    = std::max(cost.count, uint64_t {1});
 		std::fprintf(stderr,
 		             "FRAME_GAPS_READBACK rank=%zu site=%s reason=%s trigger=%s range=0x%llx-0x%llx bytes=%llu "
-		             "count=%llu total_ms_per_frame=%.3f\n",
+		             "count=%llu total_ms_per_frame=%.3f wait_ms=%.3f copy_ms=%.3f publish_ms=%.3f "
+		             "downloaded_bytes=%llu downloaded_pages=%llu bytes_per_read=%.1f pages_per_read=%.2f\n",
 		             i + 1u, key.site.c_str(), key.reason.c_str(), key.trigger.c_str(),
 		             static_cast<unsigned long long>(key.vaddr), static_cast<unsigned long long>(key.vaddr + key.size),
 		             static_cast<unsigned long long>(key.size), static_cast<unsigned long long>(cost.count),
-		             static_cast<double>(cost.ticks) / 1.0e6 / per_frame);
+		             static_cast<double>(cost.ticks) / 1.0e6 / per_frame,
+		             static_cast<double>(cost.wait_ns) / 1.0e6 / per_frame,
+		             static_cast<double>(cost.copy_ns) / 1.0e6 / per_frame,
+		             static_cast<double>(cost.publish_ns) / 1.0e6 / per_frame,
+		             static_cast<unsigned long long>(cost.bytes), static_cast<unsigned long long>(cost.pages),
+		             static_cast<double>(cost.bytes) / per_read, static_cast<double>(cost.pages) / per_read);
 	}
 	g_readback_waits.clear();
 }
@@ -504,12 +520,17 @@ bool FrameGapsEnabled() {
 }
 
 void NoteReadbackWait(const char* site, const char* reason, const char* trigger, uint64_t vaddr, uint64_t size,
-                      uint64_t nanoseconds) {
+                      uint64_t nanoseconds, const ReadbackTiming& timing) {
 	if (!FrameGapsEnabled()) return;
 	std::scoped_lock lock(g_readback_mutex);
 	auto& cost = g_readback_waits[ReadbackKey {site, reason, trigger, vaddr, size}];
 	cost.ticks += nanoseconds;
 	cost.count++;
+	cost.wait_ns += timing.wait_ns;
+	cost.copy_ns += timing.copy_ns;
+	cost.publish_ns += timing.publish_ns;
+	cost.bytes += timing.bytes;
+	cost.pages += timing.pages;
 }
 
 FrameGapScope::FrameGapScope(FrameGapCause cause, bool enabled): m_cause(cause) {

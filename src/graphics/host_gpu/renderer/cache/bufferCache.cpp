@@ -634,8 +634,14 @@ static bool SkipReadbackCeiling() {
 	return on;
 }
 
+static uint64_t DownloadElapsedNs(std::chrono::steady_clock::time_point start) {
+	return static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+}
+
 template <bool async>
-bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size,
+                                       GpuTimer::ReadbackTiming* timing) {
 	GpuTimer::FrameGapScope frame_gap(GpuTimer::FrameGapCause::Readback, !async && GuestGpu::IsGpuThread());
 	KYTY_PROFILER_BLOCK("BufferCache::DownloadBufferMemory");
 	if constexpr (!async) {
@@ -647,11 +653,20 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			});
 			return any;
 		}
+		if (timing != nullptr) {
+			m_memory_tracker.ForEachDownloadRange<false>(vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+				m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
+					timing->bytes += end - start;
+					timing->pages += (end - 1u) / TRACKER_PAGE_SIZE - start / TRACKER_PAGE_SIZE + 1u;
+				});
+			});
+		}
 		if (!buffer.Mapped().empty()) {
 			DownloadWaitTrace::g_last_bar_reason = -1;
-			if (TryBarDownload(buffer, vaddr, size) == 1) return true;
+			if (TryBarDownload(buffer, vaddr, size, timing) == 1) return true;
 		}
 	}
+	const auto copy_start = timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size     = 0;
 	const auto                  buffer_address = buffer.CpuAddress();
@@ -769,11 +784,13 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	if constexpr (async) {
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else {
+		if (timing != nullptr) timing->copy_ns += DownloadElapsedNs(copy_start);
 		const auto              tick       = m_scheduler.CurrentTick();
 		const auto              wait_start = std::chrono::steady_clock::now();
 		SyncTimeline::SiteScope timeline_site(SyncTimeline::Site::Copy); // KYTY_TRACE_SYNC_TIMELINE
 		m_scheduler.Wait(tick);
 		m_scheduler.WaitPriorityOperations(tick);
+		if (timing != nullptr) timing->wait_ns += DownloadElapsedNs(wait_start);
 		if (DownloadWaitTrace::Enabled()) {
 			using namespace DownloadWaitTrace;
 			const int r    = g_last_bar_reason;
@@ -783,6 +800,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			Add(kind, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
 			                                    std::chrono::steady_clock::now() - wait_start).count()), total_size);
 		}
+		const auto publish_start = timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 		if (direct) {
 			// The bytes are in the backing; only the observers of a publish see them.
 			// (KYTY_TRACE_SYNC_TIMELINE's changed-byte counts compare with guest memory, which already holds them: 0.)
@@ -793,6 +811,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			}
 		}
 		publish();
+		if (timing != nullptr) timing->publish_ns += DownloadElapsedNs(publish_start);
 		ReportDownloadToBacking();
 	}
 	return true;
@@ -893,6 +912,16 @@ namespace {
 // so every read still gets the newest GPU bytes. The open-world profile (18.10) shows the BAR copy at ~10% of the GPU
 // thread for ~16 MB/5 s of bytes the game needs.
 constexpr uint64_t ReadWindowBytes = uint64_t {4096} << 10u;
+// SRT pointer chasing reads a few dwords of a table, not the Snake-fight cutscene's thousands of consecutive pages.
+// KYTY_FIX_SRT_NARROW_READS=0 restores the 4 MiB half-window for those reads; other reasons keep it in either mode.
+constexpr uint64_t SrtReadWindowBytes = uint64_t {64} << 10u;
+bool SrtNarrowReadsEnabled() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_FIX_SRT_NARROW_READS");
+		return value == nullptr || value[0] != '0';
+	}();
+	return on;
+}
 
 // A CPU write into a GPU-modified page whose GPU bytes the write request (ReadMemory with is_write) published (download)
 // or dropped (DropDeadRingBytes) unmarks the page and marks it CPU-dirty under one hold of the region's lock, and the
@@ -1021,7 +1050,11 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			}
 			// A download that copied GPU-written bytes (and so waited for the GPU), timed per reason.
 			const auto timed_download = [&](Buffer& target, uint64_t address, uint64_t bytes) {
-				const auto download = [&] { return DownloadBufferMemory<false>(target, address, bytes); };
+				GpuTimer::ReadbackTiming timing {};
+				const auto download = [&] {
+					return DownloadBufferMemory<false>(target, address, bytes,
+					                                   GpuTimer::FrameGapsEnabled() ? &timing : nullptr);
+				};
 				if (!PerfEnabled() && !GpuTimer::FrameGapsEnabled()) {
 					const bool copied = download();
 					if (copied) ReadbackBurn(); // KYTY_DIAG_GPU_BURN_AT=readback (measurement only)
@@ -1033,7 +1066,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
                     std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
 				if (copied && GuestGpu::IsGpuThread()) {
 					GpuTimer::NoteReadbackWait("DownloadBufferMemory", PerfReasonName(reason), "cpu_access", address,
-					                           bytes, ns);
+					                           bytes, ns, timing);
 				}
 				// KYTY_TRACE_GPU_READ_WAITS=<us> (diagnostic, with KYTY_TRACE_PERF; read once): the GPU thread's downloads
 				// of GPU-written bytes that took at least that long - who read (reason, the draw's marker), what (the
@@ -3639,7 +3672,8 @@ void ReportBarBatch() {
 // The publish of TryBarDownload's intervals (finished, already taken out of the GPU-dirty set) from span reads of the
 // host mapping `mapped` of the buffer at guest address `base`.
 void BufferCache::BarBatchRead(const uint8_t* mapped, uint64_t base,
-                               const std::vector<std::pair<uint64_t, uint64_t>>& intervals) {
+                               const std::vector<std::pair<uint64_t, uint64_t>>& intervals,
+                               GpuTimer::ReadbackTiming* timing) {
 	auto& s = g_bar_batch;
 	// Spans over the intervals in their order (ScanBarDownload walks them by address; an interval below the open span
 	// starts a new one). staging: the span's offset in the staging copy.
@@ -3664,6 +3698,7 @@ void BufferCache::BarBatchRead(const uint8_t* mapped, uint64_t base,
 		}
 		owner.push_back(static_cast<uint32_t>(spans.size() - 1u));
 	}
+	const auto copy_start = timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	if (staging.size() < total) staging.resize(total);
 	{
 		KYTY_PROFILER_BLOCK("Download::BarRead");
@@ -3671,11 +3706,13 @@ void BufferCache::BarBatchRead(const uint8_t* mapped, uint64_t base,
 			CopyFromWriteCombined(staging.data() + span.staging, mapped + (span.start - base), span.end - span.start);
 		}
 	}
+	if (timing != nullptr) timing->copy_ns += DownloadElapsedNs(copy_start);
 	s.downloads.fetch_add(1, std::memory_order_relaxed);
 	s.intervals.fetch_add(intervals.size(), std::memory_order_relaxed);
 	s.spans.fetch_add(spans.size(), std::memory_order_relaxed);
 	s.bytes.fetch_add(bytes, std::memory_order_relaxed);
 	s.extra.fetch_add(total - bytes, std::memory_order_relaxed);
+	const auto publish_start = timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	for (size_t i = 0; i < intervals.size(); i++) {
 		const auto [start, end] = intervals[i];
 		const auto&    span     = spans[owner[i]];
@@ -3683,6 +3720,7 @@ void BufferCache::BarBatchRead(const uint8_t* mapped, uint64_t base,
 		SyncTimeline::NoteDownload(start, data, end - start);
 		Libs::LibKernel::Memory::WriteBacking(start, data, end - start);
 	}
+	if (timing != nullptr) timing->publish_ns += DownloadElapsedNs(publish_start);
 	ReportBarBatch();
 }
 
@@ -3692,10 +3730,12 @@ void BufferCache::BarBatchRead(const uint8_t* mapped, uint64_t base,
 // 6-9.5 ms for 5 command buffers, its own bytes long written; live A/B +1.8% standing, +7.7% walking, draws equal). The
 // bytes left outside stay GPU-modified and synchronize when accessed.
 std::pair<uint64_t, uint64_t> BufferCache::ReadRange(Buffer& buffer, uint64_t vaddr, uint64_t size) {
-	const uint64_t start = buffer.CpuAddress();
-	const uint64_t end   = start + buffer.Size();
-	const uint64_t lo    = std::max(start, vaddr > ReadWindowBytes ? (vaddr - ReadWindowBytes) & ~0xfffull : 0ull);
-	const uint64_t hi    = std::min(end, (vaddr + size + ReadWindowBytes + 0xfffull) & ~0xfffull);
+	const uint64_t start  = buffer.CpuAddress();
+	const uint64_t end    = start + buffer.Size();
+	const uint64_t window = PerfCurrentReason() == PerfReason::SrtWalker && SrtNarrowReadsEnabled()
+	                            ? SrtReadWindowBytes : ReadWindowBytes;
+	const uint64_t lo = std::max(start, vaddr > window ? (vaddr - window) & ~0xfffull : 0ull);
+	const uint64_t hi = std::min(end, (vaddr + size + window + 0xfffull) & ~0xfffull);
 	if (!(lo < hi && lo <= vaddr && vaddr + size <= hi)) return {vaddr, vaddr + size};
 	if (buffer.Mapped().empty()) return {lo, hi};
 	const auto ready = m_buffer_ready_tick.find(reinterpret_cast<uint64_t>(static_cast<VkBuffer>(buffer.Handle())));
@@ -3712,7 +3752,7 @@ std::pair<uint64_t, uint64_t> BufferCache::ReadRange(Buffer& buffer, uint64_t va
 	return servable(p_lo, p_hi) ? std::pair {p_lo, p_hi} : std::pair {lo, hi};
 }
 
-int BufferCache::TryBarDownload(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+int BufferCache::TryBarDownload(Buffer& buffer, uint64_t vaddr, uint64_t size, GpuTimer::ReadbackTiming* timing) {
 	// Larger reads copy faster through the GPU into cached host memory than from the BAR mapping.
 	const uint64_t MaxBytes = BarMaxBytes;
 	// Outcomes: 0 read from the mapping, 1 unknown write tick, 2 written by the open command buffer,
@@ -3759,9 +3799,11 @@ int BufferCache::TryBarDownload(Buffer& buffer, uint64_t vaddr, uint64_t size) {
 	}
 	// Every command buffer ends with a device-to-host memory barrier (CommandScheduler::Submit), so
 	// the writes are visible to the host once their command buffer finished.
+	const auto wait_start = timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	SyncTimeline::SiteScope timeline_site(SyncTimeline::Site::Bar); // KYTY_TRACE_SYNC_TIMELINE
 	m_scheduler.Wait(newest);
 	m_scheduler.WaitPriorityOperations(newest);
+	if (timing != nullptr) timing->wait_ns += DownloadElapsedNs(wait_start);
 	KYTY_PROFILER_BLOCK("Download::BarCopy");
 	if (!buffer.IsCoherent()) buffer.Invalidate(0, buffer.Size());
 	const auto* mapped = buffer.Mapped().data();
@@ -3777,7 +3819,7 @@ int BufferCache::TryBarDownload(Buffer& buffer, uint64_t vaddr, uint64_t size) {
 	// Streaming loads (VMOVNTDQA) fetch a whole 64-byte line per transaction and several lines can be in flight. The bytes
 	// go to a host staging copy first, so the slow PCIe reads do not run under the address-space mutex (WriteBacking) and
 	// the merge copies do not read the BAR a second time.
-	BarBatchRead(mapped, base, intervals);
+	BarBatchRead(mapped, base, intervals, timing);
 	return outcome(0);
 }
 

@@ -36,6 +36,9 @@ namespace Libs::Graphics {
 struct GraphicContext;
 class CommandScheduler;
 class TextureCache;
+namespace GpuTimer {
+struct ReadbackTiming;
+}
 
 using BufferId = Common::SlotId;
 inline constexpr BufferId NULL_BUFFER_ID {0};
@@ -617,9 +620,10 @@ private:
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// found_image (optional): whether an image lies over the range (the obtain memo keeps none of those).
 	[[nodiscard]] bool SyncBufferFromWrittenImage(Buffer& buffer, uint64_t vaddr, uint64_t size, bool* found_image = nullptr);
-	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
+	// Synchronous downloads publish before returning; asynchronous callers wait before reuse. FRAME_GAPS passes timing.
 	template <bool async>
-	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size,
+	                                        GpuTimer::ReadbackTiming* timing = nullptr);
 
 	// Eager readback: 64 KiB windows the CPU keeps reading after GPU writes ("hot")
 	// are copied back asynchronously after each processed submission. When the copy has been
@@ -779,11 +783,12 @@ private:
 	// BAR reads: GPU-dirty bytes of a mapped buffer whose writes all have a known, submitted
 	// write tick are copied from the mapping after waiting for that tick only. 1: copied and
 	// published, -1: not possible (use the GPU copy path).
-	int TryBarDownload(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	int TryBarDownload(Buffer& buffer, uint64_t vaddr, uint64_t size, GpuTimer::ReadbackTiming* timing);
 	// The range a CPU read of [vaddr, vaddr + size) downloads (ReadMemory, PlanCallerWait).
 	[[nodiscard]] std::pair<uint64_t, uint64_t> ReadRange(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// Its publish of the intervals from span reads of the mapping.
-	void BarBatchRead(const uint8_t* mapped, uint64_t base, const std::vector<std::pair<uint64_t, uint64_t>>& intervals);
+	void BarBatchRead(const uint8_t* mapped, uint64_t base, const std::vector<std::pair<uint64_t, uint64_t>>& intervals,
+	                  GpuTimer::ReadbackTiming* timing);
 	// Its scan: the GPU-dirty intervals of the GPU-modified pages of [vaddr, vaddr + size), the newest 64 KiB granule
 	// write tick of their pages and their size. -1: usable; 1 a page without a write tick, 5 outside the buffer,
 	// 6 nothing GPU-written (TryBarDownload's outcomes).

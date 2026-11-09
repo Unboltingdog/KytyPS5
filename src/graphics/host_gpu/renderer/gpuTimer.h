@@ -31,10 +31,19 @@ namespace GpuTimer {
 
 enum class FrameGapCause : uint32_t { GuestSubmit, Readback, Pipeline, Present, Count };
 
+struct ReadbackTiming {
+	uint64_t wait_ns = 0;
+	uint64_t copy_ns = 0;
+	uint64_t publish_ns = 0;
+	uint64_t bytes = 0;
+	uint64_t pages = 0;
+};
+
 // One measured GPU-thread readback wait. The five-second FRAME_GAPS report groups waits by site, reason, trigger and
-// guest range, then prints the ten with the most total time per presented frame.
+// guest range, then prints the ten with the most total time per presented frame. The optional timing splits a buffer
+// download into its GPU wait, CPU copy/record and publish phases and counts the dirty bytes/pages, not just its window.
 void NoteReadbackWait(const char* site, const char* reason, const char* trigger, uint64_t vaddr, uint64_t size,
-                      uint64_t nanoseconds);
+                      uint64_t nanoseconds, const ReadbackTiming& timing = {});
 
 class FrameGapScope {
 public:
