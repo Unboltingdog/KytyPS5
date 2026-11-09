@@ -2202,7 +2202,7 @@ std::array<uint32_t, FormattedTableWords> DecodeFormattedTableWords(EmitterState
 		                          format, ConstantU32(state, 0));
 		const auto pointer = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpAccessChain, TypePointer(state, spv::StorageClassPrivate, entry_type), pointer,
-		                          state.formatted_table_variable, ConstantU32(state, 0), index);
+		                          state.formatted_table_variable, index);
 		const auto value = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpLoad, entry_type, value, pointer);
 		return value;
