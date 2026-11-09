@@ -153,6 +153,7 @@ const IR::Block* BlockById(const IR::Program& program, uint32_t id) {
 }
 
 void EmitReturn(ValueEmitContext& ctx) {
+	EmitBdaFaultFlush(ctx.state);
 	EmitKillIfPixelValidMaskInactive(ctx.state);
 	if (ctx.state.object_primitive_id_variable != 0) {
 		auto& state = ctx.state;

@@ -93,6 +93,12 @@ void SetSpirvTableFormatsOverride(std::optional<bool> enabled);
 // AMD defaults the branch-reduced runtime format decoder on; KYTY_NO_AMD_FORMAT_DECODE_FLAT=1 opts out. Other vendors
 // keep the original decoder. Tests may force both modes (std::nullopt reads the environment).
 bool SpirvFormatDecodeFlatEnabled();
+// AMD default (KYTY_NO_AMD_DEFER_BDA_FAULT=1 opts out): get_bda_pointer remembers its last missing or fallback page in
+// a Private variable and the shader reports it once when it returns, instead of a guarded load/or/store of the fault
+// bitmask inside every BDA access. AMD's compiler inlines get_bda_pointer at every access, and that guarded store
+// was ~40% of the compile time of Yotei's 57-75 s compute shaders. Only the last page per invocation is reported;
+// the others are reported by later dispatches. Other vendors keep the immediate report.
+bool SpirvDeferBdaFaultEnabled();
 void SetSpirvFormatDecodeFlatOverride(std::optional<bool> enabled);
 
 // Guest address supplied by the translation options, or zero for a host-built program without one.

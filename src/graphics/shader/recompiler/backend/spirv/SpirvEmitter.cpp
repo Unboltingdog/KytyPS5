@@ -368,6 +368,12 @@ bool SpirvFormatDecodeFlatEnabled() {
 	return value == nullptr || value[0] != '1';
 }
 
+bool SpirvDeferBdaFaultEnabled() {
+	if (!GetHostFloatFeatures().amd) return false;
+	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_DEFER_BDA_FAULT");
+	return value == nullptr || value[0] != '1';
+}
+
 void SetSpirvFormatDecodeFlatOverride(std::optional<bool> enabled) {
 	g_format_decode_flat_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1,
 	                                    std::memory_order_relaxed);

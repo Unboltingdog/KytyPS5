@@ -3032,6 +3032,15 @@ void StoreWideShared(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compo
 
 } // namespace
 
+void EmitBdaFaultFlush(EmitterState& state) {
+	if (state.bda_fault_pending_variable == 0u) return;
+	const auto pending = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), pending, state.bda_fault_pending_variable);
+	EmitIfCondition(state, Binary(state, spv::OpINotEqual, TypeBool(state), pending, ConstantU32(state, 0)), [&]() {
+		RecordBdaFault(state, Binary(state, spv::OpISub, TypeU32(state), pending, ConstantU32(state, 1)));
+	});
+}
+
 uint32_t GetBdaPointer(EmitterState& state, uint32_t address) {
 	const auto result = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpFunctionCall, TypeU64(state), result,
@@ -3537,6 +3546,11 @@ void DefineGetBdaPointer(EmitterState& state) {
 	const auto type            = TypeU64(state);
 	const auto function_type   = state.builder.Type(spv::OpTypeFunction, type, type);
 	state.bda_pointer_function = state.builder.AllocateId();
+	if (SpirvDeferBdaFaultEnabled()) {
+		state.bda_fault_pending_variable = state.builder.DefineInitializedGlobalVariable(
+		    TypePointer(state, spv::StorageClassPrivate, TypeU32(state)), spv::StorageClassPrivate, ConstantU32(state, 0));
+		state.builder.AddName(state.bda_fault_pending_variable, "bda_fault_pending");
+	}
 	const auto address         = state.builder.AllocateId();
 	const auto entry_label     = state.builder.AllocateId();
 	state.builder.AddName(state.bda_pointer_function, "get_bda_pointer");
@@ -3584,6 +3598,18 @@ void DefineGetBdaPointer(EmitterState& state) {
 	const auto offset = Binary(state, spv::OpBitwiseAnd, type, address,
 	                           ConstantU64(state, BufferCache::CACHING_PAGESIZE - 1));
 	const auto value  = Select(state, type, missing, ConstantU64(state, 0), Binary(state, spv::OpIAdd, type, base, offset));
+	if (state.bda_fault_pending_variable != 0u) {
+		// SpirvDeferBdaFaultEnabled: no branch and no buffer access here; EmitBdaFaultFlush reports it at the return.
+		const auto pending = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLoad, TypeU32(state), pending, state.bda_fault_pending_variable);
+		state.builder.AddFunction(
+		    spv::OpStore, state.bda_fault_pending_variable,
+		    Select(state, TypeU32(state), report,
+		           Binary(state, spv::OpIAdd, TypeU32(state), page, ConstantU32(state, 1)), pending));
+		state.builder.AddFunction(spv::OpReturnValue, value);
+		state.builder.AddFunction(spv::OpFunctionEnd);
+		return;
+	}
 	const auto report_label = state.builder.AllocateId();
 	const auto skip_label   = state.builder.AllocateId();
 	const auto done_label   = state.builder.AllocateId();

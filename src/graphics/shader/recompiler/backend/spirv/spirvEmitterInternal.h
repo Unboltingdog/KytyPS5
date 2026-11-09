@@ -167,6 +167,9 @@ struct EmitterState {
 	uint32_t                                         bda_pagetable_variable  = 0;
 	uint32_t                                         fault_buffer_variable   = 0;
 	uint32_t                                         bda_pointer_function    = 0;
+	// SpirvDeferBdaFaultEnabled: Private u32, the last missing/fallback BDA page + 1 of this invocation (0: none),
+	// reported once at the shader's return instead of inside every inlined get_bda_pointer.
+	uint32_t                                         bda_fault_pending_variable = 0;
 	// One function per formatted load shape through a GPU-selected
 	// descriptor, the whole load in one call (shape key: channels | components << 4 | d16 << 8 -> function).
 	std::map<uint32_t, uint32_t>                     indirect_formatted_load_functions;
@@ -855,6 +858,8 @@ uint32_t EmitBvhTriangle(EmitterState& state, const std::array<std::array<uint32
                          std::array<uint32_t, 3> origin, std::array<uint32_t, 3> direction,
                          uint32_t remap, uint32_t triangle_id, uint32_t bary);
 uint32_t GetBdaPointer(EmitterState& state, uint32_t address);
+// SpirvDeferBdaFaultEnabled: reports the invocation's pending BDA fault page (at a shader return).
+void EmitBdaFaultFlush(EmitterState& state);
 // KYTY_DIAG_RT_TRIPS (DiagRtTripsFor; needs state.fault_buffer_variable): the fault buffer's diagnostic tail
 // (BufferCache::FAULT_DIAG_*). FaultDiagAdd: atomic add of `value` to tail word `word`, returns the old value.
 // FaultDiagStore: `value` (u32 id) to tail word FAULT_DIAG_BASE + `first` + `slot` * `stride` + `field`.
