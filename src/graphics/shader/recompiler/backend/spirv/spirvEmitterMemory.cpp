@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <magic_enum.hpp>
 #include <algorithm>
 #include <bit>
 #include <map>
@@ -2533,6 +2534,63 @@ uint32_t LoadIndirectFormattedTable(ValueEmitContext& ctx, const IndirectBufferA
 	return ConstructU32Composite(state, channels, values);
 }
 
+std::string DescribeIndirectTableFormatSource(const EmitterState& state, const IR::MemoryInfo& mem) {
+	if (mem.resource >= state.program.info.buffers.size()) {
+		return "resource=" + std::to_string(mem.resource) + " source=missing kind=buffer-resource-missing";
+	}
+	const auto& binding = state.program.info.buffers[mem.resource];
+	std::string text = "resource=" + std::to_string(mem.resource) + " source=" + std::to_string(binding.source);
+	if (binding.source >= state.program.descriptor_sources.size()) {
+		return text + " kind=descriptor-source-missing";
+	}
+	const auto& source = state.program.descriptor_sources[binding.source];
+	bool user_data = false, flattened_srt = false;
+	text += " dwords=";
+	for (uint32_t word = 0; word < 4u; ++word) {
+		if (word >= source.dword_count) {
+			text += word == 0u ? "missing" : ",missing";
+			continue;
+		}
+		const auto value = source.dwords[word].Resolve();
+		const auto* inst = value.TryInstruction();
+		text += word == 0u ? "" : ",";
+		if (inst == nullptr) {
+			text += "immediate";
+			continue;
+		}
+		const auto op = inst->GetOpcode();
+		const auto name = magic_enum::enum_name(op);
+		text += name.empty() ? "op" + std::to_string(static_cast<uint32_t>(op)) : std::string(name);
+		if (op == IR::ValueOpcode::GetUserData) {
+			user_data = true;
+			text += "(s" + std::to_string(static_cast<uint32_t>(inst->Arg(0).Resolve().ScalarRegister())) + ")";
+		} else if (op == IR::ValueOpcode::ReadConst) {
+			flattened_srt = true;
+			const auto offset = inst->Arg(1).Resolve();
+			if (offset.IsImmediate() && offset.GetType() == IR::Type::U32) {
+				text += "(flat=" + std::to_string(offset.U32()) + ")";
+			}
+		}
+	}
+	if (source.indirect_descriptor.has_value()) {
+		const auto& indirect = *source.indirect_descriptor;
+		text += " kind=indirect-table table_source=" + std::to_string(indirect.table_source) +
+		        " table_stride=" + std::to_string(indirect.table_stride) +
+		        " table_record_bytes=" + std::to_string(indirect.table_record_bytes) +
+		        " all_records=" + std::to_string(indirect.all_records ? 1 : 0) +
+		        " pointer_offset=" + std::to_string(indirect.pointer_offset);
+	} else if (flattened_srt && user_data) {
+		text += " kind=direct-mixed-srt-user-data";
+	} else if (flattened_srt) {
+		text += " kind=direct-flattened-srt";
+	} else if (user_data) {
+		text += " kind=direct-user-data";
+	} else {
+		text += " kind=direct-expression";
+	}
+	return text;
+}
+
 struct IndirectTableFormatAnalysis {
 	Prospero::BufferFormat format = Prospero::BufferFormat::kInvalid;
 	bool                   mixed  = false;
@@ -2933,10 +2991,11 @@ void DefineIndirectFormattedLoads(ValueEmitContext& ctx) {
 					                                (state.program.info.buffers[mem.resource].packed_stride >> 31u) == 0u
 					                            ? state.program.info.buffers[mem.resource].packed_stride & 0x3fffu
 					                            : 0u;
+					const auto origin = DescribeIndirectTableFormatSource(state, mem);
 					std::fprintf(stderr,
-					             "TABLE_FORMATS_REASON guest=0x%016llx load=%zu reason=%s table_va=0x0 stride=%u records=%zu\n",
+					             "TABLE_FORMATS_REASON guest=0x%016llx load=%zu reason=%s table_va=0x0 stride=%u records=%zu %s\n",
 					             static_cast<unsigned long long>(CurrentShaderGuestAddress()), loads, analysis.reason, stride,
-					             analysis.records);
+					             analysis.records, origin.c_str());
 				}
 			}
 		}
