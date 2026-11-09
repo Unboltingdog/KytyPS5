@@ -1994,6 +1994,12 @@ enum class FormattedConv : uint32_t {
 constexpr uint32_t FormattedTableFormats = static_cast<uint32_t>(Prospero::BufferFormat::k32_32_32_32Float) + 1u;
 constexpr uint32_t FormattedTableWords   = 5u;
 
+constexpr std::array IndirectFormattedFastFormats = {
+    Prospero::BufferFormat::k16_16_16_16Float, Prospero::BufferFormat::k8UNorm,
+    Prospero::BufferFormat::k8SInt, Prospero::BufferFormat::k16UInt,
+    Prospero::BufferFormat::k16_16Float, Prospero::BufferFormat::k10_10_10_2SNorm,
+    Prospero::BufferFormat::k16_16_16_16SNorm};
+
 constexpr FormattedConv FormattedConvOf(const Format::BufferFormatInfo& info, uint32_t component) {
 	using Format::ComponentType;
 	const auto bits   = info.component_bits[component];
@@ -2105,44 +2111,39 @@ uint32_t IndirectBufferInBoundsBytes(EmitterState& state, const IndirectBufferAc
 	return in_bounds;
 }
 
-// The `channels` channel values of LoadIndirectFormattedVector's format switch, from the table.
-uint32_t LoadIndirectFormattedTable(ValueEmitContext& ctx, const IndirectBufferAccess& buffer, uint32_t channels,
-                                    const std::array<uint32_t, 4>& selector, const std::array<uint32_t, 4>& memory,
-                                    const std::array<uint32_t, 4>& one, bool d16) {
-	auto&      state   = ctx.state;
+std::array<uint32_t, FormattedTableWords> DecodeFormattedTableWords(EmitterState& state, uint32_t format) {
 	const auto u32     = TypeU32(state);
-	const auto u64     = TypeU64(state);
 	const auto boolean = TypeBool(state);
 	// FORMAT values past the last format select the invalid entry, matching the switch's default.
 	static constexpr auto table_words = BuildFormattedTable();
 	const auto            entry_type =
-	    state.builder.Type(spv::OpTypeArray, TypeU32(state), ConstantU32(state, FormattedTableWords));
-	const auto constant_entry = [&](uint32_t format) {
+	    state.builder.Type(spv::OpTypeArray, u32, ConstantU32(state, FormattedTableWords));
+	const auto constant_entry = [&](uint32_t item) {
 		std::array<uint32_t, FormattedTableWords> ids {};
 		for (uint32_t i = 0; i < FormattedTableWords; ++i) {
-			ids[i] = ConstantU32(state, table_words[format * FormattedTableWords + i]);
+			ids[i] = ConstantU32(state, table_words[item * FormattedTableWords + i]);
 		}
 		return state.builder.Constant(spv::OpConstantComposite, entry_type, std::span<const uint32_t>(ids));
 	};
 	const auto picked = [&]() {
 		if (!SpirvFormatDecodeFlatEnabled()) {
-			return EmitIndexSwitch(state, buffer.format, FormattedTableFormats, entry_type, constant_entry);
+			return EmitIndexSwitch(state, format, FormattedTableFormats, entry_type, constant_entry);
 		}
 		if (state.formatted_table_variable == 0u) {
 			const auto table_type = state.builder.Type(spv::OpTypeArray, entry_type,
 			                                           ConstantU32(state, FormattedTableFormats));
 			std::array<uint32_t, FormattedTableFormats> entries {};
-			for (uint32_t format = 0; format < FormattedTableFormats; ++format) entries[format] = constant_entry(format);
+			for (uint32_t item = 0; item < FormattedTableFormats; ++item) entries[item] = constant_entry(item);
 			const auto initializer =
 			    state.builder.Constant(spv::OpConstantComposite, table_type, std::span<const uint32_t>(entries));
 			state.formatted_table_variable = state.builder.DefineInitializedGlobalVariable(
 			    TypePointer(state, spv::StorageClassPrivate, table_type), spv::StorageClassPrivate, initializer);
 			state.builder.AddName(state.formatted_table_variable, "formatted_format_table");
 		}
-		const auto index = Select(
-		    state, u32,
-		    Binary(state, spv::OpULessThan, boolean, buffer.format, ConstantU32(state, FormattedTableFormats)),
-		    buffer.format, ConstantU32(state, 0));
+		const auto index = Select(state, u32,
+		                          Binary(state, spv::OpULessThan, boolean, format,
+		                                 ConstantU32(state, FormattedTableFormats)),
+		                          format, ConstantU32(state, 0));
 		const auto pointer = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpAccessChain, TypePointer(state, spv::StorageClassPrivate, entry_type), pointer,
 		                          state.formatted_table_variable, ConstantU32(state, 0), index);
@@ -2150,17 +2151,48 @@ uint32_t LoadIndirectFormattedTable(ValueEmitContext& ctx, const IndirectBufferA
 		state.builder.AddFunction(spv::OpLoad, entry_type, value, pointer);
 		return value;
 	}();
+	std::array<uint32_t, FormattedTableWords> words {};
+	for (uint32_t i = 0; i < FormattedTableWords; ++i) {
+		words[i] = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, u32, words[i], picked, i);
+	}
+	return words;
+}
+
+IndirectFormattedDescriptorInfo DecodeIndirectFormattedDescriptor(EmitterState& state, uint32_t format,
+                                                                 bool include_class = true) {
+	IndirectFormattedDescriptorInfo info {};
+	const auto words = DecodeFormattedTableWords(state, format);
+	std::copy(words.begin(), words.end(), info.begin());
+	info[5] = ConstantU32(state, 0);
+	if (include_class) {
+		for (uint32_t k = 0; k < IndirectFormattedFastFormats.size(); ++k) {
+			info[5] = Select(state, TypeU32(state),
+			                 Binary(state, spv::OpIEqual, TypeBool(state), format,
+			                        ConstantU32(state, static_cast<uint32_t>(IndirectFormattedFastFormats[k]))),
+			                 ConstantU32(state, k + 1u), info[5]);
+		}
+	}
+	return info;
+}
+
+// The `channels` channel values of LoadIndirectFormattedVector's format switch, from the table.
+uint32_t LoadIndirectFormattedTable(ValueEmitContext& ctx, const IndirectBufferAccess& buffer, uint32_t channels,
+                                    const std::array<uint32_t, 4>& selector, const std::array<uint32_t, 4>& memory,
+                                    const std::array<uint32_t, 4>& one, bool d16,
+                                    const IndirectFormattedDescriptorInfo* decoded = nullptr) {
+	auto&      state   = ctx.state;
+	const auto u32     = TypeU32(state);
+	const auto u64     = TypeU64(state);
+	const auto boolean = TypeBool(state);
+	const auto local = decoded != nullptr ? *decoded : DecodeIndirectFormattedDescriptor(state, buffer.format, false);
 	const auto field   = [&](uint32_t word, uint32_t first, uint32_t count) {
         return EmitBitFieldUExtract(state, word, ConstantU32(state, first), ConstantU32(state, count));
 	};
 	const auto flag = [&](uint32_t word, uint32_t bit) {
 		return Binary(state, spv::OpINotEqual, boolean, field(word, bit, 1u), ConstantU32(state, 0));
 	};
-	const auto word = [&](uint32_t index) {
-		const auto value = state.builder.AllocateId();
-		state.builder.AddFunction(spv::OpCompositeExtract, u32, value, picked, index);
-		return value;
-	};
+	const auto word = [&](uint32_t index) { return local[index]; };
 	const auto head      = word(0);
 	const auto valid     = flag(head, 0);
 	const auto count     = field(head, 8, 3);
@@ -2299,7 +2331,8 @@ Prospero::BufferFormat SpecializedIndirectTableFormat(const EmitterState& state,
 // DST_SEL channels of word 3 as `components` result dwords (D16: two 16-bit channels per dword, low first).
 uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBufferAccess& buffer, uint32_t word3,
                                      uint32_t channels, uint32_t components, bool d16,
-                                     Prospero::BufferFormat table_format = Prospero::BufferFormat::kInvalid) {
+                                     Prospero::BufferFormat table_format = Prospero::BufferFormat::kInvalid,
+                                     const IndirectFormattedDescriptorInfo* decoded = nullptr) {
 	auto&                   state      = ctx.state;
 	std::array<uint32_t, 4> selector   {};
 	std::array<uint32_t, 4> memory     {};
@@ -2332,24 +2365,24 @@ uint32_t LoadIndirectFormattedVector(ValueEmitContext& ctx, const IndirectBuffer
 	// k8SInt 1.6%, k16UInt 1.0%, k16_16Float XY 1.0%, k10_10_10_2SNorm and k16_16_16_16SNorm XYZ < 0.01%; nothing else.
 	// The 78-case switch is the reference the compute test checks the cases and the table against
 	// (SetSpirvFormattedSwitchReference).
-	using F = Prospero::BufferFormat;
-	static constexpr F fast[] = {F::k16_16_16_16Float, F::k8UNorm, F::k8SInt, F::k16UInt, F::k16_16Float,
-	                             F::k10_10_10_2SNorm, F::k16_16_16_16SNorm};
 	const auto cases = [&]() {
 		const auto u32  = TypeU32(state);
-		auto       pick = ConstantU32(state, 0);
-		for (uint32_t k = 0; k < std::size(fast); ++k) {
-			pick = Select(state, u32,
-			              Binary(state, spv::OpIEqual, TypeBool(state), buffer.format,
-			                     ConstantU32(state, static_cast<uint32_t>(fast[k]))),
-			              ConstantU32(state, k + 1u), pick);
+		auto       pick = decoded != nullptr ? (*decoded)[5] : ConstantU32(state, 0);
+		if (decoded == nullptr) {
+			for (uint32_t k = 0; k < IndirectFormattedFastFormats.size(); ++k) {
+				pick = Select(state, u32,
+				              Binary(state, spv::OpIEqual, TypeBool(state), buffer.format,
+				                     ConstantU32(state, static_cast<uint32_t>(IndirectFormattedFastFormats[k]))),
+				              ConstantU32(state, k + 1u), pick);
+			}
 		}
-		return EmitIndexSwitch(state, pick, static_cast<uint32_t>(std::size(fast)) + 1u, TypeU32Composite(state, channels),
-		                       [&](uint32_t item) {
+		return EmitIndexSwitch(state, pick, static_cast<uint32_t>(IndirectFormattedFastFormats.size()) + 1u,
+		                       TypeU32Composite(state, channels), [&](uint32_t item) {
 			                       if (item == 0u) {
-				                       return LoadIndirectFormattedTable(ctx, buffer, channels, selector, memory, one, d16);
+				                       return LoadIndirectFormattedTable(ctx, buffer, channels, selector, memory, one, d16,
+				                                                         decoded);
 			                       }
-			                       const auto info = Format::GetFormatInfo(fast[item - 1u]);
+			                       const auto info = Format::GetFormatInfo(IndirectFormattedFastFormats[item - 1u]);
 			                       return LoadIndirectFormattedElement(ctx, buffer, info, channels, selector, memory, one,
 			                                                           any_memory, d16);
 		                       });
@@ -2452,16 +2485,31 @@ uint32_t CallIndirectFormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, 
 	const auto offset      = immediate == 0u ? ctx.Arg(inst, 2)
 	                                         : Binary(state, spv::OpIAdd, TypeU32(state), ctx.Arg(inst, 2),
 	                                                  ConstantU32(state, immediate));
-	const auto call = [&](uint32_t function) {
+	const bool flat = SpirvFormatDecodeFlatEnabled();
+	IndirectFormattedDescriptorInfo decoded {};
+	if (flat) {
+		const auto& cache = state.indirect_formatted_descriptor_info[ctx.half];
+		const auto found_info = cache.find(&handle);
+		if (found_info != cache.end()) {
+			decoded = found_info->second;
+		} else {
+			const auto format = EmitBitFieldUExtract(state, word3, ConstantU32(state, 12), ConstantU32(state, 7));
+			decoded = DecodeIndirectFormattedDescriptor(state, format);
+		}
+	}
+	const auto call = [&](uint32_t function, bool with_info = false) {
 		const auto result = state.builder.AllocateId();
-		state.builder.AddFunction(spv::OpFunctionCall, TypeU32Composite(state, components), result, function,
-		                          ctx.Arg(handle, 0), ctx.Arg(handle, 1), ctx.Arg(handle, 2),
-		                          IndirectCallWord3(state, word3), index, offset, ctx.Arg(inst, 3));
+		std::vector<uint32_t> words {spv::OpFunctionCall, TypeU32Composite(state, components), result, function,
+		                             ctx.Arg(handle, 0), ctx.Arg(handle, 1), ctx.Arg(handle, 2),
+		                             IndirectCallWord3(state, word3), index, offset, ctx.Arg(inst, 3)};
+		if (with_info && flat) words.insert(words.end(), decoded.begin(), decoded.end());
+		state.builder.AddFunction(std::span<const uint32_t>(words));
 		return result;
 	};
 	const auto generic = [&]() {
-		return has_generic ? call(found->second)
-		                   : LoadIndirectFormattedVector(ctx, PrepareIndirectBuffer(ctx, inst), word3, channels, components, d16);
+		return has_generic ? call(found->second, true)
+		                   : LoadIndirectFormattedVector(ctx, PrepareIndirectBuffer(ctx, inst), word3, channels, components,
+		                                                 d16, Prospero::BufferFormat::kInvalid, flat ? &decoded : nullptr);
 	};
 	if (table_format != Prospero::BufferFormat::kInvalid) {
 		const auto specialized = state.indirect_specialized_load_functions.find(
@@ -2581,6 +2629,9 @@ void DefineIndirectFormattedLoads(ValueEmitContext& ctx) {
 			if (channels < 1u || channels > 4u) continue;
 			const auto key = IndirectFormattedLoadKey(channels, components, d16);
 			state.indirect_formatted_load_functions.emplace(key, 0u);
+			if (SpirvFormatDecodeFlatEnabled()) {
+				state.indirect_formatted_descriptors.insert(inst.Arg(0).ResolveInstruction());
+			}
 			loads++;
 			const auto analysis = AnalyzeIndirectTableFormat(state, mem);
 			for (const auto format: analysis.formats) {
@@ -2609,18 +2660,22 @@ void DefineIndirectFormattedLoads(ValueEmitContext& ctx) {
 	}
 	const auto u32 = TypeU32(state);
 	const auto define = [&](uint32_t& function, uint32_t key, Prospero::BufferFormat table_format) {
-		const auto channels      = key & 0xfu;
-		const auto components    = (key >> 4u) & 0xfu;
-		const bool d16           = ((key >> 8u) & 1u) != 0u;
-		const auto result_type   = TypeU32Composite(state, components);
-		const auto function_type = state.builder.Type(spv::OpTypeFunction, result_type, u32, u32, u32, u32, u32, u32,
-		                                              u32);
+		const auto channels   = key & 0xfu;
+		const auto components = (key >> 4u) & 0xfu;
+		const bool d16        = ((key >> 8u) & 1u) != 0u;
+		const bool flat       = table_format == Prospero::BufferFormat::kInvalid && SpirvFormatDecodeFlatEnabled();
+		const auto result_type = TypeU32Composite(state, components);
+		std::vector<uint32_t> parameter_types(7u + (flat ? std::tuple_size_v<IndirectFormattedDescriptorInfo> : 0u), u32);
+		const auto function_type = state.builder.Type(spv::OpTypeFunction, result_type,
+		                                              std::span<const uint32_t>(parameter_types));
 		function = state.builder.AllocateId();
 		std::string name = table_format == Prospero::BufferFormat::kInvalid ? "indirect_formatted_load_"
 		                                                                   : "indirect_table_format_load_";
 		name.append("xyzw", channels);
 		if (d16) name += "_d16";
-		if (table_format != Prospero::BufferFormat::kInvalid) name += "_f" + std::to_string(static_cast<uint32_t>(table_format));
+		if (table_format != Prospero::BufferFormat::kInvalid) {
+			name += "_f" + std::to_string(static_cast<uint32_t>(table_format));
+		}
 		state.builder.AddName(function, name.c_str());
 		state.builder.AddFunction(spv::OpFunction, result_type, function, spv::FunctionControlDontInlineMask,
 		                          function_type);
@@ -2636,9 +2691,14 @@ void DefineIndirectFormattedLoads(ValueEmitContext& ctx) {
 		const auto index   = parameter();
 		const auto offset  = parameter();
 		const auto soffset = parameter();
+		IndirectFormattedDescriptorInfo decoded {};
+		if (flat) {
+			for (auto& word: decoded) word = parameter();
+		}
 		EmitLabel(state, state.builder.AllocateId());
 		const auto buffer = DecodeIndirectBuffer(state, word0, word1, records, word3, index, offset, soffset);
-		const auto result = LoadIndirectFormattedVector(ctx, buffer, word3, channels, components, d16, table_format);
+		const auto result = LoadIndirectFormattedVector(ctx, buffer, word3, channels, components, d16, table_format,
+		                                                flat ? &decoded : nullptr);
 		state.builder.AddFunction(spv::OpReturnValue, result);
 		state.builder.AddFunction(spv::OpFunctionEnd);
 	};
@@ -3802,6 +3862,16 @@ void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 		           return LoadResourceElement(state, TypeU32(state), state.builder.AllocateId(), pointer, access, element,
 		                                      false);
 	           }));
+}
+
+uint32_t EmitGetBufferResource(ValueEmitContext& ctx, const IR::Inst& inst) {
+	auto& state = ctx.state;
+	if (state.indirect_formatted_descriptors.contains(&inst)) {
+		const auto format = EmitBitFieldUExtract(state, ctx.Arg(inst, 3), ConstantU32(state, 12),
+		                                         ConstantU32(state, 7));
+		state.indirect_formatted_descriptor_info[ctx.half][&inst] = DecodeIndirectFormattedDescriptor(state, format);
+	}
+	return 0;
 }
 
 // The dense resource a typed buffer selector picks (upstream fd66f580b); 0 without candidates. Our resource tracking does

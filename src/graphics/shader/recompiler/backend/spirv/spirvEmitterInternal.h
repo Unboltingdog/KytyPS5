@@ -96,6 +96,8 @@ struct ImageDefinition {
 uint32_t IfConversionLimit();
 bool     OutlineHelpersEnabled();
 
+using IndirectFormattedDescriptorInfo = std::array<uint32_t, 6>;
+
 struct EmitterState {
 	EmitterState(IR::Program& program_, ShaderStageInputInfo input_info_, const Profile& profile_)
 	    : builder(program_.stage == ShaderType::Mesh ? 0x00010400u : 0x00010300u),
@@ -171,6 +173,9 @@ struct EmitterState {
 	// SpecializedIndirectTableFormat helpers; the shape key's bits 16..22 hold the captured format.
 	std::map<uint32_t, uint32_t>                     indirect_specialized_load_functions;
 	uint32_t                                         formatted_table_variable = 0;
+	std::unordered_set<const IR::Inst*>              indirect_formatted_descriptors;
+	std::array<std::unordered_map<const IR::Inst*, IndirectFormattedDescriptorInfo>, 2>
+	                                                 indirect_formatted_descriptor_info;
 	uint32_t                                         indirect_raw_function = 0;
 	uint32_t                                         indirect_raw_coherent_function = 0; // GLC accesses (MemoryInfo::coherent)
 	// F1 (grouped IndirectBuffer reads): indirect_raw_x<N>[_coherent], index (N - 2) + 3 * coherent (0: not defined).
