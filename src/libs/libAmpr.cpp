@@ -3,6 +3,7 @@
 #include "common/callTrace.h"
 #include "common/dateTime.h"
 #include "common/file.h"
+#include "common/guestWaits.h"
 #include "common/logging/log.h"
 #include "common/startupTrace.h"
 #include "common/stringUtils.h"
@@ -1610,6 +1611,7 @@ private:
 					    fmt::format("id={},diag={},ret=0x{:x},error_offset=0x{:x},event_eq=0x{:x},event_id={},triggered={}",
 					                submission.id, submission.diagnostic_id, static_cast<uint32_t>(result), error_offset,
 					                submission.event_eq, submission.event_id, submission.event_triggered));
+					Common::GuestWaits::RecordAmprCompleted();
 					AmprDiagComplete(submission.diagnostic_id, submission.event_eq, submission.event_id,
 				                 submission.event_triggered);
 			}
@@ -1679,6 +1681,7 @@ static int QueueCommandBuffer(Engine engine, uint64_t command_buffer, uint32_t b
 	}
 	const uint64_t diagnostic_id = submission.diagnostic_id;
 	(amm ? amm_engine : apr_engine).Submit(priority, std::move(submission));
+	Common::GuestWaits::RecordAmprSubmitted();
 	KYTY_CALL_TRACE_EVENT("AMPR_SUBMIT", fmt::format("engine={},id={},diag={},bytes=0x{:x},priority={},ret=0",
 	                                                     amm ? "amm" : "apr", id, diagnostic_id, end, priority));
 	return OK;

@@ -139,6 +139,9 @@ int KernelEqueuePrivate::GetTriggeredEvents(KernelEvent* ev, int num) {
 		}
 	}
 
+	for (int i = 0; i < ret; i++) {
+		Common::GuestWaits::RecordEqueueEvent(ev[i].filter);
+	}
 	return ret;
 }
 

@@ -1,5 +1,6 @@
 #include "graphics/guest_gpu/gpuLabels.h"
 
+#include "common/guestWaits.h"
 #include "graphics/host_gpu/renderer/debugSample.h"
 
 #include <algorithm>
@@ -220,16 +221,22 @@ bool Enabled() {
 }
 
 void Write(const char* packet, uint32_t queue, uint64_t address, uint64_t value, uint32_t size) {
+	Common::GuestWaits::RecordGpuWrite(packet, queue, address, value, size);
 	RecordRange(packet, queue, address, nullptr, size, value);
 }
 
 void WriteRange(const char* packet, uint32_t queue, uint64_t address, const volatile void* value, uint64_t size) {
-	if (!Enabled() || value == nullptr || size == 0) {
+	if (value == nullptr || size == 0 || (!Enabled() && !Common::GuestWaits::GuestThreadsEnabled())) {
 		return;
 	}
 	const auto* bytes = static_cast<const volatile uint8_t*>(value);
 	const uint64_t value_size = std::min<uint64_t>(size, sizeof(uint64_t));
-	RecordRange(packet, queue, address, value, size, ReadValue(bytes + size - value_size, value_size));
+	const uint64_t last_value = ReadValue(bytes + size - value_size, value_size);
+	Common::GuestWaits::RecordGpuWrite(packet, queue, address, last_value, size);
+	if (!Enabled()) {
+		return;
+	}
+	RecordRange(packet, queue, address, value, size, last_value);
 }
 
 void Wait(const char* packet, uint32_t queue, uint32_t function, uint64_t address, uint64_t reference,

@@ -8,6 +8,7 @@
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/guestWaits.h"
 #include "common/hash.h"
 #include "common/logging/log.h"
 #include "common/startupTrace.h"
@@ -614,7 +615,9 @@ static int KernelOpenImpl(const char* path, int flags, uint16_t mode) {
 }
 
 int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
-	return TraceOpenResult(path, KernelOpenImpl(path, flags, mode));
+	const int result = KernelOpenImpl(path, flags, mode);
+	if (result >= 0) Common::GuestWaits::RecordFileOpen(path);
+	return TraceOpenResult(path, result);
 }
 
 static int KernelCloseImpl(int d) {
@@ -751,7 +754,9 @@ static int64_t KernelReadImpl(int d, void* buf, size_t nbytes) {
 
 int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	const std::string path = TraceGuestPath(d);
-	return TraceReadResult(path, d, nbytes, KernelReadImpl(d, buf, nbytes));
+	const int64_t result = KernelReadImpl(d, buf, nbytes);
+	if (result >= 0) Common::GuestWaits::RecordFileRead(path.c_str(), static_cast<uint64_t>(result));
+	return TraceReadResult(path, d, nbytes, result);
 }
 
 int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {

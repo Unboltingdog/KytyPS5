@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string_view>
 #include <thread>
@@ -46,6 +47,30 @@ struct ThreadRecord {
 	size_t                              call_count = 0;
 };
 
+struct GpuWriteActivity {
+	uint64_t    count = 0;
+	uint64_t    last_value = 0;
+	uint64_t    size = 0;
+	uint32_t    queue = 0;
+	std::string packet;
+};
+
+struct ActivityData {
+	uint64_t                       file_opens = 0;
+	uint64_t                       file_reads = 0;
+	uint64_t                       file_read_bytes = 0;
+	uint64_t                       ampr_submitted = 0;
+	uint64_t                       ampr_completed = 0;
+	std::string                    last_file_path;
+	std::map<int16_t, uint64_t>    equeue_events;
+	std::map<uint64_t, GpuWriteActivity> gpu_writes;
+};
+
+struct ActivityState {
+	std::mutex  mutex;
+	ActivityData data;
+};
+
 std::mutex                                      g_registry_mutex;
 std::vector<std::shared_ptr<ThreadRecord>>      g_records;
 thread_local std::shared_ptr<ThreadRecord>      g_current_record;
@@ -55,6 +80,9 @@ Clock::time_point                               g_start;
 int64_t                                         g_once_at_ms = -1;
 bool                                            g_periodic = false;
 bool                                            g_cpu_sample = false;
+ActivityState                                   g_activity;
+bool                                            g_guest_threads = false;
+int64_t                                         g_guest_threads_period_ms = 1000;
 #if defined(_WIN32)
 std::once_flag                                  g_cpu_worker_once;
 std::vector<std::string>                        g_cpu_sample_threads;
@@ -84,12 +112,101 @@ std::string CallerText(uint64_t caller) {
 	return Hex(caller);
 }
 
+void MixSignature(uint64_t& hash, uint64_t value) {
+	hash ^= value;
+	hash *= 1099511628211ull;
+}
+
+void MixSignature(uint64_t& hash, const std::string& value) {
+	for (const unsigned char c: value) MixSignature(hash, c);
+}
+
+uint64_t DumpGuestThreads() {
+	std::vector<std::shared_ptr<ThreadRecord>> records;
+	{
+		std::lock_guard lock(g_registry_mutex);
+		records = g_records;
+	}
+	ActivityData activity;
+	{
+		std::lock_guard lock(g_activity.mutex);
+		activity = g_activity.data;
+	}
+
+	const auto now = Clock::now();
+	std::fprintf(stderr, "GUEST_THREADS_DUMP elapsed_ms=%lld\n",
+	             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(now - g_start).count()));
+	Dump(4);
+	uint64_t equeue_total = 0;
+	for (const auto& [filter, count]: activity.equeue_events) equeue_total += count;
+	const uint64_t pending = activity.ampr_submitted >= activity.ampr_completed
+	                             ? activity.ampr_submitted - activity.ampr_completed
+	                             : 0;
+	std::string output = "GUEST_THREADS_ACTIVITY file_opens=" + std::to_string(activity.file_opens) +
+	                     " file_reads=" + std::to_string(activity.file_reads) +
+	                     " file_read_bytes=" + std::to_string(activity.file_read_bytes) +
+	                     " last_file=" + CleanField(activity.last_file_path) +
+	                     " ampr_submitted=" + std::to_string(activity.ampr_submitted) +
+	                     " ampr_completed=" + std::to_string(activity.ampr_completed) +
+	                     " ampr_pending=" + std::to_string(pending) +
+	                     " equeue_events=" + std::to_string(equeue_total) +
+	                     " gpu_addresses=" + std::to_string(activity.gpu_writes.size()) + "\n";
+	for (const auto& [filter, count]: activity.equeue_events) {
+		output += "GUEST_THREADS_EQUEUE filter=" + std::to_string(filter) + " count=" + std::to_string(count) + "\n";
+	}
+	size_t gpu_index = 0;
+	for (const auto& [address, write]: activity.gpu_writes) {
+		if (gpu_index++ >= 64u) break;
+		output += "GUEST_THREADS_GPU addr=" + Hex(address) + " count=" + std::to_string(write.count) +
+		          " last_value=" + Hex(write.last_value) + " size=" + std::to_string(write.size) +
+		          " queue=" + std::to_string(write.queue) + " packet=" + CleanField(write.packet) + "\n";
+	}
+	std::fwrite(output.data(), 1, output.size(), stderr);
+	std::fflush(stderr);
+
+	uint64_t hash = 14695981039346656037ull;
+	MixSignature(hash, activity.file_opens);
+	MixSignature(hash, activity.file_reads);
+	MixSignature(hash, activity.file_read_bytes);
+	MixSignature(hash, activity.last_file_path);
+	MixSignature(hash, activity.ampr_submitted);
+	MixSignature(hash, activity.ampr_completed);
+	for (const auto& [filter, count]: activity.equeue_events) {
+		MixSignature(hash, static_cast<uint16_t>(filter));
+		MixSignature(hash, count);
+	}
+	for (const auto& [address, write]: activity.gpu_writes) {
+		MixSignature(hash, address);
+		MixSignature(hash, write.count);
+		MixSignature(hash, write.last_value);
+		MixSignature(hash, write.size);
+		MixSignature(hash, write.queue);
+		MixSignature(hash, write.packet);
+	}
+	for (const auto& record: records) {
+		std::lock_guard lock(record->mutex);
+		MixSignature(hash, static_cast<uint32_t>(record->guest_id));
+		MixSignature(hash, record->blocked ? 1u : 0u);
+		MixSignature(hash, record->kind);
+		MixSignature(hash, record->object_name);
+		MixSignature(hash, record->object);
+		MixSignature(hash, record->caller);
+		MixSignature(hash, record->details);
+		MixSignature(hash, record->last_caller);
+		MixSignature(hash, record->next_call);
+	}
+	return hash;
+}
+
 void EnsureWorker() {
 	std::call_once(g_worker_once, [] {
 		std::thread([] {
 			bool once_done = false;
 			auto next_periodic = g_start + std::chrono::seconds(20);
-			while (g_periodic || !once_done) {
+			auto next_threads = g_start + std::chrono::milliseconds(g_guest_threads_period_ms);
+			uint64_t previous_signature = 0;
+			uint32_t unchanged_blocks = 0;
+			while (g_periodic || g_guest_threads || !once_done) {
 				const auto now = Clock::now();
 				if (g_once_at_ms >= 0 && !once_done &&
 				    now - g_start >= std::chrono::milliseconds(g_once_at_ms)) {
@@ -99,6 +216,16 @@ void EnsureWorker() {
 				if (g_periodic && now >= next_periodic) {
 					Dump(4);
 					next_periodic = now + std::chrono::seconds(20);
+				}
+				if (g_guest_threads && now >= next_threads) {
+					const auto signature = DumpGuestThreads();
+					unchanged_blocks = signature == previous_signature ? unchanged_blocks + 1u : 1u;
+					if (unchanged_blocks == 3u) {
+						std::fputs("GUEST_THREADS_IDLE unchanged_blocks=3\n", stderr);
+						std::fflush(stderr);
+					}
+					previous_signature = signature;
+					next_threads = now + std::chrono::milliseconds(g_guest_threads_period_ms);
 				}
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 			}
@@ -449,10 +576,67 @@ void Initialize() {
 		}
 	}
 #endif
+	g_guest_threads_period_ms = [] {
+		const char* value = std::getenv("KYTY_DIAG_GUEST_THREADS");
+		if (value == nullptr || value[0] == '\0') return int64_t {0};
+		const double seconds = std::strtod(value, nullptr);
+		return std::isfinite(seconds) && seconds > 0
+		           ? std::max<int64_t>(1, static_cast<int64_t>(seconds * 1000.0))
+		           : int64_t {0};
+	}();
+	g_guest_threads = g_guest_threads_period_ms > 0;
 	g_start = Clock::now();
 	PollCalls::Initialize();
-	EnabledFlag().store(g_periodic || g_once_at_ms >= 0 || g_cpu_sample || PollCalls::Enabled(),
+	EnabledFlag().store(g_periodic || g_once_at_ms >= 0 || g_cpu_sample || g_guest_threads || PollCalls::Enabled(),
 	                    std::memory_order_release);
+}
+
+bool GuestThreadsEnabled() {
+	return g_guest_threads;
+}
+
+void RecordFileOpen(const char* guest_path) {
+	if (!GuestThreadsEnabled()) return;
+	std::lock_guard lock(g_activity.mutex);
+	g_activity.data.file_opens++;
+	g_activity.data.last_file_path = guest_path != nullptr ? guest_path : "";
+}
+
+void RecordFileRead(const char* guest_path, uint64_t bytes) {
+	if (!GuestThreadsEnabled()) return;
+	std::lock_guard lock(g_activity.mutex);
+	g_activity.data.file_reads++;
+	g_activity.data.file_read_bytes += bytes;
+	g_activity.data.last_file_path = guest_path != nullptr ? guest_path : "";
+}
+
+void RecordAmprSubmitted() {
+	if (!GuestThreadsEnabled()) return;
+	std::lock_guard lock(g_activity.mutex);
+	g_activity.data.ampr_submitted++;
+}
+
+void RecordAmprCompleted() {
+	if (!GuestThreadsEnabled()) return;
+	std::lock_guard lock(g_activity.mutex);
+	g_activity.data.ampr_completed++;
+}
+
+void RecordEqueueEvent(int16_t filter) {
+	if (!GuestThreadsEnabled()) return;
+	std::lock_guard lock(g_activity.mutex);
+	g_activity.data.equeue_events[filter]++;
+}
+
+void RecordGpuWrite(const char* packet, uint32_t queue, uint64_t address, uint64_t value, uint64_t size) {
+	if (!GuestThreadsEnabled() || address == 0 || size == 0) return;
+	std::lock_guard lock(g_activity.mutex);
+	auto& write = g_activity.data.gpu_writes[address];
+	write.count++;
+	write.last_value = value;
+	write.size = size;
+	write.queue = queue;
+	write.packet = packet != nullptr ? packet : "";
 }
 
 void SetAddressResolver(std::string (*resolver)(uint64_t address)) {
@@ -475,7 +659,7 @@ void RegisterCurrentThread(int guest_id, int host_id, const char* name, uint64_t
 		std::lock_guard lock(g_registry_mutex);
 		g_records.push_back(record);
 	}
-	if (g_periodic || g_once_at_ms >= 0) {
+	if (g_periodic || g_once_at_ms >= 0 || g_guest_threads) {
 		EnsureWorker();
 	}
 #if defined(_WIN32)
