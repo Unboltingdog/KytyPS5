@@ -2278,17 +2278,19 @@ uint32_t LoadIndirectFormattedTableLoop(ValueEmitContext& ctx, const IndirectBuf
 	const auto head  = local[0];
 	const auto valid = flag(head, 0);
 	const auto count = field(head, 8, 3);
-	const auto pick  = [&](const std::array<uint32_t, 4>& values, uint32_t index) {
+	// The caller fills selector/memory/one only for channel < channels; the rest are id 0, so a pick over the output
+	// channels must stop at `channels` (an OpSelect on id 0 is invalid SPIR-V).
+	const auto pick  = [&](const std::array<uint32_t, 4>& values, uint32_t index, uint32_t n = 4u) {
         auto result = values[0];
-        for (uint32_t i = 1; i < 4u; ++i) {
+        for (uint32_t i = 1; i < n; ++i) {
             result = Select(state, u32, Binary(state, spv::OpIEqual, boolean, index, ConstantU32(state, i)), values[i],
                             result);
         }
         return result;
 	};
-	const auto pick_bool = [&](const std::array<uint32_t, 4>& values, uint32_t index) {
+	const auto pick_bool = [&](const std::array<uint32_t, 4>& values, uint32_t index, uint32_t n = 4u) {
 		auto result = values[0];
-		for (uint32_t i = 1; i < 4u; ++i) {
+		for (uint32_t i = 1; i < n; ++i) {
 			result = Select(state, boolean, Binary(state, spv::OpIEqual, boolean, index, ConstantU32(state, i)), values[i],
 			                result);
 		}
@@ -2316,8 +2318,8 @@ uint32_t LoadIndirectFormattedTableLoop(ValueEmitContext& ctx, const IndirectBuf
 	EmitLabel(state, loop);
 	const auto current_component = Binary(
 	    state, spv::OpUMod, u32,
-	    Binary(state, spv::OpISub, u32, pick(selector, channel), ConstantU32(state, 4)), count);
-	const auto bit = Select(state, u32, pick_bool(memory, channel),
+	    Binary(state, spv::OpISub, u32, pick(selector, channel, channels), ConstantU32(state, 4)), count);
+	const auto bit = Select(state, u32, pick_bool(memory, channel, channels),
 	                        Binary(state, spv::OpShiftLeftLogical, u32, ConstantU32(state, 1), current_component),
 	                        ConstantU32(state, 0));
 	const auto next_selected = Binary(state, spv::OpBitwiseOr, u32, selected_components, bit);
@@ -2391,8 +2393,8 @@ uint32_t LoadIndirectFormattedTableLoop(ValueEmitContext& ctx, const IndirectBuf
 	const auto one_value = Select(state, u32, flag(head, 11), ConstantU32(state, 1), ConstantU32(state, 0x3f800000u));
 	const auto d16_class = d16 ? field(head, 12, 2) : 0u;
 	const auto values = EmitIndirectFormattedLoop(state, channels, [&](uint32_t output, const auto& held) {
-		auto value = Select(state, u32, pick_bool(memory, output), pick(converted, pick(component, output)),
-		                    Select(state, u32, pick_bool(one, output), one_value, ConstantU32(state, 0)));
+		auto value = Select(state, u32, pick_bool(memory, output, channels), pick(converted, pick(component, output, channels)),
+		                    Select(state, u32, pick_bool(one, output, channels), one_value, ConstantU32(state, 0)));
 		if (d16) {
 			const auto narrow = [&](Format::ComponentType type) {
 				Format::BufferFormatInfo info {};
