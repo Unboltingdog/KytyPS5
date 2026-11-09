@@ -389,8 +389,9 @@ bool SpirvFormatDecodeFastCasesEnabled() {
 	if (!SpirvFormatDecodeFlatEnabled() || !GetHostFloatFeatures().amd) return false;
 	const auto forced = g_format_decode_fast_cases_override.load(std::memory_order_relaxed);
 	if (forced >= 0) return forced != 0;
-	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_FORMAT_DECODE_FAST_CASES");
-	return value == nullptr || value[0] != '1';
+	// Opt-in: on the RX 9070 XT the cases made the six 128-load shaders compile in 36-48 s instead of 5-6 s.
+	const char* value = Common::ShaderEnv::Read("KYTY_AMD_FORMAT_DECODE_FAST_CASES");
+	return value != nullptr && value[0] == '1';
 }
 
 bool SpirvDeferBdaFaultEnabled() {

@@ -32,6 +32,7 @@ namespace Common::ShaderEnv {
 
 // Sorted (strcmp order; checked below).
 inline constexpr const char* Names[] = {
+    "KYTY_AMD_FORMAT_DECODE_FAST_CASES",
     // Read in src/graphics/shader (the recompiler, the stage code):
     "KYTY_BINDLESS",
     "KYTY_BINDLESS_R128",
@@ -54,7 +55,6 @@ inline constexpr const char* Names[] = {
     "KYTY_FIX_SRT_TAPE_VERIFY",
     "KYTY_IFCONV_LIMIT",
     "KYTY_NO_AMD_DEFER_BDA_FAULT",
-    "KYTY_NO_AMD_FORMAT_DECODE_FAST_CASES",
     "KYTY_NO_AMD_FORMAT_DECODE_FLAT",
     "KYTY_NO_AMD_HARDWARE_FLOAT_OPS",
     "KYTY_NO_AMD_HARDWARE_NAN",

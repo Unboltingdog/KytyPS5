@@ -37922,8 +37922,8 @@ void CheckFormatDecodeBench() {
           "non-AMD default emission differs from the legacy decoder with both AMD paths disabled");
   Require(name, "non-AMD flat output", non_amd_flat_default.spirv == non_amd_flat.spirv,
           "the AMD loop setting changed non-AMD flat emission");
-  Require(name, "AMD defaults", amd_default.spirv == amd_fast_loop.spirv,
-          "AMD default emission does not use table specialization, fast cases and the looped flat fallback");
+  Require(name, "AMD defaults", amd_default.spirv == amd_both_loop.spirv,
+          "AMD default emission does not use table specialization and the looped flat decoder without fast cases");
   Require(name, "AMD fast-case opt-out", amd_both_loop.spirv != amd_fast_loop.spirv && amd_fast_loop.switches != 0,
           "the AMD fast-case switch did not select the constant-format paths");
   Require(name, "non-AMD fast-case byte identity", non_amd_flat_default.spirv == non_amd_flat.spirv,
