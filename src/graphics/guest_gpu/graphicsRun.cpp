@@ -1590,7 +1590,7 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	// labels at completion / KYTY_PERF_DIRECT_RANGES: labels and CP writes recorded but not yet in guest memory;
 	// other pending writes suspend this queue unless the recorded values cover the whole word. The queue advances only
 	// after they complete (or a later attempt no longer needs them), preserving the wait's stream ordering without
-	// blocking every queue on the GPU thread. KYTY_FIX_ASYNC_LABEL_WAITS=0 restores the synchronous direct-write wait.
+	// blocking every queue on the GPU thread. Opt-in: KYTY_FIX_ASYNC_LABEL_WAITS=1 (default: the synchronous direct-write wait).
 	bool       covered = false;
 	T          value {};
 	const auto read = [&] {
@@ -1602,9 +1602,12 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	};
 	read();
 	if (!covered && m_renderer.GetBufferCache().InDirectRange(reinterpret_cast<uint64_t>(addr), sizeof(T))) {
+		// Opt-in (KYTY_FIX_ASYNC_LABEL_WAITS=1) until it is thread-safe: with the CP thread (g_cp_thread, the default),
+		// this runs on the command-processor thread, and HasPendingDirectGpuWrites reads m_direct_gpu_writes and the
+		// scheduler, which belong to the GPU execution thread (see WaitDirectGpuWrites).
 		static const bool async_label_waits = [] {
 			const char* value = std::getenv("KYTY_FIX_ASYNC_LABEL_WAITS");
-			return value == nullptr || value[0] != '0';
+			return value != nullptr && value[0] == '1';
 		}();
 		if (async_label_waits &&
 		    m_renderer.GetBufferCache().HasPendingDirectGpuWrites(reinterpret_cast<uint64_t>(addr), sizeof(T))) {
