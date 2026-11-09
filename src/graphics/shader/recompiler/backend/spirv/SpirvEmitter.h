@@ -103,7 +103,12 @@ bool SpirvDeferBdaFaultEnabled();
 // GPU-selected descriptor calls indirect_raw_dword once in a DontUnroll loop instead of once per dword. Measured on
 // the RX 9070 XT: 0x802184cc00 58.5 s -> 46.3 s, 0x808d22eb00 75.9 s -> 51.4 s. Same values; other vendors unchanged.
 bool SpirvLoopRawLoadsEnabled();
+// AMD default with the flat decoder (KYTY_NO_AMD_LOOP_FORMAT_DECODE=1 opts out): the generic formatted-load helper
+// decodes its channels and source components in DontUnroll loops, so AMD's forced inlining does not duplicate four
+// straight-line copies at every call. Other vendors keep the original helper byte-for-byte.
+bool SpirvLoopFormatDecodeEnabled();
 void SetSpirvFormatDecodeFlatOverride(std::optional<bool> enabled);
+void SetSpirvLoopFormatDecodeOverride(std::optional<bool> enabled);
 
 // Guest address supplied by the translation options, or zero for a host-built program without one.
 uint64_t CurrentShaderGuestAddress();

@@ -358,6 +358,7 @@ void SetSpirvTableFormatsOverride(std::optional<bool> enabled) {
 
 namespace {
 std::atomic_int g_format_decode_flat_override {-1};
+std::atomic_int g_loop_format_decode_override {-1};
 } // namespace
 
 bool SpirvFormatDecodeFlatEnabled() {
@@ -374,6 +375,15 @@ bool SpirvLoopRawLoadsEnabled() {
 	return value == nullptr || value[0] != '1';
 }
 
+bool SpirvLoopFormatDecodeEnabled() {
+	if (!SpirvFormatDecodeFlatEnabled()) return false;
+	const auto forced = g_loop_format_decode_override.load(std::memory_order_relaxed);
+	if (forced >= 0) return forced != 0;
+	if (!GetHostFloatFeatures().amd) return false;
+	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_LOOP_FORMAT_DECODE");
+	return value == nullptr || value[0] != '1';
+}
+
 bool SpirvDeferBdaFaultEnabled() {
 	if (!GetHostFloatFeatures().amd) return false;
 	const char* value = Common::ShaderEnv::Read("KYTY_NO_AMD_DEFER_BDA_FAULT");
@@ -382,6 +392,11 @@ bool SpirvDeferBdaFaultEnabled() {
 
 void SetSpirvFormatDecodeFlatOverride(std::optional<bool> enabled) {
 	g_format_decode_flat_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1,
+	                                    std::memory_order_relaxed);
+}
+
+void SetSpirvLoopFormatDecodeOverride(std::optional<bool> enabled) {
+	g_loop_format_decode_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1,
 	                                    std::memory_order_relaxed);
 }
 

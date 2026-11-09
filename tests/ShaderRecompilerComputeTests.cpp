@@ -37785,11 +37785,14 @@ void CheckFormatDecodeBench() {
   constexpr u32 pairs = 56u;
   struct Stats {
     std::vector<u32> spirv;
+    std::vector<size_t> helper_instructions;
     size_t instructions = 0;
     size_t switches = 0;
     size_t phis = 0;
     size_t labels = 0;
     size_t functions = 0;
+    size_t loops = 0;
+    size_t selects = 0;
   };
   const char *requested = std::getenv("KYTY_FORMAT_DECODE_BENCH_DIR");
   const std::filesystem::path directory =
@@ -37798,26 +37801,48 @@ void CheckFormatDecodeBench() {
   std::error_code error;
   std::filesystem::create_directories(directory, error);
   Require(name, "output directory", !error, error.message());
-  const auto run = [&](const char *label, std::optional<bool> table_formats, std::optional<bool> flat) {
+  const auto run = [&](const char *label, std::optional<bool> table_formats, std::optional<bool> flat,
+                       std::optional<bool> loop_format) {
     ShaderRecompiler::Spirv::SetSpirvTableFormatsOverride(table_formats);
     ShaderRecompiler::Spirv::SetSpirvFormatDecodeFlatOverride(flat);
+    ShaderRecompiler::Spirv::SetSpirvLoopFormatDecodeOverride(loop_format);
     ShaderComputeInputInfo compute{};
     auto shader = IndirectFormattedBench::Compile(pairs, 32u, compute, 0u, true);
     ShaderRecompiler::Spirv::SetSpirvTableFormatsOverride(std::nullopt);
     ShaderRecompiler::Spirv::SetSpirvFormatDecodeFlatOverride(std::nullopt);
+    ShaderRecompiler::Spirv::SetSpirvLoopFormatDecodeOverride(std::nullopt);
     ValidateSpirv(name, shader.spirv);
     Stats stats{.spirv = std::move(shader.spirv)};
+    bool in_function = false;
+    size_t function_instructions = 0;
+    size_t parameters = 0;
     for (size_t offset = 5; offset < stats.spirv.size();) {
       const auto words = stats.spirv[offset] >> spv::WordCountShift;
+      const auto opcode = stats.spirv[offset] & spv::OpCodeMask;
       Require(name, "instruction bounds", words != 0 && offset + words <= stats.spirv.size(),
               "malformed emitted SPIR-V");
       ++stats.instructions;
+      if (opcode == spv::OpFunction) {
+        in_function = true;
+        function_instructions = 0;
+        parameters = 0;
+      }
+      if (in_function) {
+        ++function_instructions;
+        if (opcode == spv::OpFunctionParameter) ++parameters;
+        if (opcode == spv::OpFunctionEnd) {
+          if (parameters == 12u) stats.helper_instructions.push_back(function_instructions);
+          in_function = false;
+        }
+      }
       offset += words;
     }
     stats.switches = CountSpirvOpcode(stats.spirv, spv::OpSwitch);
     stats.phis = CountSpirvOpcode(stats.spirv, spv::OpPhi);
     stats.labels = CountSpirvOpcode(stats.spirv, spv::OpLabel);
     stats.functions = CountSpirvOpcode(stats.spirv, spv::OpFunction);
+    stats.loops = CountSpirvOpcode(stats.spirv, spv::OpLoopMerge);
+    stats.selects = CountSpirvOpcode(stats.spirv, spv::OpSelect);
     const auto path = directory / (std::string("format_decode_") + label + ".spv");
     std::FILE *file = std::fopen(path.string().c_str(), "wb");
     Require(name, "open SPIR-V output", file != nullptr, path.string());
@@ -37827,23 +37852,35 @@ void CheckFormatDecodeBench() {
     }
     const auto close_result = file != nullptr ? std::fclose(file) : EOF;
     Require(name, "write SPIR-V output", written == stats.spirv.size() && close_result == 0, path.string());
-    std::printf("FORMAT_DECODE_BENCH loads=%u descriptors=2 table_formats=%d flat=%d words=%zu bytes=%zu "
-                "instructions=%zu OpSwitch=%zu OpPhi=%zu OpLabel=%zu file=%s\n",
+    std::printf("FORMAT_DECODE_BENCH loads=%u descriptors=2 table_formats=%d flat=%d loop=%d words=%zu bytes=%zu "
+                "instructions=%zu OpSwitch=%zu OpPhi=%zu OpLabel=%zu OpLoopMerge=%zu OpSelect=%zu helpers=",
                 pairs * 2u, table_formats.value_or(false) ? 1 : 0, flat.value_or(false) ? 1 : 0,
-                stats.spirv.size(), stats.spirv.size() * sizeof(u32), stats.instructions, stats.switches, stats.phis,
-                stats.labels, path.string().c_str());
+                loop_format.value_or(false) ? 1 : 0, stats.spirv.size(), stats.spirv.size() * sizeof(u32),
+                stats.instructions, stats.switches, stats.phis, stats.labels, stats.loops, stats.selects);
+    for (size_t i = 0; i < stats.helper_instructions.size(); ++i) {
+      std::printf("%s%zu", i == 0 ? "" : ",", stats.helper_instructions[i]);
+    }
+    std::printf(" file=%s\n", path.string().c_str());
     return stats;
   };
-  const auto both_off = run("table0_flat0", false, false);
-  const auto table_on = run("table1_flat0", true, false);
-  const auto flat_on = run("table0_flat1", false, true);
-  const auto both_on = run("table1_flat1", true, true);
+  const auto both_off = run("table0_flat0", false, false, false);
+  const auto table_on = run("table1_flat0", true, false, false);
+  const auto flat_on = run("table0_flat1_loop0", false, true, false);
+  const auto flat_loop = run("table0_flat1_loop1", false, true, true);
+  const auto both_on = run("table1_flat1_loop0", true, true, false);
+  const auto both_loop = run("table1_flat1_loop1", true, true, true);
   const auto host_features = ShaderRecompiler::Spirv::GetHostFloatFeatures();
+  auto amd_features = host_features;
+  amd_features.amd = true;
+  ShaderRecompiler::Spirv::SetHostFloatFeatures(amd_features);
+  const auto amd_default = run("amd_defaults", std::nullopt, std::nullopt, std::nullopt);
   auto non_amd_features = host_features;
   non_amd_features.amd = false;
   ShaderRecompiler::Spirv::SetHostFloatFeatures(non_amd_features);
-  const auto non_amd_off = run("non_amd_off", false, false);
-  const auto non_amd_default = run("non_amd_defaults", std::nullopt, std::nullopt);
+  const auto non_amd_off = run("non_amd_off", false, false, false);
+  const auto non_amd_default = run("non_amd_defaults", std::nullopt, std::nullopt, std::nullopt);
+  const auto non_amd_flat = run("non_amd_flat_loop0", false, true, false);
+  const auto non_amd_flat_default = run("non_amd_flat_defaults", false, true, std::nullopt);
   ShaderRecompiler::Spirv::SetHostFloatFeatures(host_features);
   const auto check_table_access = [&](const Stats &stats) {
     // Names are not emitted by default: the format table is the module's initialized Private variable.
@@ -37866,18 +37903,33 @@ void CheckFormatDecodeBench() {
             "the flat module has no format table access to check");
   };
   check_table_access(flat_on);
+  check_table_access(flat_loop);
   check_table_access(both_on);
+  check_table_access(both_loop);
   Require(name, "legacy decoder", both_off.switches != 0, "the legacy synthetic module has no format switches");
-  Require(name, "flat decoder", flat_on.switches == 0 && both_on.switches == 0,
+  Require(name, "flat decoder", flat_on.switches == 0 && both_on.switches == 0 &&
+                                    flat_loop.switches == 0 && both_loop.switches == 0,
           "the flat synthetic modules retained a format switch");
   Require(name, "non-AMD defaults", non_amd_default.spirv == non_amd_off.spirv,
           "non-AMD default emission differs from the legacy decoder with both AMD paths disabled");
+  Require(name, "non-AMD flat output", non_amd_flat_default.spirv == non_amd_flat.spirv,
+          "the AMD loop setting changed non-AMD flat emission");
+  Require(name, "AMD defaults", amd_default.spirv == both_loop.spirv,
+          "AMD default emission does not use table specialization and the looped flat decoder");
   Require(name, "specialized helpers",
-          table_on.functions == both_off.functions + 2u && both_on.functions == flat_on.functions + 2u,
+          table_on.functions == both_off.functions + 2u && both_on.functions == flat_on.functions + 2u &&
+              both_loop.functions == flat_loop.functions + 2u,
           "the two captured descriptor formats did not each add one specialized helper");
   Require(name, "flat module size", flat_on.spirv.size() < both_off.spirv.size() &&
                                       both_on.spirv.size() < table_on.spirv.size(),
           "the flat decoder did not shrink the 112-load synthetic module");
+  Require(name, "looped helper coverage", flat_loop.helper_instructions.size() == flat_on.helper_instructions.size() &&
+                                             flat_loop.helper_instructions.size() == 2u && flat_loop.loops > flat_on.loops,
+          "the looped module did not retain both generic formatted-load helpers");
+  for (size_t i = 0; i < flat_loop.helper_instructions.size(); ++i) {
+    Require(name, "looped helper size", flat_loop.helper_instructions[i] < flat_on.helper_instructions[i],
+            "the looped generic formatted-load helper is larger than the legacy flat helper");
+  }
   std::printf("[host]    %-32s ok\n", name);
 }
 

@@ -2219,11 +2219,213 @@ IndirectFormattedDescriptorInfo DecodeIndirectFormattedDescriptor(EmitterState& 
 	return DecodeFormattedTableWords(state, format);
 }
 
+template <typename Body>
+std::array<uint32_t, 4> EmitIndirectFormattedLoop(EmitterState& state, uint32_t count, Body&& body) {
+	const auto u32     = TypeU32(state);
+	const auto boolean = TypeBool(state);
+	const auto entry   = state.current_label;
+	const auto header  = state.builder.AllocateId();
+	const auto loop    = state.builder.AllocateId();
+	const auto cont    = state.builder.AllocateId();
+	const auto merge   = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpBranch, header);
+	EmitLabel(state, header);
+	const auto i     = state.builder.AllocateId();
+	const auto i_phi = state.builder.AddDeferredPhi(u32, i, 2);
+	std::array<uint32_t, 4>       held {};
+	std::array<DeferredPhi, 4>    held_phi {};
+	for (uint32_t c = 0; c < 4u; ++c) {
+		held[c]     = state.builder.AllocateId();
+		held_phi[c] = state.builder.AddDeferredPhi(u32, held[c], 2);
+	}
+	state.builder.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlDontUnrollMask);
+	state.builder.AddFunction(spv::OpBranchConditional,
+	                          Binary(state, spv::OpULessThan, boolean, i, ConstantU32(state, count)), loop, merge);
+	EmitLabel(state, loop);
+	const auto next = body(i, held);
+	state.builder.AddFunction(spv::OpBranch, cont);
+	EmitLabel(state, cont);
+	const auto next_i = Binary(state, spv::OpIAdd, u32, i, ConstantU32(state, 1));
+	state.builder.AddFunction(spv::OpBranch, header);
+	state.builder.PatchDeferredPhi(i_phi, 0, ConstantU32(state, 0), entry);
+	state.builder.PatchDeferredPhi(i_phi, 1, next_i, cont);
+	for (uint32_t c = 0; c < 4u; ++c) {
+		state.builder.PatchDeferredPhi(held_phi[c], 0, ConstantU32(state, 0), entry);
+		state.builder.PatchDeferredPhi(held_phi[c], 1, next[c], cont);
+	}
+	EmitLabel(state, merge);
+	return held;
+}
+
+// SpirvLoopFormatDecodeEnabled: the table decoder with one loop body per stage instead of four straight-line copies.
+// The descriptor's five words are still prepared once per V# by DecodeIndirectFormattedDescriptor.
+uint32_t LoadIndirectFormattedTableLoop(ValueEmitContext& ctx, const IndirectBufferAccess& buffer, uint32_t channels,
+                                        const std::array<uint32_t, 4>& selector,
+                                        const std::array<uint32_t, 4>& memory, const std::array<uint32_t, 4>& one,
+                                        bool d16, const IndirectFormattedDescriptorInfo* decoded) {
+	auto&      state   = ctx.state;
+	const auto u32     = TypeU32(state);
+	const auto u64     = TypeU64(state);
+	const auto boolean = TypeBool(state);
+	const auto local   = decoded != nullptr ? *decoded : DecodeIndirectFormattedDescriptor(state, buffer.format);
+	const auto field   = [&](uint32_t word, uint32_t first, uint32_t count) {
+        return EmitBitFieldUExtract(state, word, ConstantU32(state, first), ConstantU32(state, count));
+	};
+	const auto flag = [&](uint32_t word, uint32_t bit) {
+		return Binary(state, spv::OpINotEqual, boolean, field(word, bit, 1u), ConstantU32(state, 0));
+	};
+	const auto head  = local[0];
+	const auto valid = flag(head, 0);
+	const auto count = field(head, 8, 3);
+	const auto pick  = [&](const std::array<uint32_t, 4>& values, uint32_t index) {
+        auto result = values[0];
+        for (uint32_t i = 1; i < 4u; ++i) {
+            result = Select(state, u32, Binary(state, spv::OpIEqual, boolean, index, ConstantU32(state, i)), values[i],
+                            result);
+        }
+        return result;
+	};
+	const auto pick_bool = [&](const std::array<uint32_t, 4>& values, uint32_t index) {
+		auto result = values[0];
+		for (uint32_t i = 1; i < 4u; ++i) {
+			result = Select(state, boolean, Binary(state, spv::OpIEqual, boolean, index, ConstantU32(state, i)), values[i],
+			                result);
+		}
+		return result;
+	};
+
+	const auto entry  = state.current_label;
+	const auto header = state.builder.AllocateId(), loop = state.builder.AllocateId();
+	const auto cont = state.builder.AllocateId(), merge = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpBranch, header);
+	EmitLabel(state, header);
+	const auto channel     = state.builder.AllocateId();
+	const auto channel_phi = state.builder.AddDeferredPhi(u32, channel, 2);
+	const auto selected_components     = state.builder.AllocateId();
+	const auto selected_components_phi = state.builder.AddDeferredPhi(u32, selected_components, 2);
+	std::array<uint32_t, 4>    component {};
+	std::array<DeferredPhi, 4> component_phi {};
+	for (uint32_t c = 0; c < 4u; ++c) {
+		component[c]     = state.builder.AllocateId();
+		component_phi[c] = state.builder.AddDeferredPhi(u32, component[c], 2);
+	}
+	state.builder.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlDontUnrollMask);
+	state.builder.AddFunction(spv::OpBranchConditional,
+	                          Binary(state, spv::OpULessThan, boolean, channel, ConstantU32(state, channels)), loop, merge);
+	EmitLabel(state, loop);
+	const auto current_component = Binary(
+	    state, spv::OpUMod, u32,
+	    Binary(state, spv::OpISub, u32, pick(selector, channel), ConstantU32(state, 4)), count);
+	const auto bit = Select(state, u32, pick_bool(memory, channel),
+	                        Binary(state, spv::OpShiftLeftLogical, u32, ConstantU32(state, 1), current_component),
+	                        ConstantU32(state, 0));
+	const auto next_selected = Binary(state, spv::OpBitwiseOr, u32, selected_components, bit);
+	std::array<uint32_t, 4> next_component {};
+	for (uint32_t c = 0; c < 4u; ++c) {
+		next_component[c] = Select(state, u32,
+		                           Binary(state, spv::OpIEqual, boolean, channel, ConstantU32(state, c)),
+		                           current_component, component[c]);
+	}
+	state.builder.AddFunction(spv::OpBranch, cont);
+	EmitLabel(state, cont);
+	const auto next_channel = Binary(state, spv::OpIAdd, u32, channel, ConstantU32(state, 1));
+	state.builder.AddFunction(spv::OpBranch, header);
+	state.builder.PatchDeferredPhi(channel_phi, 0, ConstantU32(state, 0), entry);
+	state.builder.PatchDeferredPhi(channel_phi, 1, next_channel, cont);
+	state.builder.PatchDeferredPhi(selected_components_phi, 0, ConstantU32(state, 0), entry);
+	state.builder.PatchDeferredPhi(selected_components_phi, 1, next_selected, cont);
+	for (uint32_t c = 0; c < 4u; ++c) {
+		state.builder.PatchDeferredPhi(component_phi[c], 0, ConstantU32(state, 0), entry);
+		state.builder.PatchDeferredPhi(component_phi[c], 1, next_component[c], cont);
+	}
+	EmitLabel(state, merge);
+
+	const auto in_bounds = IndirectBufferInBoundsBytes(state, buffer, field(head, 1, 5));
+	const auto base      = Binary(state, spv::OpBitwiseAnd, u64, buffer.address,
+	                              Unary(state, spv::OpNot, u64, Unary(state, spv::OpUConvert, u64, field(head, 6, 2))));
+	const auto dword_base = Binary(state, spv::OpBitwiseAnd, u64, base, ConstantU64(state, ~uint64_t {3}));
+	const auto words = EmitIndirectFormattedLoop(state, 4u, [&](uint32_t dword, const auto& held) {
+		const auto first = Binary(state, spv::OpIAdd, u32, ConstantU32(state, 16),
+		                          Binary(state, spv::OpShiftLeftLogical, u32, dword, ConstantU32(state, 2)));
+		const auto selected = Binary(
+		    state, spv::OpINotEqual, boolean,
+		    Binary(state, spv::OpBitwiseAnd, u32, selected_components,
+		           EmitBitFieldUExtract(state, head, first, ConstantU32(state, 4))),
+		    ConstantU32(state, 0));
+		const auto displacement = Binary(state, spv::OpShiftLeftLogical, u64,
+		                                 Unary(state, spv::OpUConvert, u64, dword), ConstantU32(state, 2));
+		const auto address = Binary(state, spv::OpIAdd, u64, dword_base, displacement);
+		const auto value = EmitValueOrZeroIfCondition(state, AndCondition(state, in_bounds, selected),
+		                                              [&]() { return LoadBdaDword(ctx, address); });
+		std::array<uint32_t, 4> next {};
+		for (uint32_t c = 0; c < 4u; ++c) {
+			next[c] = Select(state, u32, Binary(state, spv::OpIEqual, boolean, dword, ConstantU32(state, c)), value,
+			                 held[c]);
+		}
+		return next;
+	});
+
+	const auto base_low = Unary(state, spv::OpUConvert, u32, base);
+	const auto descriptors = std::array<uint32_t, 4> {local[1], local[2], local[3], local[4]};
+	const auto converted = EmitIndirectFormattedLoop(state, 4u, [&](uint32_t source, const auto& held) {
+		const auto desc  = pick(descriptors, source);
+		const auto value = pick(words, field(desc, 0, 2));
+		const auto byte  = Binary(state, spv::OpBitwiseAnd, u32,
+		                          Binary(state, spv::OpIAdd, u32, base_low, field(desc, 2, 2)), ConstantU32(state, 3));
+		const auto position = Binary(state, spv::OpIAdd, u32,
+		                             Binary(state, spv::OpShiftLeftLogical, u32, byte, ConstantU32(state, 3)),
+		                             field(desc, 4, 5));
+		const auto bits = field(desc, 9, 6);
+		const auto raw  = Select(state, u32, flag(desc, 15), EmitBitFieldSExtract(state, value, position, bits),
+		                         EmitBitFieldUExtract(state, value, position, bits));
+		const auto result = NormalizeFormattedTableComponent(state, field(desc, 16, 5), bits, raw);
+		std::array<uint32_t, 4> next {};
+		for (uint32_t c = 0; c < 4u; ++c) {
+			next[c] = Select(state, u32, Binary(state, spv::OpIEqual, boolean, source, ConstantU32(state, c)), result,
+			                 held[c]);
+		}
+		return next;
+	});
+
+	const auto one_value = Select(state, u32, flag(head, 11), ConstantU32(state, 1), ConstantU32(state, 0x3f800000u));
+	const auto d16_class = d16 ? field(head, 12, 2) : 0u;
+	const auto values = EmitIndirectFormattedLoop(state, channels, [&](uint32_t output, const auto& held) {
+		auto value = Select(state, u32, pick_bool(memory, output), pick(converted, pick(component, output)),
+		                    Select(state, u32, pick_bool(one, output), one_value, ConstantU32(state, 0)));
+		if (d16) {
+			const auto narrow = [&](Format::ComponentType type) {
+				Format::BufferFormatInfo info {};
+				info.type = type;
+				std::array<uint32_t, 4> single {value};
+				return Binary(state, spv::OpBitwiseAnd, u32, PackD16Channels(state, info, single, 1u, 1u),
+				              ConstantU32(state, 0xffffu));
+			};
+			const auto as_uint  = narrow(Format::ComponentType::Uint);
+			const auto as_sint  = narrow(Format::ComponentType::Sint);
+			const auto as_float = narrow(Format::ComponentType::Float);
+			value = Select(state, u32, Binary(state, spv::OpIEqual, boolean, d16_class, ConstantU32(state, 0)), as_uint,
+			               Select(state, u32, Binary(state, spv::OpIEqual, boolean, d16_class, ConstantU32(state, 1)),
+			                      as_sint, as_float));
+		}
+		value = Select(state, u32, valid, value, ConstantU32(state, 0));
+		std::array<uint32_t, 4> next {};
+		for (uint32_t c = 0; c < 4u; ++c) {
+			next[c] = Select(state, u32, Binary(state, spv::OpIEqual, boolean, output, ConstantU32(state, c)), value,
+			                 held[c]);
+		}
+		return next;
+	});
+	return ConstructU32Composite(state, channels, values);
+}
+
 // The `channels` channel values of LoadIndirectFormattedVector's format switch, from the table.
 uint32_t LoadIndirectFormattedTable(ValueEmitContext& ctx, const IndirectBufferAccess& buffer, uint32_t channels,
                                     const std::array<uint32_t, 4>& selector, const std::array<uint32_t, 4>& memory,
                                     const std::array<uint32_t, 4>& one, bool d16,
                                     const IndirectFormattedDescriptorInfo* decoded = nullptr) {
+	if (SpirvLoopFormatDecodeEnabled()) {
+		return LoadIndirectFormattedTableLoop(ctx, buffer, channels, selector, memory, one, d16, decoded);
+	}
 	auto&      state   = ctx.state;
 	const auto u32     = TypeU32(state);
 	const auto u64     = TypeU64(state);
