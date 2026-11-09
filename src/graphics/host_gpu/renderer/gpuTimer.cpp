@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -112,6 +113,8 @@ struct State {
 	uint64_t                               marked       = 0;
 	uint64_t                               overflow     = 0;
 	std::unordered_map<Key, Cost, KeyHash> costs;
+	std::unordered_map<Key, std::pair<ShaderIdentity, ShaderIdentity>, KeyHash> shader_identities;
+	std::unordered_set<Key, KeyHash> named_keys;
 	// KYTY_TRACE_GPU_TIME_MARKERS
 	std::unordered_map<std::string, uint32_t> marker_ids;
 	std::vector<std::string>                  marker_names {std::string("-")};
@@ -343,12 +346,32 @@ void Report(State& s) {
 	if (!s.costs.empty()) {
 		std::vector<std::pair<Key, Cost>> top(s.costs.begin(), s.costs.end());
 		std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) { return x.second.ticks > y.second.ticks; });
-		std::fprintf(stderr, "GPUTIME_TOP");
 		// KYTY_TRACE_GPU_TIME_TOP=<n>: list length (default 30).
 		static const size_t top_count = [] {
 			const char* value = std::getenv("KYTY_TRACE_GPU_TIME_TOP");
 			return value != nullptr ? static_cast<size_t>(std::strtoul(value, nullptr, 10)) : size_t {30};
 		}();
+		for (size_t i = 0; i < top.size() && i < top_count; i++) {
+			const auto& key = top[i].first;
+			if (!s.named_keys.insert(key).second) continue;
+			const auto found = s.shader_identities.find(key);
+			const auto [a_shader, b_shader] =
+			    found != s.shader_identities.end() ? found->second : std::pair<ShaderIdentity, ShaderIdentity> {};
+			std::fprintf(stderr, "GPUTIME_KEY key=%016llx key_b=%016llx kind=%c",
+			             static_cast<unsigned long long>(key.a), static_cast<unsigned long long>(key.b), key.kind);
+			if (key.kind == 'd') {
+				std::fprintf(stderr,
+				             " guest_vs=0x%016llx guest_ps=0x%016llx spirv_hash_vs=%016llx spirv_hash_ps=%016llx\n",
+				             static_cast<unsigned long long>(a_shader.guest), static_cast<unsigned long long>(b_shader.guest),
+				             static_cast<unsigned long long>(a_shader.spirv_hash),
+				             static_cast<unsigned long long>(b_shader.spirv_hash));
+			} else {
+				std::fprintf(stderr, " guest=0x%016llx spirv_hash=%016llx\n",
+				             static_cast<unsigned long long>(a_shader.guest),
+				             static_cast<unsigned long long>(a_shader.spirv_hash));
+			}
+		}
+		std::fprintf(stderr, "GPUTIME_TOP");
 		for (size_t i = 0; i < top.size() && i < top_count; i++) {
 			std::fprintf(stderr, " [%c %016llx %016llx %.1fms n=%llu]", top[i].first.kind,
 			             static_cast<unsigned long long>(top[i].first.a), static_cast<unsigned long long>(top[i].first.b),
@@ -519,7 +542,8 @@ uint32_t BeginCommand(vk::CommandBuffer buffer) {
 	return (static_cast<uint32_t>(s.current) << 16u) | query;
 }
 
-void EndCommand(vk::CommandBuffer buffer, uint32_t slot, char kind, uint64_t a, uint64_t b) {
+void EndCommand(vk::CommandBuffer buffer, uint32_t slot, char kind, uint64_t a, uint64_t b,
+                ShaderIdentity a_shader, ShaderIdentity b_shader) {
 	if (slot == NoSlot) {
 		return;
 	}
@@ -528,6 +552,7 @@ void EndCommand(vk::CommandBuffer buffer, uint32_t slot, char kind, uint64_t a, 
 	if (s.current < 0 || static_cast<uint32_t>(s.current) != (slot >> 16u) || s.chunks[s.current].buffer != buffer) {
 		return;
 	}
+	s.shader_identities.emplace(Key {kind, a, b}, std::pair {a_shader, b_shader});
 	auto&      chunk = s.chunks[s.current];
 	const auto query = chunk.used++;
 	buffer.writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, s.pool, ChunkBase(s.current) + query);

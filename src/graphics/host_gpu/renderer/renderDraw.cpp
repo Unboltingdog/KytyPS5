@@ -2480,8 +2480,14 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 	if (draw_label) GpuTimer::LabelEnd(draw_cmd);
 	if (!skip_draw) m_context.GetBufferCache().NoteCommandEmitted();
 	if (gpu_time != ~0u) {
+		const auto& vs_program = vertex_stages.empty() ? *state.ps_input_info.stage.program : *vertex_stages[0].stage.program;
+		const auto& ps_program = state.ps_active ? *state.ps_input_info.stage.program : vs_program;
 		GpuTimer::EndCommand(draw_cmd, gpu_time, 'd', vertex_stages.empty() ? 0ull : vertex_stages[0].stage.program->shader_hash,
-		                     state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0ull);
+		                     state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0ull,
+		                     {vertex_stages.empty() ? 0ull : vs_program.diagnostic_guest_address,
+		                      vertex_stages.empty() ? 0ull : vs_program.diagnostic_spirv_hash},
+		                     {state.ps_active ? ps_program.diagnostic_guest_address : 0ull,
+		                      state.ps_active ? ps_program.diagnostic_spirv_hash : 0ull});
 	}
 	// KYTY_TRACE_DEPTH_ADDR=<hex>: draws using that depth target (first 60, then a count per arm).
 	static constinit Common::OnceValue<uint64_t> depth_trace_once;

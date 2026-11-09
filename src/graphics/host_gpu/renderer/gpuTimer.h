@@ -38,10 +38,17 @@ void NoteQueueSubmit(uint64_t tick);
 [[nodiscard]] bool TimelineCpuActive();
 void               NoteCpuWait(char kind, std::chrono::steady_clock::time_point start);
 
+struct ShaderIdentity {
+	uint64_t guest      = 0;
+	uint64_t spirv_hash = 0;
+};
+
 // Around one draw ('d', a = vertex shader hash, b = pixel shader hash) or dispatch ('c', a = compute
 // shader hash, b = 1 for indirect). Begin returns a slot for End (~0u when the command is untimed).
+// Shader identities name a key in the first GPUTIME_TOP window that contains it.
 [[nodiscard]] uint32_t BeginCommand(vk::CommandBuffer buffer);
-void                   EndCommand(vk::CommandBuffer buffer, uint32_t slot, char kind, uint64_t a, uint64_t b);
+void                   EndCommand(vk::CommandBuffer buffer, uint32_t slot, char kind, uint64_t a, uint64_t b,
+                                  ShaderIdentity a_shader = {}, ShaderIdentity b_shader = {});
 // Mode 1: GPU time from here to the next timestamp belongs to an emulator operation (tiler, image
 // upload/download, buffer copies, clears...): kind and two values identify it in GPUTIME_TOP.
 void Mark(vk::CommandBuffer buffer, char kind, uint64_t a, uint64_t b);
