@@ -1292,8 +1292,14 @@ IndirectRawDescriptorInfo PrepareIndirectRawDescriptor(ValueEmitContext& ctx, co
 	return DecodeIndirectRawDescriptor(ctx.state, ctx.Arg(handle, 1), ctx.Arg(handle, 3));
 }
 
-void AppendIndirectRawDescriptor(std::vector<uint32_t>& words, const IndirectRawDescriptorInfo& info) {
-	words.insert(words.end(), {info.base_high, info.stride, info.swizzle, info.valid_format, info.index_stride, info.mode});
+// The helpers take every descriptor word as u32 (OpFunctionParameter u32): the two bool fields go as 0/1 and are
+// compared back to bool inside (IndirectRawDescriptorFromParameters).
+void AppendIndirectRawDescriptor(EmitterState& state, std::vector<uint32_t>& words, const IndirectRawDescriptorInfo& info) {
+	const auto as_u32 = [&](uint32_t condition) {
+		return Select(state, TypeU32(state), condition, ConstantU32(state, 1), ConstantU32(state, 0));
+	};
+	words.insert(words.end(), {info.base_high, info.stride, as_u32(info.swizzle), as_u32(info.valid_format),
+	                           info.index_stride, info.mode});
 }
 
 struct IndirectBufferAccess {
@@ -1716,7 +1722,7 @@ uint32_t LoadIndirectBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_
 			std::vector<uint32_t> words {spv::OpFunctionCall, TypeU32Composite(state, components), result, group,
 			                             ctx.Arg(handle, 0), ctx.Arg(handle, 1), ctx.Arg(handle, 2),
 			                             IndirectCallWord3(state, word3), index, offset, ctx.Arg(inst, 3)};
-			if (hoist) AppendIndirectRawDescriptor(words, descriptor);
+			if (hoist) AppendIndirectRawDescriptor(state, words, descriptor);
 			state.builder.AddFunction(std::span<const uint32_t>(words));
 			return result;
 		}
@@ -1727,7 +1733,7 @@ uint32_t LoadIndirectBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_
 			std::vector<uint32_t> words {spv::OpFunctionCall, TypeU32(state), values[component], outlined,
 			                             ctx.Arg(handle, 0), ctx.Arg(handle, 1), ctx.Arg(handle, 2), call_word3,
 			                             index, offset, ctx.Arg(inst, 3), ConstantU32(state, component * 4u)};
-			if (hoist) AppendIndirectRawDescriptor(words, descriptor);
+			if (hoist) AppendIndirectRawDescriptor(state, words, descriptor);
 			state.builder.AddFunction(std::span<const uint32_t>(words));
 		}
 		return ConstructU32Composite(state, components, values);
@@ -3478,11 +3484,14 @@ void DefineIndirectRawDwordHoisted(ValueEmitContext& ctx) {
 		IndirectRawDescriptorInfo descriptor {};
 		descriptor.base_high    = parameter();
 		descriptor.stride       = parameter();
-		descriptor.swizzle      = parameter();
-		descriptor.valid_format = parameter();
+		const auto swizzle_u32  = parameter();
+		const auto valid_u32    = parameter();
 		descriptor.index_stride = parameter();
 		descriptor.mode         = parameter();
 		EmitLabel(state, state.builder.AllocateId());
+		// After the label: the bool fields arrive as 0/1 (AppendIndirectRawDescriptor).
+		descriptor.swizzle      = Binary(state, spv::OpINotEqual, TypeBool(state), swizzle_u32, ConstantU32(state, 0));
+		descriptor.valid_format = Binary(state, spv::OpINotEqual, TypeBool(state), valid_u32, ConstantU32(state, 0));
 		IndirectBufferAccess buffer {};
 		buffer.stride  = descriptor.stride;
 		buffer.swizzle = descriptor.swizzle;
@@ -3554,11 +3563,14 @@ void DefineIndirectRawDwordHoisted(ValueEmitContext& ctx) {
 		IndirectRawDescriptorInfo descriptor {};
 		descriptor.base_high    = parameter();
 		descriptor.stride       = parameter();
-		descriptor.swizzle      = parameter();
-		descriptor.valid_format = parameter();
+		const auto swizzle_u32  = parameter();
+		const auto valid_u32    = parameter();
 		descriptor.index_stride = parameter();
 		descriptor.mode         = parameter();
 		EmitLabel(state, state.builder.AllocateId());
+		// After the label: the bool fields arrive as 0/1 (AppendIndirectRawDescriptor).
+		descriptor.swizzle      = Binary(state, spv::OpINotEqual, TypeBool(state), swizzle_u32, ConstantU32(state, 0));
+		descriptor.valid_format = Binary(state, spv::OpINotEqual, TypeBool(state), valid_u32, ConstantU32(state, 0));
 		IndirectBufferAccess buffer {};
 		buffer.stride  = descriptor.stride;
 		buffer.swizzle = descriptor.swizzle;
