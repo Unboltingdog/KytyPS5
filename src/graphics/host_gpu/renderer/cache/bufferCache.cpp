@@ -30,6 +30,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/stageFLookup.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "kernel/memory.h"
 #include "loader/systemContent.h"
 
@@ -1159,9 +1160,10 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				return;
 			}
 			auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
+			if (reason == PerfReason::SrtWalker) ShaderRecompiler::IR::NoteSrtReadRange(vaddr, size);
 
-			// A CPU access of a GPU-modified page downloads every GPU-modified range of the same buffer within +-4 MiB in one
-			// synchronization, so neighbouring accesses do not each wait for the GPU again (an approximation of timing only).
+			// A CPU access of a GPU-modified page downloads every GPU-modified range of the same buffer within +-4 MiB
+			// (+-64 KiB for SRT reads by default) in one synchronization, so neighbouring accesses do not each wait again.
 			// A write publishes the pages around its own and releases its page to the CPU (map 3c, 4.11: since 9919560e7 the
 			// game's 523 MiB buffer is device-local, so each page download is a flush, a wait and a copy, ~85 us; the cutscene
 			// after the Snake fight writes ~2000 consecutive pages a frame: 5.5 -> 8.4 fps with the window, live A/B; checked

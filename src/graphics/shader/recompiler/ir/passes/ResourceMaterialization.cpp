@@ -49,6 +49,146 @@ void SetIndirectTableSlotsOverride(std::optional<bool> enabled) {
 }
 
 namespace {
+struct SrtReadDiagnosticsState {
+	const ResourcePlan* program = nullptr;
+	const SrtRuntime*   runtime = nullptr;
+};
+thread_local SrtReadDiagnosticsState t_srt_read_diagnostics;
+
+const char* SrtDiagnosticStageName(ShaderType stage) {
+	switch (stage) {
+		case ShaderType::Vertex: return "vertex";
+		case ShaderType::Pixel: return "pixel";
+		case ShaderType::Fetch: return "fetch";
+		case ShaderType::Compute: return "compute";
+		case ShaderType::Mesh: return "mesh";
+		case ShaderType::Local: return "local";
+		case ShaderType::TessellationControl: return "tessellation_control";
+		case ShaderType::TessellationEvaluation: return "tessellation_evaluation";
+		default: return "unknown";
+	}
+}
+
+enum SrtDiagnosticKind : uint32_t {
+	BufferDescriptor = 1u << 0u,
+	ImageDescriptor = 1u << 1u,
+	SamplerDescriptor = 1u << 2u,
+	BufferTable = 1u << 3u,
+	ImageTable = 1u << 4u,
+	SamplerTable = 1u << 5u,
+	RecordBuffer = 1u << 6u,
+};
+
+std::string SrtDiagnosticKindName(uint32_t kind) {
+	static constexpr std::array<std::pair<uint32_t, const char*>, 7> names {{
+	    {BufferDescriptor, "buffer"},
+	    {ImageDescriptor, "image"},
+	    {SamplerDescriptor, "sampler"},
+	    {BufferTable, "buffer_table"},
+	    {ImageTable, "image_table"},
+	    {SamplerTable, "sampler_table"},
+	    {RecordBuffer, "record_buffer"},
+	}};
+	std::string result;
+	for (const auto& [flag, name]: names) {
+		if ((kind & flag) == 0u) continue;
+		if (!result.empty()) result += '|';
+		result += name;
+	}
+	return result.empty() ? "unknown" : result;
+}
+} // namespace
+
+SrtReadDiagnosticsScope::SrtReadDiagnosticsScope(const ResourcePlan& program, const SrtRuntime& runtime)
+    : m_previous_program(t_srt_read_diagnostics.program), m_previous_runtime(t_srt_read_diagnostics.runtime) {
+	t_srt_read_diagnostics = {.program = &program, .runtime = &runtime};
+}
+
+SrtReadDiagnosticsScope::~SrtReadDiagnosticsScope() {
+	t_srt_read_diagnostics = {.program = m_previous_program, .runtime = m_previous_runtime};
+}
+
+void NoteSrtReadRange(uint64_t vaddr, uint64_t size) {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_DIAG_FRAME_GAPS");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (!enabled || t_srt_read_diagnostics.program == nullptr || t_srt_read_diagnostics.runtime == nullptr) return;
+	const auto& program = *t_srt_read_diagnostics.program;
+	const auto& runtime = *t_srt_read_diagnostics.runtime;
+	std::vector<uint32_t> slot_kinds(runtime.user_data.size(), 0u);
+
+	const auto mark_resource = [&](uint32_t root, uint32_t kind) {
+		if (root >= program.descriptor_sources.size()) return;
+		std::unordered_set<const Inst*> values;
+		std::unordered_set<uint32_t>    sources;
+		std::function<void(Value)>      mark_value = [&](Value value) {
+			auto* inst = value.Resolve().TryInstruction();
+			if (inst == nullptr || !values.insert(inst).second) return;
+			if (inst->GetOpcode() == ValueOpcode::GetUserData) {
+				const uint32_t reg = RegIndex(inst->Arg(0).Resolve().ScalarRegister());
+				if (reg >= program.user_data_base) {
+					const uint32_t slot = reg - program.user_data_base;
+					if (slot < slot_kinds.size()) slot_kinds[slot] |= kind;
+				}
+			}
+			for (size_t i = 0; i < inst->NumArgs(); ++i) mark_value(inst->Arg(i));
+		};
+		std::function<void(uint32_t)> mark_source = [&](uint32_t source_index) {
+			if (source_index >= program.descriptor_sources.size() || !sources.insert(source_index).second) return;
+			const auto& source = program.descriptor_sources[source_index];
+			for (uint32_t i = 0; i < source.dword_count; ++i) mark_value(source.dwords[i]);
+			if (source.indirect_descriptor.has_value()) {
+				for (const uint32_t child: source.indirect_descriptor->sources) mark_source(child);
+			}
+		};
+		mark_source(root);
+	};
+	const auto mark_descriptor = [&](uint32_t source, uint32_t direct, uint32_t table) {
+		const bool indirect = source < program.descriptor_sources.size() &&
+		                      program.descriptor_sources[source].indirect_descriptor.has_value();
+		mark_resource(source, indirect ? table : direct);
+	};
+	for (const auto& buffer: program.info.buffers) mark_descriptor(buffer.source, BufferDescriptor, BufferTable);
+	for (const auto& image: program.info.images) mark_descriptor(image.source, ImageDescriptor, ImageTable);
+	for (const auto& sampler: program.info.samplers) mark_descriptor(sampler.source, SamplerDescriptor, SamplerTable);
+	for (const auto& range: program.info.indirect_ranges) mark_resource(range.source, RecordBuffer);
+
+	constexpr uint64_t MaxPointerDistance = 4ull << 20u;
+	size_t             best_slot = SIZE_MAX;
+	uint64_t           best_base = 0;
+	uint64_t           best_offset = MaxPointerDistance + 1u;
+	uint32_t           best_kind = 0;
+	for (uint32_t pass = 0; pass < 2u && best_slot == SIZE_MAX; ++pass) {
+		for (size_t slot = 0; slot + 1u < runtime.user_data.size(); ++slot) {
+			const uint32_t kind = slot_kinds[slot] | slot_kinds[slot + 1u];
+			if (pass == 0u && kind == 0u) continue;
+			const uint64_t base = static_cast<uint64_t>(runtime.user_data[slot]) |
+			                      (static_cast<uint64_t>(runtime.user_data[slot + 1u]) << 32u);
+			if (base < 0x10000u || base > vaddr || vaddr - base > MaxPointerDistance || vaddr - base >= best_offset) continue;
+			best_slot = slot;
+			best_base = base;
+			best_offset = vaddr - base;
+			best_kind = kind;
+		}
+	}
+	const auto slot = best_slot == SIZE_MAX ? std::string("none") : fmt::format("{}/{}", best_slot, best_slot + 1u);
+	const auto sgpr = best_slot == SIZE_MAX ? std::string("none")
+	                                        : fmt::format("{}", program.user_data_base + best_slot);
+	const auto base = best_slot == SIZE_MAX ? std::string("none") : fmt::format("0x{:x}", best_base);
+	const auto offset = best_slot == SIZE_MAX ? std::string("none") : fmt::format("0x{:x}", best_offset);
+	const auto line = fmt::format(
+	    "FRAME_GAPS_SRT_READ stage={} hash=0x{:016x} range=0x{:x}-0x{:x} bytes={} table={} srt_slot={} user_sgpr={} "
+	    "base={} offset={}",
+	    SrtDiagnosticStageName(program.stage), program.shader_hash, vaddr, vaddr + size, size,
+	    SrtDiagnosticKindName(best_kind), slot, sgpr, base, offset);
+	static std::mutex            mutex;
+	static std::set<std::string> seen;
+	std::lock_guard              lock(mutex);
+	if (seen.size() < 512u && seen.insert(line).second) std::fprintf(stderr, "%s\n", line.c_str());
+}
+
+namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
 constexpr uint64_t MaxIndirectDescriptorProbes = 65536u;
@@ -2401,6 +2541,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 	     runtime.read_specialization_memory == nullptr)) {
 		return MaterializeFailAt(__LINE__);
 	}
+	const SrtReadDiagnosticsScope read_diagnostics(program, runtime);
 	if (RecordsNullShare()) program.ThreadScratch().null_share_kinds.assign(program.info.buffers.size(), 0u);
 	const bool capture_reads = program.capture_specialization_reads || !program.source_reads.empty();
 	auto& reads = snapshot.specialization_reads;

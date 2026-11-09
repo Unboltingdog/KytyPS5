@@ -156,6 +156,7 @@ ResolveMiss TakeResolvedStage(ResolvedStages& results, ShaderType stage, const S
                               const ShaderRecompiler::IR::SrtRuntime& runtime, ShaderRecompiler::IR::ResourceSnapshot& out,
                               ShaderRecompiler::IR::ResourceSpecialization& out_specialization,
                               StageF::ResolveRecordPtr& out_record) {
+	const ShaderRecompiler::IR::SrtReadDiagnosticsScope read_diagnostics(plan, runtime);
 	const auto user_data = runtime.user_data;
 	for (uint32_t i = 0; i < results.count; i++) {
 		auto& r = results.stages[i];

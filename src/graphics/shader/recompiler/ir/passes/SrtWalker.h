@@ -93,6 +93,20 @@ struct SrtRuntime {
 	ImageHeapSource*          image_heap            = nullptr; // upstream's image heap; never set (see above)
 };
 
+// KYTY_DIAG_FRAME_GAPS: names the shader, resource-table kind and user-data slot of an SRT readback, once per range.
+class SrtReadDiagnosticsScope {
+public:
+	SrtReadDiagnosticsScope(const ResourcePlan& program, const SrtRuntime& runtime);
+	~SrtReadDiagnosticsScope();
+	SrtReadDiagnosticsScope(const SrtReadDiagnosticsScope&)            = delete;
+	SrtReadDiagnosticsScope& operator=(const SrtReadDiagnosticsScope&) = delete;
+
+private:
+	const ResourcePlan* m_previous_program;
+	const SrtRuntime*   m_previous_runtime;
+};
+void NoteSrtReadRange(uint64_t vaddr, uint64_t size);
+
 class SrtReadCapture {
 public:
 	SrtReadCapture(SrtRuntime source, std::vector<std::pair<uint64_t, uint64_t>>& ranges):
