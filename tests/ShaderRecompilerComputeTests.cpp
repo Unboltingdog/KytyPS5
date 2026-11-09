@@ -37846,17 +37846,16 @@ void CheckFormatDecodeBench() {
   const auto non_amd_default = run("non_amd_defaults", std::nullopt, std::nullopt);
   ShaderRecompiler::Spirv::SetHostFloatFeatures(host_features);
   const auto check_table_access = [&](const Stats &stats) {
+    // Names are not emitted by default: the format table is the module's initialized Private variable.
     u32 table = 0;
     size_t accesses = 0;
     for (size_t offset = 5; offset < stats.spirv.size();) {
       const auto words = stats.spirv[offset] >> spv::WordCountShift;
       const auto opcode = stats.spirv[offset] & spv::OpCodeMask;
-      if (opcode == spv::OpName && words >= 3) {
-        const auto *text = reinterpret_cast<const char *>(stats.spirv.data() + offset + 2);
-        if (std::string_view(text, (words - 2u) * sizeof(u32)).starts_with("formatted_format_table")) {
-          table = stats.spirv[offset + 1];
-        }
-      } else if (opcode == spv::OpAccessChain && words >= 5 && stats.spirv[offset + 3] == table) {
+      if (words == 0) break;
+      if (opcode == spv::OpVariable && words == 5 && stats.spirv[offset + 3] == spv::StorageClassPrivate) {
+        table = stats.spirv[offset + 2];
+      } else if (opcode == spv::OpAccessChain && words >= 5 && table != 0 && stats.spirv[offset + 3] == table) {
         ++accesses;
         Require(name, "one-index format table", words == 5,
                 "the Private format-table access chain does not have exactly one index");
@@ -37864,7 +37863,7 @@ void CheckFormatDecodeBench() {
       offset += words;
     }
     Require(name, "format table coverage", table != 0 && accesses != 0,
-            "the flat module has no formatted_format_table access to check");
+            "the flat module has no format table access to check");
   };
   check_table_access(flat_on);
   check_table_access(both_on);
