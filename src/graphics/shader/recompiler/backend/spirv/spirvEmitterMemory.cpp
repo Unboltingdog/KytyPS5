@@ -2335,21 +2335,43 @@ struct IndirectTableFormatAnalysis {
 	Prospero::BufferFormat format = Prospero::BufferFormat::kInvalid;
 	bool                   mixed  = false;
 	std::vector<uint32_t>  formats;
+	const char*            reason  = "no-candidate-list";
+	size_t                 records = 0;
 };
 
 IndirectTableFormatAnalysis AnalyzeIndirectTableFormat(const EmitterState& state, const IR::MemoryInfo& mem) {
 	using F = Prospero::BufferFormat;
 	IndirectTableFormatAnalysis result;
-	if (mem.kind != IR::ResourceKind::IndirectBuffer || mem.resource >= state.program.info.buffers.size()) return result;
-	const auto& binding = state.program.info.buffers[mem.resource];
-	if (binding.indirect_root == IR::BufferResource::NoIndirectBuffer ||
-	    binding.indirect_root >= state.program.info.buffers.size())
+	if (mem.kind != IR::ResourceKind::IndirectBuffer) {
+		result.reason = "not-an-indirect-buffer";
 		return result;
+	}
+	if (mem.resource >= state.program.info.buffers.size()) {
+		result.reason = "buffer-resource-missing";
+		return result;
+	}
+	const auto& binding = state.program.info.buffers[mem.resource];
+	if (binding.indirect_root == IR::BufferResource::NoIndirectBuffer) {
+		// One candidate needs no GPU mapping. Its captured format is still module-affecting specialization state.
+		if (binding.descriptor_format != F::kInvalid) {
+			result.format = binding.descriptor_format;
+			result.formats.push_back(static_cast<uint32_t>(binding.descriptor_format));
+			result.records = 1;
+			result.reason  = nullptr;
+		}
+		return result;
+	}
+	if (binding.indirect_root >= state.program.info.buffers.size()) {
+		result.reason = "indirect-root-missing";
+		return result;
+	}
 	const auto& root = state.program.info.buffers[binding.indirect_root];
+	result.records = root.indirect_resources.size();
 	for (const auto index: root.indirect_resources) {
 		if (index >= state.program.info.buffers.size()) {
 			result.format = F::kInvalid;
 			result.mixed  = false;
+			result.reason = "candidate-resource-missing";
 			return result;
 		}
 		const auto candidate = state.program.info.buffers[index].descriptor_format;
@@ -2364,6 +2386,15 @@ IndirectTableFormatAnalysis AnalyzeIndirectTableFormat(const EmitterState& state
 			result.mixed  = true;
 			result.format = F::kInvalid;
 		}
+	}
+	if (result.mixed) {
+		result.reason = nullptr;
+	} else if (result.format != F::kInvalid) {
+		result.reason = nullptr;
+	} else if (result.records == 0) {
+		result.reason = "candidate-list-empty";
+	} else {
+		result.reason = "candidates-zero-or-invalid";
 	}
 	return result;
 }
@@ -2693,6 +2724,16 @@ void DefineIndirectFormattedLoads(ValueEmitContext& ctx) {
 				mixed++;
 			} else {
 				unknown++;
+				if (SpirvTableFormatsEnabled()) {
+					const uint32_t stride = mem.resource < state.program.info.buffers.size() &&
+					                                (state.program.info.buffers[mem.resource].packed_stride >> 31u) == 0u
+					                            ? state.program.info.buffers[mem.resource].packed_stride & 0x3fffu
+					                            : 0u;
+					std::fprintf(stderr,
+					             "TABLE_FORMATS_REASON guest=0x%016llx load=%zu reason=%s table_va=0x0 stride=%u records=%zu\n",
+					             static_cast<unsigned long long>(CurrentShaderGuestAddress()), loads, analysis.reason, stride,
+					             analysis.records);
+				}
 			}
 		}
 	}
