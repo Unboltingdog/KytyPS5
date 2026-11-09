@@ -37874,6 +37874,9 @@ void CheckFormatDecodeBench() {
   amd_features.amd = true;
   ShaderRecompiler::Spirv::SetHostFloatFeatures(amd_features);
   const auto amd_default = run("amd_defaults", std::nullopt, std::nullopt, std::nullopt);
+  // The reference for the AMD defaults is built with the same AMD host features: the other AMD defaults (deferred BDA
+  // fault, looped raw loads, native float ops) also change the module.
+  const auto amd_both_loop = run("amd_table1_flat1_loop1", true, true, true);
   auto non_amd_features = host_features;
   non_amd_features.amd = false;
   ShaderRecompiler::Spirv::SetHostFloatFeatures(non_amd_features);
@@ -37914,7 +37917,7 @@ void CheckFormatDecodeBench() {
           "non-AMD default emission differs from the legacy decoder with both AMD paths disabled");
   Require(name, "non-AMD flat output", non_amd_flat_default.spirv == non_amd_flat.spirv,
           "the AMD loop setting changed non-AMD flat emission");
-  Require(name, "AMD defaults", amd_default.spirv == both_loop.spirv,
+  Require(name, "AMD defaults", amd_default.spirv == amd_both_loop.spirv,
           "AMD default emission does not use table specialization and the looped flat decoder");
   Require(name, "specialized helpers",
           table_on.functions == both_off.functions + 2u && both_on.functions == flat_on.functions + 2u &&
