@@ -3201,6 +3201,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 			                             "unsupported_interrupt_selector");
 			EXIT("unknown interrupt_selector\n");
 	}
+	if (with_interrupt) GpuEventDiagnostics::NoteRequest(m_interrupt_event_id);
 
 	const auto write =
 	    ClassifyEndOfPipe<T>(event_write_source, eop_event_type, cache_action, event_index, with_interrupt);
