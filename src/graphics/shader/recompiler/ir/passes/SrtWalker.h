@@ -93,7 +93,7 @@ struct SrtRuntime {
 	ImageHeapSource*          image_heap            = nullptr; // upstream's image heap; never set (see above)
 };
 
-// KYTY_DIAG_FRAME_GAPS: names the shader, resource-table kind and user-data slot of an SRT readback, once per range.
+// KYTY_DIAG_FRAME_GAPS: a five-second summary of SRT readbacks by consumer, page and walker path.
 class SrtReadDiagnosticsScope {
 public:
 	SrtReadDiagnosticsScope(const ResourcePlan& program, const SrtRuntime& runtime);
@@ -105,7 +105,47 @@ private:
 	const ResourcePlan* m_previous_program;
 	const SrtRuntime*   m_previous_runtime;
 };
+
+enum class SrtReadKind : uint8_t {
+	None,
+	EvaluateRawRead,
+	IndirectKeyCount,
+	IndirectSelectorOffset,
+	IndirectSelectorMask,
+	IndirectDescriptorWord,
+	IndirectTwoLevelPointer,
+	RecordListingCount,
+	RecordListingCandidate,
+	SpecializationReads,
+};
+enum class SrtResourceKind : uint8_t { None, Buffer, Image, Sampler };
+
+class SrtReadKindScope {
+public:
+	explicit SrtReadKindScope(SrtReadKind kind, bool replace = true);
+	~SrtReadKindScope();
+	SrtReadKindScope(const SrtReadKindScope&)            = delete;
+	SrtReadKindScope& operator=(const SrtReadKindScope&) = delete;
+
+private:
+	SrtReadKind m_previous;
+};
+
+class SrtReadResourceScope {
+public:
+	SrtReadResourceScope(SrtResourceKind kind, uint32_t source);
+	~SrtReadResourceScope();
+	SrtReadResourceScope(const SrtReadResourceScope&)            = delete;
+	SrtReadResourceScope& operator=(const SrtReadResourceScope&) = delete;
+
+private:
+	SrtResourceKind m_previous_kind;
+	uint32_t        m_previous_source;
+};
+
 void NoteSrtReadRange(uint64_t vaddr, uint64_t size);
+void NoteSrtReadWait(uint64_t wait_ns);
+void ReportSrtReadDiagnostics();
 
 class SrtReadCapture {
 public:

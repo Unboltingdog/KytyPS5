@@ -1072,7 +1072,10 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				if (copied && GuestGpu::IsGpuThread()) {
 					GpuTimer::NoteReadbackWait("DownloadBufferMemory", PerfReasonName(reason), "cpu_access", address,
 					                           bytes, ns, timing);
-					if (srt_producer) NoteSrtReadProducerWait(*srt_producer, timing.wait_ns);
+					if (srt_producer) {
+						NoteSrtReadProducerWait(*srt_producer, timing.wait_ns);
+						ShaderRecompiler::IR::NoteSrtReadWait(timing.wait_ns);
+					}
 				}
 				// KYTY_TRACE_GPU_READ_WAITS=<us> (diagnostic, with KYTY_TRACE_PERF; read once): the GPU thread's downloads
 				// of GPU-written bytes that took at least that long - who read (reason, the draw's marker), what (the

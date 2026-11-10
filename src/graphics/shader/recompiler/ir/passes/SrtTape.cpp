@@ -713,6 +713,7 @@ void SrtTapeWalker::PrefetchRun(size_t count, At&& at) {
 		for (size_t index = 0; index < fused; ++index) cls |= m_tape.cpu_needed[ids[index]] != 0u ? 1u : 2u;
 		t_srt_read_class = cls;
 	}
+	const SrtReadKindScope read_kind(SrtReadKind::EvaluateRawRead, false);
 	ReadOrdinaryMemory(address0, words.data(), fused * sizeof(uint32_t));
 	t_srt_read_class = 0u;
 	if (m_capture != nullptr) AppendSrtRead(*m_capture, address0, fused * sizeof(uint32_t), true);
@@ -804,6 +805,7 @@ bool SrtTapeWalker::ReadRaw(const SrtNode& node, uint64_t& result) {
 		}
 	}
 	uint32_t   word   = 0;
+	const SrtReadKindScope read_kind(SrtReadKind::EvaluateRawRead, false);
 	const auto reader = vector ? m_runtime.read_specialization_memory : m_runtime.read_memory;
 	// KYTY_TRACE_SRT_CLASSES: the class of this read while it runs.
 	struct ClassScope {

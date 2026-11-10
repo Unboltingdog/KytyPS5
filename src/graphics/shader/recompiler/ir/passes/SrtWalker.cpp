@@ -548,6 +548,7 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		}
 	}
 	uint32_t word = 0;
+	const SrtReadKindScope read_kind(SrtReadKind::EvaluateRawRead, false);
 	const auto reader = vector ? m_runtime.read_specialization_memory : m_runtime.read_memory;
 	if (reader != nullptr) {
 		if (!reader(m_runtime.userdata, address, {&word, 1})) {

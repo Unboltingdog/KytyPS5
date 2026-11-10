@@ -69,48 +69,56 @@ struct SrtReadDiagnosticsState {
 	const SrtRuntime*   runtime = nullptr;
 };
 thread_local SrtReadDiagnosticsState t_srt_read_diagnostics;
+thread_local SrtReadKind             t_srt_read_kind = SrtReadKind::None;
+thread_local SrtResourceKind         t_srt_read_resource = SrtResourceKind::None;
+thread_local uint32_t                t_srt_read_source = UINT32_MAX;
+thread_local uint64_t                t_srt_read_page = 0;
 
-const char* SrtDiagnosticStageName(ShaderType stage) {
-	switch (stage) {
-		case ShaderType::Vertex: return "vertex";
-		case ShaderType::Pixel: return "pixel";
-		case ShaderType::Fetch: return "fetch";
-		case ShaderType::Compute: return "compute";
-		case ShaderType::Mesh: return "mesh";
-		case ShaderType::Local: return "local";
-		case ShaderType::TessellationControl: return "tessellation_control";
-		case ShaderType::TessellationEvaluation: return "tessellation_evaluation";
-		default: return "unknown";
+const char* SrtReadKindName(SrtReadKind kind) {
+	switch (kind) {
+		case SrtReadKind::EvaluateRawRead: return "EvaluateRawRead";
+		case SrtReadKind::IndirectKeyCount: return "MaterializeIndirectDescriptor:key_count";
+		case SrtReadKind::IndirectSelectorOffset: return "MaterializeIndirectDescriptor:selector_offset";
+		case SrtReadKind::IndirectSelectorMask: return "MaterializeIndirectDescriptor:selector_mask";
+		case SrtReadKind::IndirectDescriptorWord: return "MaterializeIndirectDescriptor:descriptor_word";
+		case SrtReadKind::IndirectTwoLevelPointer: return "MaterializeIndirectDescriptor:two_level_pointer";
+		case SrtReadKind::RecordListingCount: return "record_keyed:count";
+		case SrtReadKind::RecordListingCandidate: return "record_keyed:candidate";
+		case SrtReadKind::SpecializationReads: return "specialization_reads";
+		default: return "specialization_reads";
 	}
 }
 
-enum SrtDiagnosticKind : uint32_t {
-	BufferDescriptor = 1u << 0u,
-	ImageDescriptor = 1u << 1u,
-	SamplerDescriptor = 1u << 2u,
-	BufferTable = 1u << 3u,
-	ImageTable = 1u << 4u,
-	SamplerTable = 1u << 5u,
-	RecordBuffer = 1u << 6u,
+struct SrtReadSummaryKey {
+	uint64_t     hash = 0;
+	uint64_t     page = 0;
+	SrtReadKind kind = SrtReadKind::None;
+	bool         operator==(const SrtReadSummaryKey&) const = default;
 };
-
-std::string SrtDiagnosticKindName(uint32_t kind) {
-	static constexpr std::array<std::pair<uint32_t, const char*>, 7> names {{
-	    {BufferDescriptor, "buffer"},
-	    {ImageDescriptor, "image"},
-	    {SamplerDescriptor, "sampler"},
-	    {BufferTable, "buffer_table"},
-	    {ImageTable, "image_table"},
-	    {SamplerTable, "sampler_table"},
-	    {RecordBuffer, "record_buffer"},
-	}};
-	std::string result;
-	for (const auto& [flag, name]: names) {
-		if ((kind & flag) == 0u) continue;
-		if (!result.empty()) result += '|';
-		result += name;
+struct SrtReadSummaryKeyHash {
+	size_t operator()(const SrtReadSummaryKey& key) const {
+		return std::hash<uint64_t>()(key.hash ^ (key.page * 0x9e3779b97f4a7c15ull) ^ static_cast<uint64_t>(key.kind));
 	}
-	return result.empty() ? "unknown" : result;
+};
+struct SrtReadSummaryStats {
+	uint64_t           count = 0;
+	uint64_t           wait_ns = 0;
+	uint32_t           resources = 0;
+	std::set<uint32_t> sources;
+};
+std::mutex                                                          g_srt_read_summary_mutex;
+std::unordered_map<SrtReadSummaryKey, SrtReadSummaryStats, SrtReadSummaryKeyHash> g_srt_read_summary;
+auto g_srt_read_window_start = std::chrono::steady_clock::now();
+
+SrtReadSummaryKey CurrentSrtReadKey(uint64_t page) {
+	return {.hash = t_srt_read_diagnostics.program != nullptr ? t_srt_read_diagnostics.program->shader_hash : 0,
+	        .page = page,
+	        .kind = t_srt_read_kind == SrtReadKind::None ? SrtReadKind::SpecializationReads : t_srt_read_kind};
+}
+
+void AddSrtReadResource(SrtReadSummaryStats& stats) {
+	stats.resources |= 1u << static_cast<uint32_t>(t_srt_read_resource);
+	stats.sources.insert(t_srt_read_source);
 }
 } // namespace
 
@@ -123,84 +131,93 @@ SrtReadDiagnosticsScope::~SrtReadDiagnosticsScope() {
 	t_srt_read_diagnostics = {.program = m_previous_program, .runtime = m_previous_runtime};
 }
 
+SrtReadKindScope::SrtReadKindScope(SrtReadKind kind, bool replace): m_previous(t_srt_read_kind) {
+	if (replace || m_previous == SrtReadKind::None) t_srt_read_kind = kind;
+}
+
+SrtReadKindScope::~SrtReadKindScope() {
+	t_srt_read_kind = m_previous;
+}
+
+SrtReadResourceScope::SrtReadResourceScope(SrtResourceKind kind, uint32_t source)
+    : m_previous_kind(t_srt_read_resource), m_previous_source(t_srt_read_source) {
+	t_srt_read_resource = kind;
+	t_srt_read_source = source;
+}
+
+SrtReadResourceScope::~SrtReadResourceScope() {
+	t_srt_read_resource = m_previous_kind;
+	t_srt_read_source = m_previous_source;
+}
+
 void NoteSrtReadRange(uint64_t vaddr, uint64_t size) {
 	static const bool enabled = [] {
 		const char* value = std::getenv("KYTY_DIAG_FRAME_GAPS");
 		return value != nullptr && value[0] == '1';
 	}();
 	if (!enabled || t_srt_read_diagnostics.program == nullptr || t_srt_read_diagnostics.runtime == nullptr) return;
-	const auto& program = *t_srt_read_diagnostics.program;
-	const auto& runtime = *t_srt_read_diagnostics.runtime;
-	std::vector<uint32_t> slot_kinds(runtime.user_data.size(), 0u);
-
-	const auto mark_resource = [&](uint32_t root, uint32_t kind) {
-		if (root >= program.descriptor_sources.size()) return;
-		std::unordered_set<const Inst*> values;
-		std::unordered_set<uint32_t>    sources;
-		std::function<void(Value)>      mark_value = [&](Value value) {
-			auto* inst = value.Resolve().TryInstruction();
-			if (inst == nullptr || !values.insert(inst).second) return;
-			if (inst->GetOpcode() == ValueOpcode::GetUserData) {
-				const uint32_t reg = RegIndex(inst->Arg(0).Resolve().ScalarRegister());
-				if (reg >= program.user_data_base) {
-					const uint32_t slot = reg - program.user_data_base;
-					if (slot < slot_kinds.size()) slot_kinds[slot] |= kind;
-				}
-			}
-			for (size_t i = 0; i < inst->NumArgs(); ++i) mark_value(inst->Arg(i));
-		};
-		std::function<void(uint32_t)> mark_source = [&](uint32_t source_index) {
-			if (source_index >= program.descriptor_sources.size() || !sources.insert(source_index).second) return;
-			const auto& source = program.descriptor_sources[source_index];
-			for (uint32_t i = 0; i < source.dword_count; ++i) mark_value(source.dwords[i]);
-			if (source.indirect_descriptor.has_value()) {
-				for (const uint32_t child: source.indirect_descriptor->sources) mark_source(child);
-			}
-		};
-		mark_source(root);
-	};
-	const auto mark_descriptor = [&](uint32_t source, uint32_t direct, uint32_t table) {
-		const bool indirect = source < program.descriptor_sources.size() &&
-		                      program.descriptor_sources[source].indirect_descriptor.has_value();
-		mark_resource(source, indirect ? table : direct);
-	};
-	for (const auto& buffer: program.info.buffers) mark_descriptor(buffer.source, BufferDescriptor, BufferTable);
-	for (const auto& image: program.info.images) mark_descriptor(image.source, ImageDescriptor, ImageTable);
-	for (const auto& sampler: program.info.samplers) mark_descriptor(sampler.source, SamplerDescriptor, SamplerTable);
-	for (const auto& range: program.info.indirect_ranges) mark_resource(range.source, RecordBuffer);
-
-	constexpr uint64_t MaxPointerDistance = 4ull << 20u;
-	size_t             best_slot = SIZE_MAX;
-	uint64_t           best_base = 0;
-	uint64_t           best_offset = MaxPointerDistance + 1u;
-	uint32_t           best_kind = 0;
-	for (uint32_t pass = 0; pass < 2u && best_slot == SIZE_MAX; ++pass) {
-		for (size_t slot = 0; slot + 1u < runtime.user_data.size(); ++slot) {
-			const uint32_t kind = slot_kinds[slot] | slot_kinds[slot + 1u];
-			if (pass == 0u && kind == 0u) continue;
-			const uint64_t base = static_cast<uint64_t>(runtime.user_data[slot]) |
-			                      (static_cast<uint64_t>(runtime.user_data[slot + 1u]) << 32u);
-			if (base < 0x10000u || base > vaddr || vaddr - base > MaxPointerDistance || vaddr - base >= best_offset) continue;
-			best_slot = slot;
-			best_base = base;
-			best_offset = vaddr - base;
-			best_kind = kind;
+	(void)size;
+	t_srt_read_page = vaddr & ~0xfffull;
+	const auto now = std::chrono::steady_clock::now();
+	bool report = false;
+	{
+		std::lock_guard lock(g_srt_read_summary_mutex);
+		auto& stats = g_srt_read_summary[CurrentSrtReadKey(t_srt_read_page)];
+		stats.count++;
+		AddSrtReadResource(stats);
+		if (now - g_srt_read_window_start >= std::chrono::seconds(5)) {
+			g_srt_read_window_start = now;
+			report = true;
 		}
 	}
-	const auto slot = best_slot == SIZE_MAX ? std::string("none") : fmt::format("{}/{}", best_slot, best_slot + 1u);
-	const auto sgpr = best_slot == SIZE_MAX ? std::string("none")
-	                                        : fmt::format("{}", program.user_data_base + best_slot);
-	const auto base = best_slot == SIZE_MAX ? std::string("none") : fmt::format("0x{:x}", best_base);
-	const auto offset = best_slot == SIZE_MAX ? std::string("none") : fmt::format("0x{:x}", best_offset);
-	const auto line = fmt::format(
-	    "FRAME_GAPS_SRT_READ stage={} hash=0x{:016x} range=0x{:x}-0x{:x} bytes={} table={} srt_slot={} user_sgpr={} "
-	    "base={} offset={}",
-	    SrtDiagnosticStageName(program.stage), program.shader_hash, vaddr, vaddr + size, size,
-	    SrtDiagnosticKindName(best_kind), slot, sgpr, base, offset);
-	static std::mutex            mutex;
-	static std::set<std::string> seen;
-	std::lock_guard              lock(mutex);
-	if (seen.size() < 512u && seen.insert(line).second) std::fprintf(stderr, "%s\n", line.c_str());
+	if (report) ReportSrtReadDiagnostics();
+}
+
+void NoteSrtReadWait(uint64_t wait_ns) {
+	if (t_srt_read_diagnostics.program == nullptr) return;
+	std::lock_guard lock(g_srt_read_summary_mutex);
+	const auto it = g_srt_read_summary.find(CurrentSrtReadKey(t_srt_read_page));
+	if (it != g_srt_read_summary.end()) it->second.wait_ns += wait_ns;
+}
+
+void ReportSrtReadDiagnostics() {
+	std::vector<std::pair<SrtReadSummaryKey, SrtReadSummaryStats>> ordered;
+	{
+		std::lock_guard lock(g_srt_read_summary_mutex);
+		ordered.assign(g_srt_read_summary.begin(), g_srt_read_summary.end());
+		g_srt_read_summary.clear();
+	}
+	if (ordered.empty()) return;
+	std::ranges::sort(ordered, [](const auto& a, const auto& b) {
+		if (a.second.wait_ns != b.second.wait_ns) return a.second.wait_ns > b.second.wait_ns;
+		return a.second.count > b.second.count;
+	});
+	std::fprintf(stderr, "FRAME_GAPS_SRT_READ summary keys=%zu\n", ordered.size());
+	for (size_t rank = 0; rank < std::min<size_t>(10u, ordered.size()); ++rank) {
+		const auto& [key, stats] = ordered[rank];
+		std::string resources;
+		static constexpr std::array<std::pair<SrtResourceKind, const char*>, 3> names {{
+		    {SrtResourceKind::Buffer, "buffer"}, {SrtResourceKind::Image, "image"},
+		    {SrtResourceKind::Sampler, "sampler"},
+		}};
+		for (const auto& [kind, name]: names) {
+			if ((stats.resources & (1u << static_cast<uint32_t>(kind))) == 0u) continue;
+			if (!resources.empty()) resources += '|';
+			resources += name;
+		}
+		if (resources.empty()) resources = "unknown";
+		std::string sources;
+		for (const uint32_t source: stats.sources) {
+			if (!sources.empty()) sources += ',';
+			sources += source == UINT32_MAX ? std::string("none") : fmt::format("{}", source);
+		}
+		std::fprintf(stderr,
+		             "FRAME_GAPS_SRT_READ rank=%zu hash=0x%016llx page=0x%llx read_kind=%s count=%llu wait_ms=%.3f "
+		             "resource=%s sources=%s\n",
+		             rank + 1u, static_cast<unsigned long long>(key.hash), static_cast<unsigned long long>(key.page),
+		             SrtReadKindName(key.kind), static_cast<unsigned long long>(stats.count),
+		             static_cast<double>(stats.wait_ns) / 1000000.0, resources.c_str(), sources.c_str());
+	}
 }
 
 namespace {
@@ -619,6 +636,10 @@ public:
 	}
 	// `value` is the member of source's indirect descriptor that `which` names.
 	bool Evaluate(uint32_t source, SrtIndirectValue which, Value value, uint32_t& result) {
+		const auto kind = which == SrtIndirectValue::KeyCount       ? SrtReadKind::IndirectKeyCount
+		                  : which == SrtIndirectValue::SelectorFirst ? SrtReadKind::IndirectSelectorOffset
+		                                                            : SrtReadKind::IndirectSelectorMask;
+		const SrtReadKindScope read_kind(kind, false);
 		return m_tape != nullptr ? m_tape->EvaluateIndirectValue(source, which, result)
 		                         : m_walker->Evaluate(value, result);
 	}
@@ -688,6 +709,10 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
                                    std::vector<DescriptorValue>& descriptors,
                                    std::vector<Specialization>&  specializations,
                                    uint32_t maximum_resources, Normalize&& normalize) {
+	constexpr auto resource_kind = std::is_same_v<Specialization, ResourceSpecialization::Buffer> ? SrtResourceKind::Buffer
+	                               : std::is_same_v<Specialization, ResourceSpecialization::Image> ? SrtResourceKind::Image
+	                                                                                              : SrtResourceKind::Sampler;
+	const SrtReadResourceScope resource_scope(resource_kind, source_index);
 	const auto  descriptor_bytes = dword_count * sizeof(uint32_t);
 	const auto& sources = indirect.sources;
 	const auto* selector = indirect.selector ? &*indirect.selector : nullptr;
@@ -752,6 +777,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	};
 	const auto read_keys = [&](const ShaderBufferResource& material, uint64_t first,
 	                           uint64_t step, uint64_t count) {
+		const SrtReadKindScope read_kind(SrtReadKind::IndirectSelectorOffset, false);
 		keys.resize(count);
 		if (step == 4u) {
 			return ReadScalarTable(material.Base48(), material.GetSize(), first, runtime, keys);
@@ -838,7 +864,10 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 			// Descriptor bytes are refreshed together. The GPU selects the DWORD address;
 			// no material selector or unused table field is interpreted on the CPU.
 			keys.resize(table_size / 4u);
-			if (!ReadScalarTable(table_base, table_size, 0u, runtime, keys)) return false;
+			{
+				const SrtReadKindScope read_kind(SrtReadKind::IndirectDescriptorWord);
+				if (!ReadScalarTable(table_base, table_size, 0u, runtime, keys)) return false;
+			}
 			const auto mapping_offset = snapshot.flattened_srt.size();
 			descriptors[resource_index] = {.dword_count = dword_count};
 			snapshot.flattened_srt.resize(mapping_offset + 2u, 0u);
@@ -1011,6 +1040,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 				                    static_cast<uint64_t>(index) * selector->stride;
 				if (offset > UINT32_MAX) return false;
 				uint32_t key = 0;
+				const SrtReadKindScope read_kind(SrtReadKind::IndirectSelectorMask);
 				if (!ReadScalarTable(material_base, UINT64_MAX, static_cast<uint32_t>(offset),
 				                     runtime, {&key, 1})) return IndirectFailAt(__LINE__);
 				keys.push_back(key);
@@ -1041,17 +1071,24 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 			if (indirect.pointer_offset != UINT32_MAX) {
 				// Two-level: the record's pointer, then the descriptor at pointer + pointer_offset.
 				std::array<uint32_t, 2> pointer {};
-				if (!ReadScalarTable(table_base, table_size, table_offset, runtime, pointer))
-					return IndirectFailAt(__LINE__);
+				{
+					const SrtReadKindScope read_kind(SrtReadKind::IndirectTwoLevelPointer);
+					if (!ReadScalarTable(table_base, table_size, table_offset, runtime, pointer))
+						return IndirectFailAt(__LINE__);
+				}
 				const auto base = (static_cast<uint64_t>(pointer[1] & 0xffffu) << 32u) | pointer[0];
+				const SrtReadKindScope read_kind(SrtReadKind::IndirectDescriptorWord);
 				if (base == 0u || !ReadScalarTable(base, UINT64_MAX, indirect.pointer_offset, runtime,
 				                                   std::span(candidate.dwords).first(dword_count))) {
 					// A record without a table: the null descriptor (never selected in practice).
 					std::fill_n(candidate.dwords.begin(), dword_count, 0u);
 				}
-			} else if (!ReadScalarTable(table_base, table_size, table_offset, runtime,
-			                            std::span(candidate.dwords).first(dword_count))) {
-				return IndirectFailAt(__LINE__);
+			} else {
+				const SrtReadKindScope read_kind(SrtReadKind::IndirectDescriptorWord);
+				if (!ReadScalarTable(table_base, table_size, table_offset, runtime,
+				                     std::span(candidate.dwords).first(dword_count))) {
+					return IndirectFailAt(__LINE__);
+				}
 			}
 		} else if (!clean.EvaluateDescriptor(sources[entry], candidate)) {
 			return IndirectFailAt(__LINE__);
@@ -1173,6 +1210,8 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 	bool incomplete = false; // a widened source left a candidate unlisted
 	bool incomplete_written = false; // ... of a written source (D6 step K2)
 	for (const auto& range: program.info.indirect_ranges) {
+		const SrtReadResourceScope resource_scope(SrtResourceKind::Buffer, range.source);
+		const SrtReadKindScope read_kind(SrtReadKind::RecordListingCount);
 		const auto* source = Source(program, range.source);
 		if (source == nullptr || !source->indirect_descriptor.has_value() || !source->indirect_descriptor->record_keyed)
 			return IndirectFailAt(__LINE__);
@@ -1181,6 +1220,7 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 		if (!indirect.sources.empty()) {
 			// Path proofs: direct candidate V#s (the reads a path proof leaves).
 			for (const auto candidate_source: indirect.sources) {
+				const SrtReadKindScope candidate_kind(SrtReadKind::RecordListingCandidate);
 				DescriptorValue candidate;
 				uint64_t    address = 0, size = 0;
 				const char* why     = clean.EvaluateDescriptor(candidate_source, candidate)
@@ -1312,6 +1352,7 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 			    candidate.dwords[2], candidate.dwords[3]));
 		};
 		for (uint32_t key = 0; key < count; ++key) {
+			const SrtReadKindScope candidate_kind(SrtReadKind::RecordListingCandidate);
 			// The GPU's record offset: 32-bit shader arithmetic, then the dword-aligned instruction offset.
 			const uint64_t offset = uint64_t {(key * indirect.table_stride + indirect.table_offset) & ~3u} +
 			                        (indirect.table_immediate & ~3u);
@@ -2670,6 +2711,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 		    i < program.info.buffers.size() ? i : specialization.buffers[i].indirect_root;
 		if (base_index >= program.info.buffers.size()) return MaterializeFailAt(__LINE__);
 		const auto& base = program.info.buffers[base_index];
+		const SrtReadResourceScope resource_scope(SrtResourceKind::Buffer, base.source);
 		if (i < program.info.buffers.size()) {
 			const auto* source = Source(program, base.source);
 			if (source == nullptr) return MaterializeFailAt(__LINE__);
@@ -2785,6 +2827,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 	specialization.images.resize(program.info.images.size());
 	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
 		const auto& image = program.info.images[i];
+		const SrtReadResourceScope resource_scope(SrtResourceKind::Image, image.source);
 		specialization.images[i] = {
 		    .numeric_class = image.numeric_class,
 		    .dimension = image.dimension,
@@ -2832,6 +2875,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 	snapshot.samplers.resize(program.info.samplers.size());
 	specialization.samplers.assign(program.info.samplers.size(), {});
 	for (uint32_t i = 0; i < program.info.samplers.size(); ++i) {
+		const SrtReadResourceScope resource_scope(SrtResourceKind::Sampler, program.info.samplers[i].source);
 		const auto* sampler_source = Source(program, program.info.samplers[i].source);
 		const auto* indirect_sampler = sampler_source != nullptr && sampler_source->indirect_descriptor.has_value()
 		                                   ? &*sampler_source->indirect_descriptor
