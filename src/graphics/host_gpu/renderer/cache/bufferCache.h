@@ -762,7 +762,15 @@ private:
 	void NoteWriteTick(uint64_t start, uint64_t end, uint64_t tick, char kind = 0, uint64_t key_a = 0,
 	                   uint64_t key_b = 0, uint64_t guest = 0);
 	[[nodiscard]] uint64_t QueryWriteTick(uint64_t start, uint64_t end) const; // 0: part of it unknown
-	void                   NoteSrtReadProducer(uint64_t vaddr, uint64_t size) const;
+	struct SrtReadProducer {
+		uint64_t page        = 0;
+		uint64_t guest       = 0;
+		uint64_t submits_ago = 0;
+		char     kind        = '?';
+		bool     same_cb     = false;
+	};
+	[[nodiscard]] std::optional<SrtReadProducer> NoteSrtReadProducer(uint64_t vaddr, uint64_t size) const;
+	static void NoteSrtReadProducerWait(const SrtReadProducer& producer, uint64_t wait_ns);
 	struct WriteTick {
 		uint64_t end;
 		uint64_t tick;

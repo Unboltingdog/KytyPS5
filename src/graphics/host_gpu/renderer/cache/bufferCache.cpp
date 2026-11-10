@@ -1052,6 +1052,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(exec_timer.start - call_start).count()),
 				    std::memory_order_relaxed);
 			}
+			std::optional<SrtReadProducer> srt_producer;
 			// A download that copied GPU-written bytes (and so waited for the GPU), timed per reason.
 			const auto timed_download = [&](Buffer& target, uint64_t address, uint64_t bytes) {
 				GpuTimer::ReadbackTiming timing {};
@@ -1071,6 +1072,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				if (copied && GuestGpu::IsGpuThread()) {
 					GpuTimer::NoteReadbackWait("DownloadBufferMemory", PerfReasonName(reason), "cpu_access", address,
 					                           bytes, ns, timing);
+					if (srt_producer) NoteSrtReadProducerWait(*srt_producer, timing.wait_ns);
 				}
 				// KYTY_TRACE_GPU_READ_WAITS=<us> (diagnostic, with KYTY_TRACE_PERF; read once): the GPU thread's downloads
 				// of GPU-written bytes that took at least that long - who read (reason, the draw's marker), what (the
@@ -1165,7 +1167,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 			if (reason == PerfReason::SrtWalker) {
 				ShaderRecompiler::IR::NoteSrtReadRange(vaddr, size);
-				NoteSrtReadProducer(vaddr, size);
+				srt_producer = NoteSrtReadProducer(vaddr, size);
 			}
 
 			// A CPU access of a GPU-modified page downloads every GPU-modified range of the same buffer within +-4 MiB
@@ -3400,8 +3402,8 @@ uint64_t BufferCache::QueryWriteTick(uint64_t start, uint64_t end) const {
 	return QueryTicks(m_write_ticks, start, end);
 }
 
-void BufferCache::NoteSrtReadProducer(uint64_t vaddr, uint64_t size) const {
-	if (!GpuTimer::FrameGapsEnabled()) return;
+std::optional<BufferCache::SrtReadProducer> BufferCache::NoteSrtReadProducer(uint64_t vaddr, uint64_t size) const {
+	if (!GpuTimer::FrameGapsEnabled()) return std::nullopt;
 	const auto end = vaddr + size;
 	auto       it  = m_write_ticks.upper_bound(vaddr);
 	if (it != m_write_ticks.begin() && std::prev(it)->second.end > vaddr) --it;
@@ -3414,20 +3416,81 @@ void BufferCache::NoteSrtReadProducer(uint64_t vaddr, uint64_t size) const {
 			found    = true;
 		}
 	}
-	static std::atomic_uint lines {0};
-	if (lines.fetch_add(1, std::memory_order_relaxed) >= 512u) return;
 	const auto current = m_scheduler.CurrentTick();
-	std::fprintf(stderr,
-	             "FRAME_GAPS_SRT_PRODUCER range=0x%llx-0x%llx bytes=%llu producer_tick=%llu current_tick=%llu "
-	             "submits_ago=%llu same_cb=%d kind=%c key_a=0x%016llx key_b=0x%016llx guest=0x%016llx\n",
-	             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(end),
-	             static_cast<unsigned long long>(size), static_cast<unsigned long long>(found ? producer.tick : 0),
-	             static_cast<unsigned long long>(current),
-	             static_cast<unsigned long long>(found && current >= producer.tick ? current - producer.tick : 0),
-	             found && producer.tick == current ? 1 : 0, found && producer.kind != 0 ? producer.kind : '?',
-	             static_cast<unsigned long long>(found ? producer.key_a : 0),
-	             static_cast<unsigned long long>(found ? producer.key_b : 0),
-	             static_cast<unsigned long long>(found ? producer.guest : 0));
+	SrtReadProducer result {
+	    .page        = vaddr & ~0xfffull,
+	    .guest       = found ? producer.guest : 0,
+	    .submits_ago = found && current >= producer.tick ? current - producer.tick : 0,
+	    .kind        = found && producer.kind != 0 ? producer.kind : '?',
+	    .same_cb     = found && producer.tick == current,
+	};
+	static std::atomic_uint lines {0};
+	if (lines.fetch_add(1, std::memory_order_relaxed) < 32u) {
+		std::fprintf(stderr,
+		             "FRAME_GAPS_SRT_PRODUCER range=0x%llx-0x%llx bytes=%llu producer_tick=%llu current_tick=%llu "
+		             "submits_ago=%llu same_cb=%d kind=%c key_a=0x%016llx key_b=0x%016llx guest=0x%016llx\n",
+		             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(end),
+		             static_cast<unsigned long long>(size), static_cast<unsigned long long>(found ? producer.tick : 0),
+		             static_cast<unsigned long long>(current),
+		             static_cast<unsigned long long>(result.submits_ago), result.same_cb ? 1 : 0, result.kind,
+		             static_cast<unsigned long long>(found ? producer.key_a : 0),
+		             static_cast<unsigned long long>(found ? producer.key_b : 0),
+		             static_cast<unsigned long long>(result.guest));
+	}
+	return result;
+}
+
+void BufferCache::NoteSrtReadProducerWait(const SrtReadProducer& producer, uint64_t wait_ns) {
+	struct Key {
+		uint64_t page;
+		char     kind;
+		uint64_t guest;
+		bool operator<(const Key& other) const {
+			if (page != other.page) return page < other.page;
+			if (kind != other.kind) return kind < other.kind;
+			return guest < other.guest;
+		}
+	};
+	struct Stats {
+		uint64_t count = 0, same_cb = 0, wait_ns = 0, submits = 0;
+		uint64_t min_submits = UINT64_MAX, max_submits = 0;
+	};
+	static std::mutex        mutex;
+	static std::map<Key, Stats> stats;
+	static auto              window_start = std::chrono::steady_clock::now();
+	std::lock_guard          lock(mutex);
+	auto&                    entry = stats[{producer.page, producer.kind, producer.guest}];
+	entry.count++;
+	entry.same_cb += producer.same_cb ? 1u : 0u;
+	entry.wait_ns += wait_ns;
+	entry.submits += producer.submits_ago;
+	entry.min_submits = std::min(entry.min_submits, producer.submits_ago);
+	entry.max_submits = std::max(entry.max_submits, producer.submits_ago);
+	const auto now = std::chrono::steady_clock::now();
+	if (now - window_start < std::chrono::seconds(5)) return;
+	window_start = now;
+	std::vector<std::pair<Key, Stats>> ordered;
+	ordered.reserve(stats.size());
+	for (const auto& item: stats) ordered.push_back(item);
+	stats.clear();
+	std::ranges::sort(ordered, [](const auto& a, const auto& b) {
+		if (a.second.wait_ns != b.second.wait_ns) return a.second.wait_ns > b.second.wait_ns;
+		return a.second.count > b.second.count;
+	});
+	std::fprintf(stderr, "FRAME_GAPS_SRT_PRODUCER summary keys=%zu\n", ordered.size());
+	const size_t count = std::min<size_t>(10u, ordered.size());
+	for (size_t rank = 0; rank < count; ++rank) {
+		const auto& [key, s] = ordered[rank];
+		std::fprintf(stderr,
+		             "FRAME_GAPS_SRT_PRODUCER rank=%zu page=0x%llx kind=%c guest=0x%016llx count=%llu "
+		             "submits_ago=%llu/%.2f/%llu same_cb=%llu wait_ms=%.3f\n",
+		             rank + 1u, static_cast<unsigned long long>(key.page), key.kind,
+		             static_cast<unsigned long long>(key.guest), static_cast<unsigned long long>(s.count),
+		             static_cast<unsigned long long>(s.min_submits),
+		             static_cast<double>(s.submits) / static_cast<double>(s.count),
+		             static_cast<unsigned long long>(s.max_submits), static_cast<unsigned long long>(s.same_cb),
+		             static_cast<double>(s.wait_ns) / 1000000.0);
+	}
 }
 
 // Write ticks are kept per 64 KiB granule (WriteTickKey): a granule's tick is the newest write to
