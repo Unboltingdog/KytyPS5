@@ -3148,6 +3148,84 @@ void TestGpuScalarChainOnlyShaderData() {
   }
 }
 
+void TestGpuScalarChainSharedDescriptorMemory() {
+  SetSrtGpuChainOverride(true);
+  struct Restore {
+    ~Restore() { SetSrtGpuChainOverride(std::nullopt); }
+  } restore;
+  Fixture fixture;
+  const auto base = fixture.Address(fixture.UserData(0), fixture.UserData(1), 4);
+  MemoryInfo scalar;
+  scalar.kind = ResourceKind::ScalarAddress;
+  const auto flags = fixture.AddMemory(scalar, 4);
+  const auto descriptor_read = fixture.Emit(
+      ValueOpcode::LoadAddressU32, {base, Value(0u), Value(0u), Value(true)}, flags);
+  const auto data_read = fixture.Emit(
+      ValueOpcode::LoadAddressU32, {base, Value(4u), Value(0u), Value(true)}, flags);
+  fixture.Emit(ValueOpcode::ReferenceU32,
+               {fixture.Emit(ValueOpcode::IAdd32, {data_read, Value(1u)})});
+  const auto descriptor = fixture.Buffer(
+      {descriptor_read, Value(0u), Value(64u), Value(0u)}, 8);
+  MemoryInfo buffer;
+  buffer.kind = ResourceKind::Buffer;
+  fixture.Emit(ValueOpcode::LoadBufferU32,
+               {descriptor, Value(0u), Value(0u), Value(0u), Value(true)},
+               fixture.AddMemory(buffer, 8));
+  fixture.PlanAndTrack();
+  const auto plan = ExtractResourcePlan(fixture.program);
+  Check(plan.srt_reads.size() == 2 && plan.srt_reads[0].gpu_flag == UINT32_MAX &&
+            plan.srt_reads[1].gpu_flag == UINT32_MAX &&
+            fixture.program.memory_info[0].planning_only &&
+            plan.info.buffers.size() == 1 && !plan.info.uses_dma,
+        "a shared descriptor/data memory index retained a hybrid read");
+}
+
+void TestGpuScalarChainDescriptorPhiSelect() {
+  SetSrtGpuChainOverride(true);
+  struct Restore {
+    ~Restore() { SetSrtGpuChainOverride(std::nullopt); }
+  } restore;
+  for (const bool use_phi : {false, true}) {
+    Fixture fixture;
+    auto *left = fixture.block;
+    auto *right = fixture.AddBlock();
+    auto *merge = fixture.AddBlock();
+    left->AddBranch(merge);
+    right->AddBranch(merge);
+    const auto base = fixture.Address(fixture.UserData(0), fixture.UserData(1), 4);
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarAddress;
+    const auto read = fixture.Emit(
+        ValueOpcode::LoadAddressU32, {base, Value(0u), Value(0u), Value(true)},
+        fixture.AddMemory(scalar, 4));
+    fixture.Emit(ValueOpcode::ReferenceU32,
+                 {fixture.Emit(ValueOpcode::IAdd32, {read, Value(1u)})});
+    Value word = fixture.Emit(ValueOpcode::SelectU32,
+                              {fixture.UserData(2), read, Value(0u)}, 0, merge);
+    if (use_phi) {
+      auto &phi = merge->AppendNewInst(ValueOpcode::Phi, {},
+                                       static_cast<uint64_t>(Type::U32));
+      phi.AddPhiOperand(left, read);
+      phi.AddPhiOperand(right, read);
+      word = Value(&phi);
+    }
+    const auto descriptor = fixture.Emit(
+        ValueOpcode::GetBufferResource,
+        {word, Value(0u), Value(64u), Value(0u)}, MemoryFlags{0, 8}, merge);
+    MemoryInfo buffer;
+    buffer.kind = ResourceKind::Buffer;
+    fixture.Emit(ValueOpcode::LoadBufferU32,
+                 {descriptor, Value(0u), Value(0u), Value(0u), Value(true)},
+                 fixture.AddMemory(buffer, 8), merge);
+    fixture.PlanAndTrack();
+    const auto plan = ExtractResourcePlan(fixture.program);
+    Check(plan.srt_reads.size() == 1 && plan.srt_reads[0].gpu_flag == UINT32_MAX &&
+              fixture.program.memory_info[0].planning_only &&
+              plan.info.buffers.size() == 1,
+          "a descriptor phi/select retained a hybrid scalar read");
+  }
+}
+
 void TestDynamicSrtReadRemainsExplicit() {
   Fixture fixture;
   const auto base =
@@ -4620,6 +4698,8 @@ int main() {
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
     Run("GPU scalar chain", TestGpuScalarChain);
     Run("GPU scalar chain data uses", TestGpuScalarChainOnlyShaderData);
+    Run("GPU scalar chain shared descriptor memory", TestGpuScalarChainSharedDescriptorMemory);
+    Run("GPU scalar chain descriptor phi/select", TestGpuScalarChainDescriptorPhiSelect);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("writable descriptor phi", TestWritableDescriptorPhi);
     Run("conditional sampler phi", TestConditionalSamplerPhi);

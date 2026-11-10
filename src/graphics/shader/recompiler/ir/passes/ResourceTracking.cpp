@@ -1686,6 +1686,7 @@ private:
 				}
 			}
 		}
+		const size_t descriptor_reads = m_scalar_reads.size();
 		for (auto* block: m_program.blocks) {
 			for (auto& inst: *block) {
 				uint32_t index = 0;
@@ -1694,6 +1695,11 @@ private:
 				    ValidateRuntimeValue(m_program, Value(&inst)))
 					CollectScalarRead(Value(&inst), inst.Flags<MemoryFlags>().pc);
 			}
+		}
+		std::unordered_set<uint32_t> descriptor_memory_indices;
+		for (size_t index = 0; index < descriptor_reads; ++index) {
+			if (!FeedsOnlyShaderData(*m_scalar_reads[index]))
+				descriptor_memory_indices.insert(m_scalar_reads[index]->Flags<MemoryFlags>().index);
 		}
 		for (size_t read_index = 0; read_index < m_scalar_reads.size(); ++read_index) {
 			auto* read = m_scalar_reads[read_index];
@@ -1725,7 +1731,7 @@ private:
 			if (keep) m_program.srt_reads.push_back({Value(read), slot});
 			const bool hybrid = read->GetOpcode() == ValueOpcode::LoadAddressU32 &&
 			                    (keep || m_program.srt_reads[slot].gpu_flag != UINT32_MAX) &&
-			                    FeedsOnlyShaderData(*read);
+			                    !descriptor_memory_indices.contains(flags.index) && FeedsOnlyShaderData(*read);
 			memory.planning_only = !hybrid;
 			auto* block = read->Parent();
 			auto& list = block->Instructions();
@@ -1735,6 +1741,11 @@ private:
 			const auto resource = Value(&*block->PrependNewInst(where, ValueOpcode::GetSrtResource));
 			const auto flat = Value(&*block->PrependNewInst(where, ValueOpcode::ReadConst,
 			    {resource, Value(slot)}, read->Flags<uint64_t>()));
+			for (auto& entry: m_resolved_handles) {
+				for (uint32_t word = 0; word < entry.source.dword_count; ++word)
+					if (entry.source.dwords[word].Resolve() == Value(read))
+						entry.source.dwords[word] = flat;
+			}
 			if (hybrid) {
 				if (keep) {
 					const auto flag = static_cast<uint32_t>(m_program.srt_reads.size());
@@ -1777,11 +1788,6 @@ private:
 			}
 			const auto uses = read->Uses();
 			for (const auto& use: uses) use.user->SetArg(use.operand, flat);
-			for (auto& entry: m_resolved_handles) {
-				for (uint32_t word = 0; word < entry.source.dword_count; ++word)
-					if (entry.source.dwords[word].Resolve() == Value(read))
-						entry.source.dwords[word] = flat;
-			}
 			for (auto* block: m_program.blocks) {
 				if (block->condition.Resolve() == Value(read)) block->condition = flat;
 				if (block->indirect_target.Resolve() == Value(read)) block->indirect_target = flat;
