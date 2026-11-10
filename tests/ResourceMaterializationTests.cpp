@@ -1499,7 +1499,8 @@ int main() {
   TestRecordKeyedRanges();
   TestSrtGpuRange();
   TestSrtGpuDependent();
-  TestSrtSkipPendingSpecialization();
+  // bisect-only28: depends on b222822c (reverted here); KYTY_FIX_SRT_SKIP_PENDING_SPECIALIZATION stays off in this run.
+  // TestSrtSkipPendingSpecialization();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }
