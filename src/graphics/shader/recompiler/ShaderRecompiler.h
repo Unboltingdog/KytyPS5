@@ -80,8 +80,10 @@ struct ShaderSource {
 [[nodiscard]] ShaderSource PrepareShaderSource(std::span<const uint32_t> code,
 	                                           const CompileOptions& options);
 const Decoder::Program& RefreshShaderSource(ShaderSource& source, const IR::SrtRuntime& runtime);
+namespace IR { enum class ScalarReadPlanner; }
 [[nodiscard]] TranslateResult TranslateProgram(const Decoder::Program& decoded,
-	                                           const CompileOptions& options);
+	                                           const CompileOptions& options,
+	                                           std::optional<IR::ScalarReadPlanner> scalar_read_planner = std::nullopt);
 
 [[nodiscard]] TranslateResult TranslateProgram(std::span<const uint32_t> code,
                                                const CompileOptions& options);

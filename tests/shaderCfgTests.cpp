@@ -5350,20 +5350,29 @@ struct SrtGpuChainCorpusResult {
   size_t buffers = 0;
   size_t images = 0;
   size_t samplers = 0;
+  size_t sampled_pairs = 0;
   size_t srt_reads = 0;
+  std::vector<ShaderRecompiler::IR::DescriptorValue> descriptor_sources;
   ShaderRecompiler::IR::ResourceSnapshot snapshot;
   ShaderRecompiler::IR::ResourceSpecialization specialization;
 };
 
 SrtGpuChainCorpusResult TranslateAndMaterializeSrtCorpusShader(
     std::span<const uint32_t> code,
-    const ShaderRecompiler::CompileOptions &options) {
-  auto translated = ShaderRecompiler::TranslateProgram(code, options);
+    const ShaderRecompiler::CompileOptions &options,
+    std::optional<ShaderRecompiler::IR::ScalarReadPlanner> planner =
+        std::nullopt) {
+  auto source = ShaderRecompiler::PrepareShaderSource(code, options);
+  auto translated =
+      ShaderRecompiler::TranslateProgram(source.decoded, options, planner);
+  Check(!translated.track_failure,
+        "SRT GPU-chain corpus shader failed resource tracking");
   auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
   SrtGpuChainCorpusResult result;
   result.buffers = plan.info.buffers.size();
   result.images = plan.info.images.size();
   result.samplers = plan.info.samplers.size();
+  result.sampled_pairs = plan.info.sampled_pairs.size();
   result.srt_reads = plan.srt_reads.size();
   const auto zero_reader = [](void *, uint64_t, std::span<uint32_t> values) {
     std::fill(values.begin(), values.end(), 0u);
@@ -5374,6 +5383,12 @@ SrtGpuChainCorpusResult TranslateAndMaterializeSrtCorpusShader(
       .shader_base = reinterpret_cast<uint64_t>(code.data()),
       .read_memory = zero_reader,
       .read_specialization_memory = zero_reader};
+  ShaderRecompiler::IR::SrtWalker walker(plan, runtime);
+  for (uint32_t source = 0; source < plan.descriptor_sources.size(); ++source) {
+    auto &descriptor = result.descriptor_sources.emplace_back();
+    Check(walker.EvaluateDescriptor(source, descriptor),
+          "SRT GPU-chain corpus descriptor source did not evaluate");
+  }
   Check(ShaderRecompiler::IR::MaterializeResources(
             plan, runtime, result.snapshot, result.specialization),
         "SRT GPU-chain corpus shader did not materialize");
@@ -5402,39 +5417,70 @@ void TestSrtGpuChainResourceBaseline() {
       EncodeMubuf0(0x1c), EncodeMubuf1(2, 1, 1),
       EncodeSopp(0x01),
   };
+  const uint32_t hybrid_image_sampler_shader[] = {
+      EncodeSmem0(0x00, 12, 4), 125u << 25u,
+      EncodeSop2(0x00, 12, 12, 128),
+      EncodeVop1(0x01, 0, 12),
+      EncodeSop2(0x25, 12, 128 + 12, 128 + 44),
+      EncodeSop1(0x04, 14, 255), 0x09500000u,
+      EncodeMimg0(0xa0, 0xf), EncodeMimg1(2, 1, 3, 6),
+      EncodeMubuf0(0x1c), EncodeMubuf1(2, 1, 1),
+      EncodeExp0(0x00, 0x3), EncodeExp1(0, 1, 0, 0),
+      EncodeSopp(0x01),
+  };
   struct Expected {
     std::span<const uint32_t> code;
     ShaderType stage;
     size_t buffers;
     size_t images;
     size_t samplers;
+    size_t sampled_pairs;
     size_t srt_reads;
+    size_t chain_srt_reads;
   };
   const std::array corpus{
-      Expected{scalar_data_shader, ShaderType::Pixel, 0, 0, 0, 1},
-      Expected{scalar_descriptor_shader, ShaderType::Compute, 2, 0, 0, 8},
-      Expected{image_sampler_shader, ShaderType::Pixel, 1, 1, 1, 0},
+      Expected{scalar_data_shader, ShaderType::Pixel, 0, 0, 0, 0, 1, 2},
+      Expected{scalar_descriptor_shader, ShaderType::Compute, 2, 0, 0, 0, 8, 8},
+      Expected{image_sampler_shader, ShaderType::Pixel, 1, 1, 1, 1, 0, 0},
+      Expected{hybrid_image_sampler_shader, ShaderType::Pixel, 1, 1, 1, 1, 1, 2},
   };
   struct Restore {
     ~Restore() { ShaderRecompiler::IR::SetSrtGpuChainOverride(std::nullopt); }
   } restore;
-  for (const bool enabled : {false, true}) {
-    ShaderRecompiler::IR::SetSrtGpuChainOverride(enabled);
-    for (size_t index = 0; index < corpus.size(); ++index) {
-      const auto &test = corpus[index];
-      auto options = MakeCompileOptions(test.stage);
-      std::array<uint32_t, 64> user_data{};
-      if (index == 0) {
-        user_data[8] = 0x1000u;
-      } else if (index == 2) {
-        const auto image_data = ImageTestUserData();
-        std::copy(image_data.begin(), image_data.end(), user_data.begin());
-      }
-      options.user_data = user_data;
+  for (size_t index = 0; index < corpus.size(); ++index) {
+    const auto &test = corpus[index];
+    auto options = MakeCompileOptions(test.stage);
+    std::array<uint32_t, 64> user_data{};
+    if (index == 0) {
+      user_data[8] = 0x1000u;
+    } else if (index >= 2) {
+      const auto image_data = ImageTestUserData();
+      std::copy(image_data.begin(), image_data.end(), user_data.begin());
+    }
+    options.user_data = user_data;
+    ShaderRecompiler::IR::SetSrtGpuChainOverride(false);
+    const auto flat = TranslateAndMaterializeSrtCorpusShader(
+        test.code, options, ShaderRecompiler::IR::ScalarReadPlanner::Flat);
+    const auto chain = TranslateAndMaterializeSrtCorpusShader(
+        test.code, options,
+        ShaderRecompiler::IR::ScalarReadPlanner::GpuChainNoHybrids);
+    Check(flat.buffers == chain.buffers && flat.images == chain.images &&
+              flat.samplers == chain.samplers &&
+              flat.sampled_pairs == chain.sampled_pairs &&
+              flat.srt_reads == chain.srt_reads &&
+              flat.descriptor_sources == chain.descriptor_sources &&
+              flat.snapshot.buffers == chain.snapshot.buffers &&
+              flat.snapshot.images == chain.snapshot.images &&
+              flat.snapshot.samplers == chain.snapshot.samplers &&
+              flat.snapshot.flattened_srt == chain.snapshot.flattened_srt,
+          "forced-off GPU-chain planning changed corpus resources or descriptor sources");
+    for (const bool enabled : {false, true}) {
+      ShaderRecompiler::IR::SetSrtGpuChainOverride(enabled);
       const auto result = TranslateAndMaterializeSrtCorpusShader(test.code, options);
-      const size_t srt_reads = enabled && index == 0 ? 2u : test.srt_reads;
+      const size_t srt_reads = enabled ? test.chain_srt_reads : test.srt_reads;
       Check(result.buffers == test.buffers && result.images == test.images &&
                 result.samplers == test.samplers &&
+                result.sampled_pairs == test.sampled_pairs &&
                 result.srt_reads == srt_reads &&
                 result.snapshot.buffers.size() == test.buffers &&
                 result.snapshot.images.size() == test.images &&
@@ -5444,7 +5490,7 @@ void TestSrtGpuChainResourceBaseline() {
                 result.specialization.samplers.size() == test.samplers &&
                 result.snapshot.flattened_srt.size() == srt_reads,
             enabled
-                ? "hybrid SRT read changed buffer/image/sampler counts in the native corpus"
+                ? "hybrid SRT read changed buffer/image/sampler/pair counts in the native corpus"
                 : "disabled SRT GPU chain changed the recorded translated/materialized resource baseline");
     }
   }

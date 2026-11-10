@@ -753,7 +753,8 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 	return TranslateProgram(source.decoded, options);
 }
 
-TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileOptions& options) {
+TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileOptions& options,
+                                 std::optional<IR::ScalarReadPlanner> scalar_read_planner) {
 	EXIT_IF(decoded.instructions.empty());
 	if (decoded.has_swap_pc) {
 		for (const auto& inst: decoded.instructions) {
@@ -905,7 +906,11 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 		}
 	};
 	try {
-		if (!IR::SrtGpuChainEnabled()) {
+		if (scalar_read_planner.has_value()) {
+			ir = build_ir();
+			dump_early_ir(ir);
+			IR::TrackResources(ir, decoded, native_cfg, *scalar_read_planner);
+		} else if (!IR::SrtGpuChainEnabled()) {
 			ir = build_ir();
 			dump_early_ir(ir);
 			IR::TrackResources(ir, decoded, native_cfg);
