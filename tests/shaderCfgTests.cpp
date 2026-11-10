@@ -5346,6 +5346,105 @@ void TestNewShaderRecompilerMemoryFamilyTranslation() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+struct SrtGpuChainCorpusResult {
+  size_t buffers = 0;
+  size_t images = 0;
+  size_t samplers = 0;
+  size_t srt_reads = 0;
+  ShaderRecompiler::IR::ResourceSnapshot snapshot;
+  ShaderRecompiler::IR::ResourceSpecialization specialization;
+};
+
+SrtGpuChainCorpusResult TranslateAndMaterializeSrtCorpusShader(
+    std::span<const uint32_t> code,
+    const ShaderRecompiler::CompileOptions &options) {
+  auto translated = ShaderRecompiler::TranslateProgram(code, options);
+  auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+  SrtGpuChainCorpusResult result;
+  result.buffers = plan.info.buffers.size();
+  result.images = plan.info.images.size();
+  result.samplers = plan.info.samplers.size();
+  result.srt_reads = plan.srt_reads.size();
+  const auto zero_reader = [](void *, uint64_t, std::span<uint32_t> values) {
+    std::fill(values.begin(), values.end(), 0u);
+    return true;
+  };
+  const ShaderRecompiler::IR::SrtRuntime runtime{
+      .user_data = options.user_data,
+      .shader_base = reinterpret_cast<uint64_t>(code.data()),
+      .read_memory = zero_reader,
+      .read_specialization_memory = zero_reader};
+  Check(ShaderRecompiler::IR::MaterializeResources(
+            plan, runtime, result.snapshot, result.specialization),
+        "SRT GPU-chain corpus shader did not materialize");
+  return result;
+}
+
+void TestSrtGpuChainDisabledResourceBaseline() {
+  const uint32_t scalar_data_shader[] = {
+      EncodeSmem0(0x00, 12, 4), 125u << 25u,
+      EncodeSop2(0x00, 12, 12, 128),
+      EncodeVop1(0x01, 0, 12),
+      EncodeExp0(0x00, 0x3), EncodeExp1(0, 1, 0, 0),
+      EncodeSopp(0x01),
+  };
+  const uint32_t scalar_descriptor_shader[] = {
+      EncodeSmem0(0x02, 0, 4), 125u << 25u,
+      EncodeMubuf0(0x1c), EncodeMubuf1(0, 0, 1),
+      EncodeSmem0(0x0a, 4, 4), 125u << 25u,
+      EncodeMubuf0(0x1c), EncodeMubuf1(0, 1, 1),
+      EncodeSopp(0x01),
+  };
+  const uint32_t image_sampler_shader[] = {
+      EncodeSop2(0x25, 12, 128 + 12, 128 + 44),
+      EncodeSop1(0x04, 14, 255), 0x09500000u,
+      EncodeMimg0(0xa0, 0xf), EncodeMimg1(2, 1, 3, 6),
+      EncodeMubuf0(0x1c), EncodeMubuf1(2, 1, 1),
+      EncodeSopp(0x01),
+  };
+  struct Expected {
+    std::span<const uint32_t> code;
+    ShaderType stage;
+    size_t buffers;
+    size_t images;
+    size_t samplers;
+    size_t srt_reads;
+  };
+  const std::array corpus{
+      Expected{scalar_data_shader, ShaderType::Pixel, 0, 0, 0, 1},
+      Expected{scalar_descriptor_shader, ShaderType::Compute, 2, 0, 0, 8},
+      Expected{image_sampler_shader, ShaderType::Pixel, 1, 1, 1, 0},
+  };
+  ShaderRecompiler::IR::SetSrtGpuChainOverride(false);
+  struct Restore {
+    ~Restore() { ShaderRecompiler::IR::SetSrtGpuChainOverride(std::nullopt); }
+  } restore;
+  for (size_t index = 0; index < corpus.size(); ++index) {
+    const auto &test = corpus[index];
+    auto options = MakeCompileOptions(test.stage);
+    std::array<uint32_t, 64> user_data{};
+    if (index == 0) {
+      user_data[8] = 0x1000u;
+    } else if (index == 2) {
+      const auto image_data = ImageTestUserData();
+      std::copy(image_data.begin(), image_data.end(), user_data.begin());
+    }
+    options.user_data = user_data;
+    const auto result = TranslateAndMaterializeSrtCorpusShader(test.code, options);
+    Check(result.buffers == test.buffers && result.images == test.images &&
+              result.samplers == test.samplers &&
+              result.srt_reads == test.srt_reads &&
+              result.snapshot.buffers.size() == test.buffers &&
+              result.snapshot.images.size() == test.images &&
+              result.snapshot.samplers.size() == test.samplers &&
+              result.specialization.buffers.size() == test.buffers &&
+              result.specialization.images.size() == test.images &&
+              result.specialization.samplers.size() == test.samplers &&
+              result.snapshot.flattened_srt.size() == test.srt_reads,
+          "disabled SRT GPU chain changed the recorded translated/materialized resource baseline");
+  }
+}
+
 void TestNewShaderRecompilerScalarMemoryBindingDomains() {
   const auto count_live_memory_ops =
       [](const ShaderRecompiler::IR::Program &program,
@@ -16460,6 +16559,7 @@ int main(int argc, char** argv) {
       KYTY_CFG_CASE(TestNewShaderRecompilerVop1SdwaNotDestination),
       KYTY_CFG_CASE(TestVop2SdwaMulI24Destination),
       KYTY_CFG_CASE(TestNewShaderRecompilerScalarMemoryBindingDomains),
+      KYTY_CFG_CASE(TestSrtGpuChainDisabledResourceBaseline),
       // Opcode semantics and optimized SPIR-V are exercised by
       // ShaderRecompilerComputeTests; keep the distinct decoder contract checks
       // here.

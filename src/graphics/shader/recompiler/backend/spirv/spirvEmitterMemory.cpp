@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/renderer/indirectLoadFast.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -4646,7 +4647,15 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 		value = LoadWideShared(ctx, inst, shared_components);
 	} else if (mem.kind == IR::ResourceKind::ScalarAddress) {
 		helper = "LoadBdaDword";
-		value = LoadBdaDword(ctx, GuestAddress(ctx, inst, mem));
+		if (IR::SrtGpuChainEnabled()) {
+			const auto guard = inst.Arg(inst.NumArgs() - 1).Resolve();
+			value = guard.IsImmediate() && guard.U1()
+			            ? LoadBdaDword(ctx, GuestAddress(ctx, inst, mem))
+			            : EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1),
+			                                         [&]() { return LoadBdaDword(ctx, GuestAddress(ctx, inst, mem)); });
+		} else {
+			value = LoadBdaDword(ctx, GuestAddress(ctx, inst, mem));
+		}
 	} else if (address_info.access == IR::AddressAccess::Read &&
 	           mem.kind != IR::ResourceKind::Scratch) {
 		helper = "LoadBda";

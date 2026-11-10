@@ -548,6 +548,10 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		}
 	}
 	uint32_t word = 0;
+	if (SrtGpuChainEnabled() && ProbeSrtGpuChain(address, sizeof(word))) {
+		result = 0u;
+		return true;
+	}
 	const SrtReadKindScope read_kind(SrtReadKind::EvaluateRawRead, false);
 	const auto reader = vector ? m_runtime.read_specialization_memory : m_runtime.read_memory;
 	if (reader != nullptr) {
@@ -946,12 +950,36 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	const auto refresh = [&](uint32_t slot) {
 		if (slot >= m_program.srt_reads.size()) return false;
 		const auto& read = m_program.srt_reads[slot];
+		if (!SrtGpuChainEnabled()) {
+			const auto* inst = read.value.ResolveInstruction();
+			const bool clean = inst != nullptr && inst->Flags<SrtReadFlags>().clean != 0u;
+			if (clean && (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr))
+				return false;
+			auto& evaluator = clean ? *m_clean_evaluator : *this;
+			const bool ok = read.flat_offset < flat.size() && evaluator.Evaluate(read.value, flat[read.flat_offset]);
+			if (!ok) {
+				const auto* inst = read.value.Resolve().TryInstruction();
+				std::fprintf(stderr, "SRT refresh failed slot=%u clean=%u pc=0x%x op=%s\n", slot, clean ? 1u : 0u,
+				             inst != nullptr ? inst->Flags<MemoryFlags>().pc : 0u,
+				             inst != nullptr ? ValueOpcodeName(inst->GetOpcode()).data() : "-");
+			}
+			return ok;
+		}
+		if (read.gpu_flag_slot) return read.flat_offset < flat.size();
+		const SrtGpuChainScope gpu_chain(m_program, slot);
 		const auto* inst = read.value.ResolveInstruction();
 		const bool clean = inst != nullptr && inst->Flags<SrtReadFlags>().clean != 0u;
 		if (clean && (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr))
 			return false;
 		auto& evaluator = clean ? *m_clean_evaluator : *this;
 		const bool ok = read.flat_offset < flat.size() && evaluator.Evaluate(read.value, flat[read.flat_offset]);
+		if (gpu_chain.Pending()) {
+			if (read.gpu_flag >= flat.size()) return false;
+			flat[read.flat_offset] = 0u;
+			flat[read.gpu_flag] = 1u;
+			return true;
+		}
+		if (ok && read.gpu_flag < flat.size()) flat[read.gpu_flag] = 0u;
 		if (!ok) {
 			const auto* inst = read.value.Resolve().TryInstruction();
 			std::fprintf(stderr, "SRT refresh failed slot=%u clean=%u pc=0x%x op=%s\n", slot, clean ? 1u : 0u,

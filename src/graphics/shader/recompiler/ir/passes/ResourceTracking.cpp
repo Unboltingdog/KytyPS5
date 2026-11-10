@@ -1521,6 +1521,10 @@ private:
 	}
 
 	void PlanScalarReads() {
+		if (SrtGpuChainEnabled()) {
+			PlanScalarReadsGpuChain();
+			return;
+		}
 		m_program.srt_plan_complete = false;
 		m_program.srt_reads.clear();
 		for (auto* block: m_program.blocks) {
@@ -1606,6 +1610,169 @@ private:
 			const auto resource = Value(&*block->PrependNewInst(where, ValueOpcode::GetSrtResource));
 			const auto flat = Value(&*block->PrependNewInst(where, ValueOpcode::ReadConst,
 			    {resource, Value(slot)}, read->Flags<uint64_t>()));
+			const auto uses = read->Uses();
+			for (const auto& use: uses) use.user->SetArg(use.operand, flat);
+			for (auto& entry: m_resolved_handles) {
+				for (uint32_t word = 0; word < entry.source.dword_count; ++word)
+					if (entry.source.dwords[word].Resolve() == Value(read))
+						entry.source.dwords[word] = flat;
+			}
+			for (auto* block: m_program.blocks) {
+				if (block->condition.Resolve() == Value(read)) block->condition = flat;
+				if (block->indirect_target.Resolve() == Value(read)) block->indirect_target = flat;
+			}
+			if (keep) {
+				if (resolved->planning_handle.IsEmpty()) {
+					bool unchanged = true;
+					for (uint32_t word = 0; word < resolved->source.dword_count; ++word)
+						unchanged &= handle->Arg(word).Resolve() == resolved->source.dwords[word].Resolve();
+					resolved->planning_handle = read->Arg(0);
+					if (!unchanged) {
+						auto& retained = m_program.value_storage.emplace_back(handle->GetOpcode());
+						for (uint32_t word = 0; word < resolved->source.dword_count; ++word)
+							retained.SetArg(word, resolved->source.dwords[word]);
+						resolved->planning_handle = Value(&retained);
+					}
+				}
+				read->SetArg(0, resolved->planning_handle);
+				read->SetParent(nullptr);
+				m_program.value_storage.splice(m_program.value_storage.end(), list, where);
+			} else {
+				list.erase(where);
+			}
+		}
+		m_program.srt_plan_complete = true;
+	}
+
+	void PlanScalarReadsGpuChain() {
+		m_program.srt_plan_complete = false;
+		m_program.srt_reads.clear();
+		for (auto* block: m_program.blocks) {
+			for (auto& inst: *block) {
+				const auto op = inst.GetOpcode();
+				const auto image = ImageOpcodeInfoOf(op);
+				if (BufferAccessOf(op) == BufferAccess::None &&
+				    AddressOpcodeInfoOf(op).access == AddressAccess::None &&
+				    image.access == ImageAccess::None) continue;
+				const auto flags = inst.Flags<MemoryFlags>();
+				if (flags.index >= m_program.memory_info.size())
+					Fail(flags.pc, "memory metadata index is out of range");
+				if (inst.NumArgs() < (image.needs_sampler ? 2u : 1u))
+					Fail(flags.pc, "memory operation has no resource handle");
+				const auto& memory = m_program.memory_info[flags.index];
+				if ((op == ValueOpcode::LoadAddressU32 && memory.kind == ResourceKind::ScalarBuffer) ||
+				    (op == ValueOpcode::ReadConstBuffer && memory.kind == ResourceKind::ScalarAddress))
+					Fail(flags.pc, "scalar read has incompatible scalar memory metadata");
+				for (uint32_t arg = 0; arg < (image.needs_sampler ? 2u : 1u); ++arg) {
+					const auto* handle = inst.Arg(arg).Resolve().TryInstruction();
+					if (handle == nullptr) continue;
+					const auto kind = handle->GetOpcode();
+					const bool sampler = kind == ValueOpcode::GetSamplerResource;
+					const uint32_t width = kind == ValueOpcode::GetImageResource ? 8u
+					                     : kind == ValueOpcode::GetAddressResource ? 2u
+					                     : kind == ValueOpcode::GetBufferResource || sampler ? 4u : 0u;
+					if (width == 0u) continue;
+					const auto base = width == 2u
+					    ? (memory.kind == ResourceKind::ScalarAddress ? ScalarReadBase(inst) : UINT32_MAX)
+					    : (sampler ? memory.sampler : memory.resource) * 4u;
+					DescriptorSource source;
+					MakeSource(*handle, width, sampler,
+					           sampler && (memory.image_sample_flags & Decoder::ImageSampleFlagAdjust) != 0,
+					           base, source, flags.pc);
+					for (uint32_t word = 0; word < width; ++word)
+						CollectScalarRead(source.dwords[word], flags.pc);
+				}
+			}
+		}
+		const size_t descriptor_reads = m_scalar_reads.size();
+		for (auto* block: m_program.blocks) {
+			for (auto& inst: *block) {
+				uint32_t index = 0;
+				if (inst.GetOpcode() == ValueOpcode::LoadAddressU32 &&
+				    ScalarReadMemory(inst, index) != nullptr && inst.Arg(1).Resolve().IsImmediate() &&
+				    ValidateRuntimeValue(m_program, Value(&inst)))
+					CollectScalarRead(Value(&inst), inst.Flags<MemoryFlags>().pc);
+			}
+		}
+		for (size_t read_index = 0; read_index < m_scalar_reads.size(); ++read_index) {
+			auto* read = m_scalar_reads[read_index];
+			const auto flags = read->Flags<MemoryFlags>();
+			auto& memory = m_program.memory_info[flags.index];
+			const auto* handle = read->Arg(0).Resolve().TryInstruction();
+			auto resolved = std::ranges::find_if(m_resolved_handles, [&](const auto& entry) {
+				return entry.handle == handle && entry.pc == flags.pc;
+			});
+			EXIT_IF(resolved == m_resolved_handles.end());
+			uint32_t bad_dword = 0;
+			if (!ValidateSource(resolved->source, bad_dword)) continue;
+			if (!ValidateRuntimeValue(m_program, Value(read)) && !UsesOnlyDescriptorHandles(*read)) continue;
+			uint32_t slot = 0;
+			for (; slot < m_program.srt_reads.size(); ++slot) {
+				const auto* other = m_program.srt_reads[slot].value.Resolve().TryInstruction();
+				if (other == nullptr) continue;
+				if (other->GetOpcode() != read->GetOpcode() ||
+				    m_program.memory_info[other->Flags<MemoryFlags>().index] != memory) continue;
+				const auto* other_handle = other->Arg(0).Resolve().TryInstruction();
+				bool same = true;
+				for (uint32_t word = 0; word < resolved->source.dword_count; ++word)
+					same &= EquivalentValue(m_program, resolved->source.dwords[word], other_handle->Arg(word));
+				for (size_t arg = 1; arg < read->NumArgs(); ++arg)
+					same &= EquivalentValue(m_program, read->Arg(arg), other->Arg(arg));
+				if (same) break;
+			}
+			const bool keep = slot == m_program.srt_reads.size();
+			if (keep) m_program.srt_reads.push_back({Value(read), slot});
+			const bool hybrid = read_index >= descriptor_reads && read->GetOpcode() == ValueOpcode::LoadAddressU32 &&
+			                    (keep || m_program.srt_reads[slot].gpu_flag != UINT32_MAX);
+			memory.planning_only = !hybrid;
+			auto* block = read->Parent();
+			auto& list = block->Instructions();
+			const auto where = std::ranges::find_if(list, [&](const Inst& inst) {
+				return &inst == read;
+			});
+			const auto resource = Value(&*block->PrependNewInst(where, ValueOpcode::GetSrtResource));
+			const auto flat = Value(&*block->PrependNewInst(where, ValueOpcode::ReadConst,
+			    {resource, Value(slot)}, read->Flags<uint64_t>()));
+			if (hybrid) {
+				if (keep) {
+					const auto flag = static_cast<uint32_t>(m_program.srt_reads.size());
+					m_program.srt_reads[slot].gpu_flag = flag;
+					m_program.srt_reads.push_back({.value = Value(0u), .flat_offset = flag, .gpu_flag_slot = true});
+					if (resolved->planning_handle.IsEmpty()) {
+						bool unchanged = true;
+						for (uint32_t word = 0; word < resolved->source.dword_count; ++word)
+							unchanged &= handle->Arg(word).Resolve() == resolved->source.dwords[word].Resolve();
+						resolved->planning_handle = read->Arg(0);
+						if (!unchanged) {
+							auto& retained = m_program.value_storage.emplace_back(handle->GetOpcode());
+							for (uint32_t word = 0; word < resolved->source.dword_count; ++word)
+								retained.SetArg(word, resolved->source.dwords[word]);
+							resolved->planning_handle = Value(&retained);
+						}
+					}
+					auto& planning = m_program.value_storage.emplace_back(read->GetOpcode(), read->Flags<uint64_t>());
+					for (size_t arg = 0; arg < read->NumArgs(); ++arg) planning.SetArg(arg, read->Arg(arg));
+					planning.SetArg(0, resolved->planning_handle);
+					m_program.srt_reads[slot].value = Value(&planning);
+				}
+				const auto gpu_flag = m_program.srt_reads[slot].gpu_flag;
+				const auto uses = read->Uses();
+				const auto flag_value = Value(&*block->PrependNewInst(where, ValueOpcode::ReadConst,
+				    {resource, Value(gpu_flag)}, read->Flags<uint64_t>()));
+				const auto use_gpu = Value(&*block->PrependNewInst(where, ValueOpcode::INotEqual32,
+				    {flag_value, Value(0u)}));
+				read->SetArg(read->NumArgs() - 1,
+				             Value(&*block->PrependNewInst(where, ValueOpcode::LogicalAnd,
+				                                  {read->Arg(read->NumArgs() - 1), use_gpu})));
+				const auto selected = Value(&*block->PrependNewInst(std::next(where), ValueOpcode::SelectU32,
+				    {use_gpu, Value(read), flat}));
+				for (const auto& use: uses) use.user->SetArg(use.operand, selected);
+				for (auto* other: m_program.blocks) {
+					if (other->condition.Resolve() == Value(read)) other->condition = selected;
+					if (other->indirect_target.Resolve() == Value(read)) other->indirect_target = selected;
+				}
+				continue;
+			}
 			const auto uses = read->Uses();
 			for (const auto& use: uses) use.user->SetArg(use.operand, flat);
 			for (auto& entry: m_resolved_handles) {

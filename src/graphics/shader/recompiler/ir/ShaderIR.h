@@ -1013,6 +1013,9 @@ struct DescriptorSource {
 struct SrtRead {
 	Value    value;
 	uint32_t flat_offset = 0;
+	// KYTY_FIX_SRT_GPU_CHAIN: the flat slot that selects this read's retained GPU load.
+	uint32_t gpu_flag = UINT32_MAX;
+	bool     gpu_flag_slot = false;
 
 	bool operator==(const SrtRead& other) const = default;
 };
