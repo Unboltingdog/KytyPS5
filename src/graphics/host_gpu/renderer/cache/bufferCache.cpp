@@ -914,12 +914,15 @@ namespace {
 // thread for ~16 MB/5 s of bytes the game needs.
 constexpr uint64_t ReadWindowBytes = uint64_t {4096} << 10u;
 // SRT pointer chasing reads a few dwords of a table, not the Snake-fight cutscene's thousands of consecutive pages.
-// KYTY_FIX_SRT_NARROW_READS=0 restores the 4 MiB half-window for those reads; other reasons keep it in either mode.
+// Opt-in (KYTY_FIX_SRT_NARROW_READS=1): measured on Ghost of Yotei (d8c7245, FRAME_GAPS_READBACK) the srt_walker
+// downloads are ~100% GPU wait (wait 10.16 ms vs copy 0.008 ms per frame), so the window size does not matter, and with
+// the narrow window on, the run crashed compiling 0x802186d000 (Value::Resolve EXIT in DefineIndirectFormattedLoads,
+// batch 40) while the same run with it off did not.
 constexpr uint64_t SrtReadWindowBytes = uint64_t {64} << 10u;
 bool SrtNarrowReadsEnabled() {
 	static const bool on = [] {
 		const char* value = std::getenv("KYTY_FIX_SRT_NARROW_READS");
-		return value == nullptr || value[0] != '0';
+		return value != nullptr && value[0] == '1';
 	}();
 	return on;
 }
