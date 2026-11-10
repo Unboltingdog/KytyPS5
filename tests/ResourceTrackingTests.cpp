@@ -4406,6 +4406,30 @@ void TestResourceLimitIsTransactional() {
         "resource-limit failure partially mutated typed resource state");
 }
 
+void TestResourceTrackingFailureMetadata() {
+  Fixture fixture(ShaderType::Pixel);
+  fixture.program.shader_hash = 0x123456789abcdef0ull;
+  const auto address = fixture.Address(Value(0u), Value(0u), 0x34);
+  MemoryInfo memory;
+  memory.kind = ResourceKind::Buffer;
+  fixture.Emit(ValueOpcode::StoreAddressU32,
+               {address, Value(0u), Value(0u), Value(1u), Value(true)},
+               fixture.AddMemory(memory, 0x34));
+
+  bool caught = false;
+  try {
+    fixture.PlanAndTrack();
+  } catch (const ResourceTrackingError &error) {
+    caught = true;
+    Check(error.pc == 0x34 &&
+              error.reason == "address operation has invalid resource kind" &&
+              std::string_view(error.what()).find("hash=0x123456789abcdef0 stage=pixel pc=0x00000034") !=
+                  std::string_view::npos,
+          "resource tracking failure lost the draw-skip diagnostic metadata");
+  }
+  Check(caught, "resource tracking failure did not reach the translation safety net");
+}
+
 void TestMalformedMemoryKindsRejected() {
   {
     Fixture fixture;
@@ -4506,6 +4530,7 @@ int main() {
     Run("image binding ABI", TestImageBindingAbi);
     Run("live shader data collection", TestLiveShaderDataCollection);
     Run("resource limit", TestResourceLimitIsTransactional);
+    Run("tracking failure metadata", TestResourceTrackingFailureMetadata);
     Run("malformed memory kinds", TestMalformedMemoryKindsRejected);
   } catch (const std::exception &exception) {
     std::cerr << "resource tracking test failed: " << exception.what() << '\n';
