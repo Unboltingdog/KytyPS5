@@ -1126,6 +1126,105 @@ void TestRecordKeyedRanges() {
   Check(materialize(16u, 10u, Format), "record-keyed materialization did not recover after refusals");
 }
 
+void TestSrtGpuRange() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.shader_hash = 0x34e090c623ad611cull;
+  program.srt_plan_complete = true;
+  program.resource_tracking_complete = true;
+  auto &block = AddValueBlock(program);
+  const auto user_data_value = [&](uint32_t index) {
+    return Value(&block.AppendNewInst(ValueOpcode::GetUserData, {Value(static_cast<ScalarReg>(index))}));
+  };
+  DescriptorSource table;
+  table.dword_count = 2;
+  table.dwords[0] = user_data_value(0);
+  table.dwords[1] = user_data_value(1);
+  program.descriptor_sources.push_back(table);
+  DescriptorSource record;
+  record.dword_count = 4;
+  record.dwords.fill(Value(0u));
+  auto &indirect = record.indirect_descriptor.emplace();
+  indirect.table_source = 0;
+  indirect.table_immediate = 48;
+  indirect.table_stride = 16;
+  indirect.record_keyed = true;
+  indirect.count_pointer = 0x238;
+  indirect.count_field = 0x30;
+  indirect.count_check = 0x28;
+  indirect.count_limit = 32;
+  indirect.parent_offset = 0x20;
+  program.descriptor_sources.push_back(record);
+  program.info.indirect_ranges.push_back(
+      {.source = 1, .access_begin = 0, .access_end = 4, .indexed = true, .written = true});
+  auto plan = ExtractResourcePlan(program);
+
+  constexpr uint64_t table_address = 0x2000;
+  constexpr uint64_t count_block = 0x1000;
+  constexpr uint32_t Format = 5u << 12u;
+  struct Memory {
+    std::array<uint32_t, 0x4000u / 4u> words{};
+    std::vector<std::pair<uint64_t, uint32_t>> reads;
+  } memory;
+  const auto put = [&](uint64_t address, std::span<const uint32_t> words) {
+    std::copy(words.begin(), words.end(), memory.words.begin() + address / 4u);
+  };
+  put(table_address + indirect.count_pointer,
+      std::array<uint32_t, 2>{static_cast<uint32_t>(count_block), 0u});
+  std::array<uint32_t, 4> parent{0x40000u, 16u << 16u, 4u, Format};
+  put(count_block + indirect.parent_offset, parent);
+  put(count_block + indirect.count_field, std::array<uint32_t, 1>{4u});
+  for (uint32_t key = 0; key < 4u; ++key) {
+    put(table_address + indirect.table_immediate + key * indirect.table_stride,
+        std::array<uint32_t, 4>{0x50000u + key * 0x1000u, 1u << 16u, 1u, Format});
+  }
+  std::array<uint32_t, 2> user_data{static_cast<uint32_t>(table_address), 0u};
+  const SrtRuntime runtime{
+      .user_data = user_data,
+      .userdata = &memory,
+      .read_specialization_memory = +[](void *data, uint64_t address, std::span<uint32_t> words) {
+        auto &memory = *static_cast<Memory *>(data);
+        if ((address & 3u) != 0u || address + words.size_bytes() > sizeof(memory.words)) return false;
+        std::copy_n(memory.words.begin() + address / 4u, words.size(), words.begin());
+        memory.reads.emplace_back(address, static_cast<uint32_t>(words.size_bytes()));
+        return true;
+      }};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  const auto captured = [&](uint64_t address, uint32_t size) {
+    return std::ranges::find(memory.reads, std::pair<uint64_t, uint32_t>{address, size}) != memory.reads.end();
+  };
+  using Ranges = std::vector<IndirectRange>;
+  const Ranges exact{{0x50000u, 4u, true}, {0x51000u, 4u, true},
+                     {0x52000u, 4u, true}, {0x53000u, 4u, true}};
+
+  SetSrtGpuRangeOverride(false);
+  memory.reads.clear();
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.indirect_ranges_complete && snapshot.indirect_writes_complete &&
+            snapshot.indirect_ranges == exact && captured(count_block + indirect.count_field, 4u),
+        "disabled SRT GPU range fallback did not retain the exact game-count listing");
+
+  SetSrtGpuRangeOverride(true);
+  memory.reads.clear();
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.indirect_ranges_complete && snapshot.indirect_writes_complete &&
+            snapshot.indirect_ranges == Ranges{{0x40000u, 52u, true}} &&
+            captured(count_block + indirect.parent_offset, 16u) &&
+            !captured(count_block + indirect.count_field, 4u),
+        "SRT GPU range fallback did not bind the bounded parent without reading the filled count");
+
+  parent[3] |= 2u << 28u;
+  put(count_block + indirect.parent_offset, parent);
+  memory.reads.clear();
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.indirect_ranges_complete && snapshot.indirect_writes_complete &&
+            snapshot.indirect_ranges == exact && captured(count_block + indirect.count_field, 4u),
+        "an unbounded parent did not retain the exact record-keyed listing");
+  SetSrtGpuRangeOverride(std::nullopt);
+}
+
 } // namespace
 
 namespace Common {
@@ -1167,6 +1266,7 @@ int main() {
   TestIndirectTableSlotsSelectSame();
   TestMixedSamplerVariantsShareRuntimeDescriptor();
   TestRecordKeyedRanges();
+  TestSrtGpuRange();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

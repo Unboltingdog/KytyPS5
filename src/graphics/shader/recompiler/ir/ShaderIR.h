@@ -984,10 +984,13 @@ struct DescriptorSource {
 		// record_keyed (game counts): the record count is the dword at count_field of the block a 64-bit
 		// pointer at table + count_pointer points to (game data the shader does not read), at most count_limit; the
 		// dword at count_check of the same block must hold the same count (a block the game reused meanwhile does not).
+		// parent_offset, when known, is the V# whose records are the table's candidates; KYTY_FIX_SRT_GPU_RANGE can
+		// bind that parent's accessible region without reading count_field.
 		uint32_t count_pointer   = UINT32_MAX;
 		uint32_t count_field     = 0;
 		uint32_t count_check     = 0;
 		uint32_t count_limit     = 0;
+		uint32_t parent_offset   = UINT32_MAX;
 		// record_keyed (composed V#s): `sources` holds the V# the shader composes from uniform values (not
 		// a path proof's reads); counted per materialization.
 		bool     composed        = false;

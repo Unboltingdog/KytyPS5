@@ -3910,11 +3910,14 @@ int BufferCache::TryBarDownload(Buffer& buffer, uint64_t vaddr, uint64_t size, G
 		}
 	}
 	// Every command buffer ends with a device-to-host memory barrier (CommandScheduler::Submit), so
-	// the writes are visible to the host once their command buffer finished.
+	// the writes are visible to the host once their command buffer finished. Avoid the wait calls entirely when
+	// the cached semaphore value and the priority queue already prove completion; Wait remains the refreshing path.
 	const auto wait_start = timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	SyncTimeline::SiteScope timeline_site(SyncTimeline::Site::Bar); // KYTY_TRACE_SYNC_TIMELINE
-	m_scheduler.Wait(newest);
-	m_scheduler.WaitPriorityOperations(newest);
+	if (!m_scheduler.IsFree(newest) || !m_scheduler.PriorityOperationsDone(newest)) {
+		m_scheduler.Wait(newest);
+		m_scheduler.WaitPriorityOperations(newest);
+	}
 	if (timing != nullptr) timing->wait_ns += DownloadElapsedNs(wait_start);
 	KYTY_PROFILER_BLOCK("Download::BarCopy");
 	if (!buffer.IsCoherent()) buffer.Invalidate(0, buffer.Size());

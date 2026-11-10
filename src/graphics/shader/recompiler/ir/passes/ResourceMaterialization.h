@@ -82,6 +82,12 @@ std::vector<ResourceBlock> ResourceControlFlowOf(const Program& program, const s
 bool IndirectTableSlots();
 void SetIndirectTableSlotsOverride(std::optional<bool> enabled);
 
+// KYTY_FIX_SRT_GPU_RANGE=1 (default off): a known game-count record-keyed buffer binds its bounded parent V#'s
+// accessible region instead of reading the filled count and listing each candidate. Unbounded or unreadable parents
+// retain the exact listing. The override is for the focused host tests; nullopt restores the environment switch.
+bool SrtGpuRangeEnabled();
+void SetSrtGpuRangeOverride(std::optional<bool> enabled);
+
 using OrdinaryReadHook = bool (*)(uint64_t vaddr, void* data, uint64_t size);
 void SetOrdinaryReadHook(OrdinaryReadHook hook);
 // An ordinary SRT-walk read of guest memory: through the hook when one is set, else a direct read.

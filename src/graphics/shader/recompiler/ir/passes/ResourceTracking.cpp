@@ -1667,7 +1667,8 @@ private:
 				    a.table_stride != b.table_stride || a.record_keyed != b.record_keyed ||
 				    a.unsigned_bound != b.unsigned_bound || a.all_records != b.all_records || a.widened != b.widened ||
 				    a.count_pointer != b.count_pointer || a.count_field != b.count_field || a.count_check != b.count_check ||
-				    a.count_limit != b.count_limit || a.composed != b.composed || a.pointer_offset != b.pointer_offset ||
+				    a.count_limit != b.count_limit || a.parent_offset != b.parent_offset || a.composed != b.composed ||
+				    a.pointer_offset != b.pointer_offset ||
 				    a.key_count.IsEmpty() != b.key_count.IsEmpty() ||
 				    a.workgroup_axis != b.workgroup_axis || a.sources != b.sources ||
 				    !EquivalentValue(m_program, a.key_count, b.key_count) ||
@@ -2459,10 +2460,10 @@ private:
 	struct GameRecordCount {
 		uint64_t shader_hash;
 		uint64_t field;
-		uint32_t stride, pointer, count_field, count_check, limit;
+		uint32_t stride, pointer, count_field, count_check, limit, parent_offset;
 	};
 	static constexpr GameRecordCount GameRecordCounts[] = {
-	    {0x34e090c623ad611cull, 48u, 16u, 0x238u, 0x30u, 0x28u, 32u}};
+	    {0x34e090c623ad611cull, 48u, 16u, 0x238u, 0x30u, 0x28u, 32u, 0x20u}};
 
 	bool MatchGameRecordCount(uint64_t field, uint32_t stride, DescriptorSource::IndirectDescriptor& indirect) const {
 		for (const auto& count: GameRecordCounts) {
@@ -2471,6 +2472,7 @@ private:
 			indirect.count_field   = count.count_field;
 			indirect.count_check   = count.count_check;
 			indirect.count_limit   = count.limit;
+			indirect.parent_offset = count.parent_offset;
 			return true;
 		}
 		return false;

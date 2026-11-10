@@ -38,6 +38,7 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 
 namespace {
 std::atomic_int g_indirect_table_slots_override {-1};
+std::atomic_int g_srt_gpu_range_override {-1};
 } // namespace
 
 bool IndirectTableSlots() {
@@ -46,6 +47,20 @@ bool IndirectTableSlots() {
 
 void SetIndirectTableSlotsOverride(std::optional<bool> enabled) {
 	g_indirect_table_slots_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
+}
+
+bool SrtGpuRangeEnabled() {
+	const int override = g_srt_gpu_range_override.load(std::memory_order_relaxed);
+	if (override >= 0) return override != 0;
+	static const bool enabled = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_FIX_SRT_GPU_RANGE");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
+void SetSrtGpuRangeOverride(std::optional<bool> enabled) {
+	g_srt_gpu_range_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
 }
 
 namespace {
@@ -1209,8 +1224,35 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 		     !clean.Evaluate(range.source, SrtIndirectValue::KeyCount, indirect.key_count, count)))
 			return IndirectFailAt(__LINE__);
 		if (game_count) {
-			// count = mem32[mem64[table + count_pointer] + count_field] (strict reads, like the records).
 			const auto table_address = ((uint64_t {table_value.dwords[1]} << 32u) | table_value.dwords[0]) & AddressMask;
+			if (SrtGpuRangeEnabled() && indirect.parent_offset != UINT32_MAX) {
+				std::array<uint32_t, 2> pointer {};
+				DescriptorValue         parent {.dword_count = 4u};
+				const bool read = ReadScalarTable(table_address, UINT64_MAX, indirect.count_pointer, runtime, pointer);
+				const auto block = ((uint64_t {pointer[1]} << 32u) | pointer[0]) & AddressMask;
+				uint64_t address = 0, size = 0;
+				if (read && block != 0u &&
+				    ReadScalarTable(block, UINT64_MAX, indirect.parent_offset, runtime,
+				                    std::span(parent.dwords).first(4u)) &&
+				    IndirectRecordRange(range, parent, address, size) == nullptr && size != 0u) {
+					ranges.push_back({.address = address, .size = size, .written = range.written});
+					if (t_ahead.log == nullptr) {
+						static std::mutex                              mutex;
+						static std::set<std::pair<uint64_t, uint32_t>> seen;
+						std::lock_guard                                lock(mutex);
+						if (seen.emplace(program.shader_hash, range.source).second) {
+							std::fprintf(stderr,
+							             "SRT_GPU_RANGE hash=0x%016llx source=%u range=0x%llx-0x%llx "
+							             "written=%d why=bounded_parent_game_count\n",
+							             static_cast<unsigned long long>(program.shader_hash), range.source,
+							             static_cast<unsigned long long>(address),
+							             static_cast<unsigned long long>(address + size), range.written ? 1 : 0);
+						}
+					}
+					continue;
+				}
+			}
+			// count = mem32[mem64[table + count_pointer] + count_field] (strict reads, like the records).
 			std::array<uint32_t, 2> pointer {};
 			uint32_t                filled = UINT32_MAX, check = UINT32_MAX - 1u;
 			const bool read  = ReadScalarTable(table_address, UINT64_MAX, indirect.count_pointer, runtime, pointer);
