@@ -2478,7 +2478,11 @@ void RenderExecutor::CommitPreparedDraw(DrawPlan& plan) {
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
 	}
 	if (draw_label) GpuTimer::LabelEnd(draw_cmd);
-	if (!skip_draw) m_context.GetBufferCache().NoteCommandEmitted();
+	if (!skip_draw) {
+		m_context.GetBufferCache().NoteCommandEmitted(
+		    'd', vertex_stages.empty() ? 0ull : vertex_stages[0].stage.program->shader_hash,
+		    state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0ull);
+	}
 	if (gpu_time != ~0u) {
 		const auto& vs_program = vertex_stages.empty() ? *state.ps_input_info.stage.program : *vertex_stages[0].stage.program;
 		const auto& ps_program = state.ps_active ? *state.ps_input_info.stage.program : vs_program;

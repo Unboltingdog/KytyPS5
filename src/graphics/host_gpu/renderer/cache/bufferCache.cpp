@@ -1163,7 +1163,10 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				return;
 			}
 			auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
-			if (reason == PerfReason::SrtWalker) ShaderRecompiler::IR::NoteSrtReadRange(vaddr, size);
+			if (reason == PerfReason::SrtWalker) {
+				ShaderRecompiler::IR::NoteSrtReadRange(vaddr, size);
+				NoteSrtReadProducer(vaddr, size);
+			}
 
 			// A CPU access of a GPU-modified page downloads every GPU-modified range of the same buffer within +-4 MiB
 			// (+-64 KiB for SRT reads by default) in one synchronization, so neighbouring accesses do not each wait again.
@@ -3026,6 +3029,7 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	auto [dst, dst_offset] = ObtainBuffer(vaddr, size, true, true);
 	dst->Fill(dst_offset, size, value);
 	if (UploadClobberCheck()) C0Note(vaddr, size, C0Event::Fill, value); // D4 step K0
+	if (GpuTimer::FrameGapsEnabled()) NoteCommandEmitted('f', value);
 }
 
 void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,
@@ -3060,6 +3064,7 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 	                                    : std::pair {&m_gds_buffer, dst_vaddr};
 	dst->CopyFrom(command, *src, src_offset, dst_offset, size);
 	if (UploadClobberCheck() && dst_memory) C0Note(dst_vaddr, size, C0Event::Copy, src_vaddr); // D4 step K0
+	if (dst_memory && GpuTimer::FrameGapsEnabled()) NoteCommandEmitted('b', src_vaddr);
 }
 
 bool BufferCache::IsRegionRegistered(uint64_t vaddr, uint64_t size) {
@@ -3312,39 +3317,48 @@ void ReportObtainExact(uint64_t count) {
 // Only DropDeadRingBytes reads the per-range write ticks by default, and it asks only
 // about GPU-dirty bytes of pages inside the data ring 0x2002600000-0x2010000000. QueryTicks looks only at entries
 // overlapping the queried range, so ranges that do not touch the ring never change its answers; they are left out while
-// no other reader of the ticks is on (sync timeline, SRT exact reads).
-void BufferCache::NoteWriteTick(uint64_t start, uint64_t end, uint64_t tick) {
-	if (!SyncTimeline::Enabled() && (end <= 0x2002600000ull || start >= 0x2010000000ull)) return;
-	InsertTickRangeJoined(m_write_ticks, start, end, tick);
+// no other reader of the ticks is on (sync timeline, frame-gap producer logs).
+void BufferCache::NoteWriteTick(uint64_t start, uint64_t end, uint64_t tick, char kind, uint64_t key_a,
+                                uint64_t key_b, uint64_t guest) {
+	if (!SyncTimeline::Enabled() && !GpuTimer::FrameGapsEnabled() &&
+	    (end <= 0x2002600000ull || start >= 0x2010000000ull))
+		return;
+	InsertTickRangeJoined(m_write_ticks, start, end, tick, kind, key_a, key_b, guest);
 }
 
-void BufferCache::InsertTickRangeJoined(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick) {
+void BufferCache::InsertTickRangeJoined(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end,
+                                        uint64_t tick, char kind, uint64_t key_a, uint64_t key_b, uint64_t guest) {
 	if (start >= end) return;
+	const auto same = [&](const WriteTick& write) {
+		return write.tick == tick && write.kind == kind && write.key_a == key_a && write.key_b == key_b &&
+		       write.guest == guest;
+	};
 	// An entry already holding [start, end) at this tick: the insert would leave the same answers.
 	auto at = ticks.upper_bound(start);
 	if (at != ticks.begin()) {
 		const auto holder = std::prev(at);
-		if (holder->second.end >= end && holder->second.tick == tick) return;
+		if (holder->second.end >= end && same(holder->second)) return;
 	}
-	InsertTickRange(ticks, start, end, tick);
+	InsertTickRange(ticks, start, end, tick, kind, key_a, key_b, guest);
 	auto self = ticks.find(start);
 	if (self != ticks.begin()) {
 		const auto left = std::prev(self);
-		if (left->second.end == start && left->second.tick == tick) {
+		if (left->second.end == start && same(left->second)) {
 			left->second.end = self->second.end;
 			ticks.erase(self);
 			self = left;
 		}
 	}
 	const auto right = std::next(self);
-	if (right != ticks.end() && right->first == self->second.end && right->second.tick == tick) {
+	if (right != ticks.end() && right->first == self->second.end && same(right->second)) {
 		self->second.end = right->second.end;
 		ticks.erase(right);
 	}
 }
 
 // [start, end) gets `tick`; the parts of older ranges outside it keep theirs.
-void BufferCache::InsertTickRange(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick) {
+void BufferCache::InsertTickRange(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick,
+                                  char kind, uint64_t key_a, uint64_t key_b, uint64_t guest) {
 	auto& m_write_ticks = ticks;
 	if (start >= end) return;
 	auto it = m_write_ticks.lower_bound(start);
@@ -3366,7 +3380,7 @@ void BufferCache::InsertTickRange(std::map<uint64_t, WriteTick>& ticks, uint64_t
 		}
 		it = m_write_ticks.erase(it);
 	}
-	m_write_ticks[start] = {end, tick};
+	m_write_ticks[start] = {end, tick, kind, key_a, key_b, guest};
 }
 
 uint64_t BufferCache::QueryTicks(const std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end) {
@@ -3384,6 +3398,36 @@ uint64_t BufferCache::QueryTicks(const std::map<uint64_t, WriteTick>& ticks, uin
 
 uint64_t BufferCache::QueryWriteTick(uint64_t start, uint64_t end) const {
 	return QueryTicks(m_write_ticks, start, end);
+}
+
+void BufferCache::NoteSrtReadProducer(uint64_t vaddr, uint64_t size) const {
+	if (!GpuTimer::FrameGapsEnabled()) return;
+	const auto end = vaddr + size;
+	auto       it  = m_write_ticks.upper_bound(vaddr);
+	if (it != m_write_ticks.begin() && std::prev(it)->second.end > vaddr) --it;
+	WriteTick producer {end, 0};
+	bool      found = false;
+	for (; it != m_write_ticks.end() && it->first < end; ++it) {
+		if (it->second.end <= vaddr) continue;
+		if (!found || it->second.tick >= producer.tick) {
+			producer = it->second;
+			found    = true;
+		}
+	}
+	static std::atomic_uint lines {0};
+	if (lines.fetch_add(1, std::memory_order_relaxed) >= 512u) return;
+	const auto current = m_scheduler.CurrentTick();
+	std::fprintf(stderr,
+	             "FRAME_GAPS_SRT_PRODUCER range=0x%llx-0x%llx bytes=%llu producer_tick=%llu current_tick=%llu "
+	             "submits_ago=%llu same_cb=%d kind=%c key_a=0x%016llx key_b=0x%016llx guest=0x%016llx\n",
+	             static_cast<unsigned long long>(vaddr), static_cast<unsigned long long>(end),
+	             static_cast<unsigned long long>(size), static_cast<unsigned long long>(found ? producer.tick : 0),
+	             static_cast<unsigned long long>(current),
+	             static_cast<unsigned long long>(found && current >= producer.tick ? current - producer.tick : 0),
+	             found && producer.tick == current ? 1 : 0, found && producer.kind != 0 ? producer.kind : '?',
+	             static_cast<unsigned long long>(found ? producer.key_a : 0),
+	             static_cast<unsigned long long>(found ? producer.key_b : 0),
+	             static_cast<unsigned long long>(found ? producer.guest : 0));
 }
 
 // Write ticks are kept per 64 KiB granule (WriteTickKey): a granule's tick is the newest write to
@@ -3415,14 +3459,14 @@ std::optional<uint64_t> BufferCache::GranuleWriteTick(uint64_t key) const {
 	return std::nullopt;
 }
 
-void BufferCache::NoteCommandEmitted() {
+void BufferCache::NoteCommandEmitted(char kind, uint64_t key_a, uint64_t key_b, uint64_t guest) {
 	// A buffer obtained for writing can be recorded into a later command buffer than the one open
 	// when it was obtained (a flush in between); the recording command buffer's tick is final.
 	for (const auto& [vaddr, size]: m_bar_pending_writes) {
 		NoteGpuWriteTick(vaddr, size);
 		// KYTY_TRACE_SYNC_TIMELINE: the final tick for its per-range write ticks too.
-		if (SyncTimeline::Enabled()) {
-			NoteWriteTick(vaddr, vaddr + size, m_scheduler.CurrentTick());
+		if (SyncTimeline::Enabled() || GpuTimer::FrameGapsEnabled()) {
+			NoteWriteTick(vaddr, vaddr + size, m_scheduler.CurrentTick(), kind, key_a, key_b, guest);
 		}
 	}
 	m_bar_pending_writes.clear();

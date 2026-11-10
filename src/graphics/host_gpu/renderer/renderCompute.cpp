@@ -800,7 +800,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 	{
 		const DispatchSubTimer emitted_timer(DispatchSub::TailEmitted); // KYTY_TRACE_DISPATCH_CENSUS
-		m_context.GetBufferCache().NoteCommandEmitted();
+		m_context.GetBufferCache().NoteCommandEmitted('c', program.shader_hash, 0, program.diagnostic_guest_address);
 	}
 	GpuCheckpoints::Mark(vk_buffer, ~program.shader_hash);
 	if (twin_open) TwinDispatch::End(m_context, vk_buffer, program.shader_hash); // KYTY_DIAG_TWIN_DISPATCH: A's copy
@@ -957,7 +957,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		GpuTimer::EndCommand(vk_buffer, gpu_time, 'c', program.shader_hash, 1,
 		                     {program.diagnostic_guest_address, program.diagnostic_spirv_hash});
 	}
-	m_context.GetBufferCache().NoteCommandEmitted();
+	m_context.GetBufferCache().NoteCommandEmitted('c', program.shader_hash, 1, program.diagnostic_guest_address);
 	GpuCheckpoints::Mark(vk_buffer, ~input_info.stage.program->shader_hash);
 	if (twin_open) TwinDispatch::End(m_context, vk_buffer, program.shader_hash); // KYTY_DIAG_TWIN_DISPATCH: A's copy
 	if (ComputeTrace::GuestWatchOn()) ComputeTrace::GuestWatch::Poll(m_context, program.shader_hash);

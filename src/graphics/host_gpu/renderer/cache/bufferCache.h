@@ -155,7 +155,7 @@ public:
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
 	// BAR reads: a draw or dispatch was recorded into the current command buffer; the
 	// writable buffers obtained for it get that command buffer's tick as their write tick.
-	void NoteCommandEmitted();
+	void NoteCommandEmitted(char kind = 0, uint64_t key_a = 0, uint64_t key_b = 0, uint64_t guest = 0);
 	// Upstream 4644c5292: zeroes the BDA page table and the fault buffer once, in the render scheduler's first command
 	// buffer (CommandScheduler::Begin), before the first buffer registration writes into the table.
 	void               ClearDeviceTablesOnce();
@@ -759,16 +759,25 @@ private:
 	// Write ticks are tracked per 64 KiB granule; buffers by creation tick.
 	void NoteGpuWriteTick(uint64_t vaddr, uint64_t size);
 	// The submission tick of the newest GPU write of each byte range (interval map).
-	void                   NoteWriteTick(uint64_t start, uint64_t end, uint64_t tick);
+	void NoteWriteTick(uint64_t start, uint64_t end, uint64_t tick, char kind = 0, uint64_t key_a = 0,
+	                   uint64_t key_b = 0, uint64_t guest = 0);
 	[[nodiscard]] uint64_t QueryWriteTick(uint64_t start, uint64_t end) const; // 0: part of it unknown
+	void                   NoteSrtReadProducer(uint64_t vaddr, uint64_t size) const;
 	struct WriteTick {
 		uint64_t end;
 		uint64_t tick;
+		char     kind  = 0;
+		uint64_t key_a = 0;
+		uint64_t key_b = 0;
+		uint64_t guest = 0;
 	};
 	std::map<uint64_t, WriteTick> m_write_ticks;
-	static void InsertTickRange(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick);
-	// The same answers with fewer entries (an insert already held is skipped, equal-tick neighbours are joined).
-	static void InsertTickRangeJoined(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick);
+	static void InsertTickRange(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick,
+	                            char kind = 0, uint64_t key_a = 0, uint64_t key_b = 0, uint64_t guest = 0);
+	// The same answers with fewer entries (an insert already held is skipped; neighbours with the same tick and
+	// producer are joined).
+	static void InsertTickRangeJoined(std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end, uint64_t tick,
+	                                  char kind = 0, uint64_t key_a = 0, uint64_t key_b = 0, uint64_t guest = 0);
 	[[nodiscard]] static uint64_t QueryTicks(const std::map<uint64_t, WriteTick>& ticks, uint64_t start, uint64_t end);
 	// Ranges whose granule write ticks were raised to `tick` (NoteGpuWriteTick); the granule
 	// values only rise, so a range inside one of them at the same tick needs no new loop.
