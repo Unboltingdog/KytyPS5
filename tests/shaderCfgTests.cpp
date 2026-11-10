@@ -5380,7 +5380,7 @@ SrtGpuChainCorpusResult TranslateAndMaterializeSrtCorpusShader(
   return result;
 }
 
-void TestSrtGpuChainDisabledResourceBaseline() {
+void TestSrtGpuChainResourceBaseline() {
   const uint32_t scalar_data_shader[] = {
       EncodeSmem0(0x00, 12, 4), 125u << 25u,
       EncodeSop2(0x00, 12, 12, 128),
@@ -5415,33 +5415,38 @@ void TestSrtGpuChainDisabledResourceBaseline() {
       Expected{scalar_descriptor_shader, ShaderType::Compute, 2, 0, 0, 8},
       Expected{image_sampler_shader, ShaderType::Pixel, 1, 1, 1, 0},
   };
-  ShaderRecompiler::IR::SetSrtGpuChainOverride(false);
   struct Restore {
     ~Restore() { ShaderRecompiler::IR::SetSrtGpuChainOverride(std::nullopt); }
   } restore;
-  for (size_t index = 0; index < corpus.size(); ++index) {
-    const auto &test = corpus[index];
-    auto options = MakeCompileOptions(test.stage);
-    std::array<uint32_t, 64> user_data{};
-    if (index == 0) {
-      user_data[8] = 0x1000u;
-    } else if (index == 2) {
-      const auto image_data = ImageTestUserData();
-      std::copy(image_data.begin(), image_data.end(), user_data.begin());
+  for (const bool enabled : {false, true}) {
+    ShaderRecompiler::IR::SetSrtGpuChainOverride(enabled);
+    for (size_t index = 0; index < corpus.size(); ++index) {
+      const auto &test = corpus[index];
+      auto options = MakeCompileOptions(test.stage);
+      std::array<uint32_t, 64> user_data{};
+      if (index == 0) {
+        user_data[8] = 0x1000u;
+      } else if (index == 2) {
+        const auto image_data = ImageTestUserData();
+        std::copy(image_data.begin(), image_data.end(), user_data.begin());
+      }
+      options.user_data = user_data;
+      const auto result = TranslateAndMaterializeSrtCorpusShader(test.code, options);
+      const size_t srt_reads = enabled && index == 0 ? 2u : test.srt_reads;
+      Check(result.buffers == test.buffers && result.images == test.images &&
+                result.samplers == test.samplers &&
+                result.srt_reads == srt_reads &&
+                result.snapshot.buffers.size() == test.buffers &&
+                result.snapshot.images.size() == test.images &&
+                result.snapshot.samplers.size() == test.samplers &&
+                result.specialization.buffers.size() == test.buffers &&
+                result.specialization.images.size() == test.images &&
+                result.specialization.samplers.size() == test.samplers &&
+                result.snapshot.flattened_srt.size() == srt_reads,
+            enabled
+                ? "hybrid SRT read changed buffer/image/sampler counts in the native corpus"
+                : "disabled SRT GPU chain changed the recorded translated/materialized resource baseline");
     }
-    options.user_data = user_data;
-    const auto result = TranslateAndMaterializeSrtCorpusShader(test.code, options);
-    Check(result.buffers == test.buffers && result.images == test.images &&
-              result.samplers == test.samplers &&
-              result.srt_reads == test.srt_reads &&
-              result.snapshot.buffers.size() == test.buffers &&
-              result.snapshot.images.size() == test.images &&
-              result.snapshot.samplers.size() == test.samplers &&
-              result.specialization.buffers.size() == test.buffers &&
-              result.specialization.images.size() == test.images &&
-              result.specialization.samplers.size() == test.samplers &&
-              result.snapshot.flattened_srt.size() == test.srt_reads,
-          "disabled SRT GPU chain changed the recorded translated/materialized resource baseline");
   }
 }
 
@@ -16559,7 +16564,7 @@ int main(int argc, char** argv) {
       KYTY_CFG_CASE(TestNewShaderRecompilerVop1SdwaNotDestination),
       KYTY_CFG_CASE(TestVop2SdwaMulI24Destination),
       KYTY_CFG_CASE(TestNewShaderRecompilerScalarMemoryBindingDomains),
-      KYTY_CFG_CASE(TestSrtGpuChainDisabledResourceBaseline),
+      KYTY_CFG_CASE(TestSrtGpuChainResourceBaseline),
       // Opcode semantics and optimized SPIR-V are exercised by
       // ShaderRecompilerComputeTests; keep the distinct decoder contract checks
       // here.

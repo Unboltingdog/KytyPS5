@@ -1684,7 +1684,6 @@ private:
 				}
 			}
 		}
-		const size_t descriptor_reads = m_scalar_reads.size();
 		for (auto* block: m_program.blocks) {
 			for (auto& inst: *block) {
 				uint32_t index = 0;
@@ -1722,8 +1721,9 @@ private:
 			}
 			const bool keep = slot == m_program.srt_reads.size();
 			if (keep) m_program.srt_reads.push_back({Value(read), slot});
-			const bool hybrid = read_index >= descriptor_reads && read->GetOpcode() == ValueOpcode::LoadAddressU32 &&
-			                    (keep || m_program.srt_reads[slot].gpu_flag != UINT32_MAX);
+			const bool hybrid = read->GetOpcode() == ValueOpcode::LoadAddressU32 &&
+			                    (keep || m_program.srt_reads[slot].gpu_flag != UINT32_MAX) &&
+			                    FeedsOnlyShaderData(*read);
 			memory.planning_only = !hybrid;
 			auto* block = read->Parent();
 			auto& list = block->Instructions();
@@ -1815,6 +1815,29 @@ private:
 			}
 			if (!ValidateRuntimeValue(m_program, descriptor.dwords[i])) {
 				return false;
+			}
+		}
+		return true;
+	}
+
+	// A pending hybrid read is zero on the CPU, so no resource or control-flow decision may depend on it.
+	bool FeedsOnlyShaderData(const Inst& read) const {
+		std::vector<const Inst*> values {&read};
+		std::unordered_set<const Inst*> seen {&read};
+		for (size_t index = 0; index < values.size(); ++index) {
+			for (const auto& use: values[index]->Uses()) {
+				const auto op = use.user->GetOpcode();
+				if (op == ValueOpcode::GetImageResource || op == ValueOpcode::GetSamplerResource ||
+				    op == ValueOpcode::GetBufferResource)
+					return false;
+				if (seen.insert(use.user).second) values.push_back(use.user);
+			}
+		}
+		for (const auto* block: m_program.blocks) {
+			for (const auto value: {block->condition, block->indirect_target}) {
+				if (value.IsEmpty()) continue;
+				const auto* inst = value.Resolve().TryInstruction();
+				if (inst != nullptr && seen.contains(inst)) return false;
 			}
 		}
 		return true;
