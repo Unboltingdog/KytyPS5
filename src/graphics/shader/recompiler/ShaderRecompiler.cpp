@@ -854,53 +854,109 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	    .input_info       = options.input_info,
 	    .embedded_fetch   = embedded_fetch.loads.empty() ? nullptr : &embedded_fetch,
 	};
-	LOGF("%s phase begin: stage=%s hash=0x%016" PRIx64 " IR TranslateProgram\n",
-	     GetDumpLabel(options), StageName(options.stage), options.shader_hash);
-	auto ir = Frontend::TranslateProgram(decoded, cfg, translate_options);
-	LOGF("%s phase end: stage=%s hash=0x%016" PRIx64 " IR TranslateProgram blocks=%" PRIu64
-	     " elapsed_ms=%" PRIu64 "\n",
-	     GetDumpLabel(options), StageName(options.stage), options.shader_hash,
-	     static_cast<uint64_t>(ir.blocks.size()), phase_ms());
-	IR::RewriteToSsa(ir.blocks);
-	const auto simplify = [&ir] {
-		IR::ConstantPropagationPass(ir.blocks, ir.wave_size);
-		IR::RemoveIdentities(ir);
-		IR::EliminateDeadCode(ir.blocks);
+	const auto build_ir = [&] {
+		LOGF("%s phase begin: stage=%s hash=0x%016" PRIx64 " IR TranslateProgram\n",
+		     GetDumpLabel(options), StageName(options.stage), options.shader_hash);
+		auto translated = Frontend::TranslateProgram(decoded, cfg, translate_options);
+		LOGF("%s phase end: stage=%s hash=0x%016" PRIx64 " IR TranslateProgram blocks=%" PRIu64
+		     " elapsed_ms=%" PRIu64 "\n",
+		     GetDumpLabel(options), StageName(options.stage), options.shader_hash,
+		     static_cast<uint64_t>(translated.blocks.size()), phase_ms());
+		IR::RewriteToSsa(translated.blocks);
+		const auto simplify = [&translated] {
+			IR::ConstantPropagationPass(translated.blocks, translated.wave_size);
+			IR::RemoveIdentities(translated);
+			IR::EliminateDeadCode(translated.blocks);
+		};
+		simplify();
+		// A paired shader keeps the guest's wave64 reductions (0912c2e9e); the emitter decides with the same rule.
+		const auto* workgroup = ShaderWorkgroupInput(options.stage, options.input_info);
+		const uint32_t threads = workgroup == nullptr ? 0u
+		                         : std::max(workgroup->threads_num[0], 1u) * std::max(workgroup->threads_num[1], 1u) *
+		                               std::max(workgroup->threads_num[2], 1u);
+		translated.pair_by_rule = !IR::WavePairPlanned(options.shader_hash, 0u, 0u) &&
+		                          IR::WavePairPlanned(options.shader_hash, threads, decoded.code.size());
+		const auto read_lane_stats = IR::EliminateReadLane(
+		    translated, translated.wave_size, !IR::WavePairPlanned(options.shader_hash, threads, decoded.code.size()));
+		if (read_lane_stats.rewritten_reads != 0 || read_lane_stats.rewritten_reductions != 0) {
+			LOGF("%s read-lane elimination: reads=%" PRIu32 " reductions=%" PRIu32 "\n",
+			     GetDumpLabel(options), read_lane_stats.rewritten_reads, read_lane_stats.rewritten_reductions);
+		}
+		// Cleanup also exposes profitable folds by removing dead predicate consumers.
+		simplify();
+		if (decoded.has_swap_pc) {
+			// Leaf returns are resolved CFG edges; native PC values must not escape into GPU data.
+			for (const auto* block: translated.blocks)
+				for (const auto& inst: *block)
+					EXIT_NOT_IMPLEMENTED(inst.GetOpcode() == IR::ValueOpcode::GetShaderBase);
+		}
+		LowerTessellationMemory(translated, options);
+		return translated;
 	};
-	simplify();
-	// A paired shader keeps the guest's wave64 reductions (0912c2e9e); the emitter decides with the same rule.
-	const auto* workgroup = ShaderWorkgroupInput(options.stage, options.input_info);
-	const uint32_t threads = workgroup == nullptr ? 0u
-	                         : std::max(workgroup->threads_num[0], 1u) * std::max(workgroup->threads_num[1], 1u) *
-	                               std::max(workgroup->threads_num[2], 1u);
-	ir.pair_by_rule = !IR::WavePairPlanned(options.shader_hash, 0u, 0u) &&
-	                  IR::WavePairPlanned(options.shader_hash, threads, decoded.code.size());
-	const auto read_lane_stats =
-	    IR::EliminateReadLane(ir, ir.wave_size, !IR::WavePairPlanned(options.shader_hash, threads, decoded.code.size()));
-	if (read_lane_stats.rewritten_reads != 0 || read_lane_stats.rewritten_reductions != 0) {
-		LOGF("%s read-lane elimination: reads=%" PRIu32 " reductions=%" PRIu32 "\n",
-		     GetDumpLabel(options), read_lane_stats.rewritten_reads, read_lane_stats.rewritten_reductions);
-	}
-	// Cleanup also exposes profitable folds by removing dead predicate consumers.
-	simplify();
-	if (decoded.has_swap_pc) {
-		// Leaf returns are resolved CFG edges; native PC values must not escape into GPU data.
-		for (const auto* block: ir.blocks)
-			for (const auto& inst: *block)
-				EXIT_NOT_IMPLEMENTED(inst.GetOpcode() == IR::ValueOpcode::GetShaderBase);
-	}
-	LowerTessellationMemory(ir, options);
+	IR::Program ir;
+	TranslateResult result;
 	std::string cfg_dump;
-	if (options.dump_ir) {
+	const auto dump_early_ir = [&](const IR::Program& untracked) {
+		if (!options.dump_ir) return;
 		cfg_dump = CFG::GraphToString(cfg);
 		if (options.early_dump) {
 			LOGF("%s native IR before resource tracking:\n%s", GetDumpLabel(options),
-			     MakeIrDump(cfg_dump, ir).c_str());
+			     MakeIrDump(cfg_dump, untracked).c_str());
 		}
-	}
-	TranslateResult result;
+	};
 	try {
-		IR::TrackResources(ir, decoded, native_cfg);
+		if (!IR::SrtGpuChainEnabled()) {
+			ir = build_ir();
+			dump_early_ir(ir);
+			IR::TrackResources(ir, decoded, native_cfg);
+		} else {
+			auto flat = build_ir();
+			dump_early_ir(flat);
+			IR::TrackResources(flat, decoded, native_cfg, IR::ScalarReadPlanner::Flat);
+			try {
+				auto chain = build_ir();
+				IR::TrackResources(chain, decoded, native_cfg, IR::ScalarReadPlanner::GpuChainDiagnostic);
+				const auto& before = flat.info;
+				const auto& after = chain.info;
+				const bool different = before.images.size() != after.images.size() ||
+				                       before.buffers.size() != after.buffers.size() ||
+				                       before.samplers.size() != after.samplers.size() ||
+				                       before.sampled_pairs.size() != after.sampled_pairs.size();
+				if (different) {
+					uint32_t first_new = UINT32_MAX;
+					const auto find_first_new = [&first_new](const auto& old_resources, const auto& new_resources) {
+						if (new_resources.size() > old_resources.size())
+							first_new = std::min(first_new, new_resources[old_resources.size()].first_use_pc);
+					};
+					find_first_new(before.images, after.images);
+					find_first_new(before.buffers, after.buffers);
+					find_first_new(before.samplers, after.samplers);
+					find_first_new(before.sampled_pairs, after.sampled_pairs);
+					const auto hybrid_slots = std::ranges::count_if(chain.srt_reads, [](const IR::SrtRead& read) {
+						return read.gpu_flag_slot;
+					});
+					static std::mutex mutex;
+					static std::set<uint64_t> seen;
+					std::lock_guard lock(mutex);
+					if (seen.insert(options.shader_hash).second) {
+						std::fprintf(stderr,
+						             "SRT_GPU_CHAIN_RESOURCE_DIFF hash=0x%016llx stage=%s images=%zu->%zu "
+						             "buffers=%zu->%zu samplers=%zu->%zu pairs=%zu->%zu hybrid_slots=%td "
+						             "first_new_resource_pc=0x%08x\n",
+						             static_cast<unsigned long long>(options.shader_hash), StageName(options.stage),
+						             before.images.size(), after.images.size(), before.buffers.size(), after.buffers.size(),
+						             before.samplers.size(), after.samplers.size(), before.sampled_pairs.size(),
+						             after.sampled_pairs.size(), hybrid_slots, first_new);
+						std::fflush(stderr);
+					}
+					ir = std::move(flat);
+				} else {
+					ir = std::move(chain);
+				}
+			} catch (const IR::ResourceTrackingError&) {
+				ir = std::move(flat);
+			}
+		}
 	} catch (const IR::ResourceTrackingError& error) {
 		const char* no_skip = Common::ShaderEnv::Read("KYTY_NO_SKIP_TRACK_FAIL");
 		if (options.stage == ShaderType::Compute || (no_skip != nullptr && no_skip[0] == '1')) {

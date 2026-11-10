@@ -18,8 +18,11 @@ public:
 	std::string reason;
 };
 
+enum class ScalarReadPlanner { Default, Flat, GpuChain, GpuChainDiagnostic };
+
 // Resolves native descriptor sources, plans their scalar reads, and assigns dense resource bindings.
-void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg);
+void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg,
+                    ScalarReadPlanner planner = ScalarReadPlanner::Default);
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 

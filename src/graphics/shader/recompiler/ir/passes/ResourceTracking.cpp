@@ -824,8 +824,8 @@ void DetectAppendWrites(const Program& program, std::vector<BufferResource>& buf
 
 class Tracker {
 public:
-	Tracker(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg)
-	    : m_program(program), m_decoded(decoded), m_native_cfg(native_cfg),
+	Tracker(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg, ScalarReadPlanner planner)
+	    : m_program(program), m_decoded(decoded), m_native_cfg(native_cfg), m_scalar_read_planner(planner),
 	      m_scalar_writes(std::move(program.scalar_writes)), m_info(program.info) {
 		std::ranges::sort(m_scalar_writes, {}, &Program::ScalarWrite::pc);
 		m_info.buffers.clear();
@@ -1521,7 +1521,9 @@ private:
 	}
 
 	void PlanScalarReads() {
-		if (SrtGpuChainEnabled()) {
+		if (m_scalar_read_planner == ScalarReadPlanner::GpuChain ||
+		    m_scalar_read_planner == ScalarReadPlanner::GpuChainDiagnostic ||
+		    (m_scalar_read_planner == ScalarReadPlanner::Default && SrtGpuChainEnabled())) {
 			PlanScalarReadsGpuChain();
 			return;
 		}
@@ -3980,7 +3982,8 @@ private:
 				return i;
 			}
 		}
-		if (m_info.buffers.size() >= ShaderInfo::MaxBuffers) {
+		if (m_info.buffers.size() >= ShaderInfo::MaxBuffers &&
+		    m_scalar_read_planner != ScalarReadPlanner::GpuChainDiagnostic) {
 			return UINT32_MAX;
 		}
 		BufferResource resource;
@@ -4069,7 +4072,8 @@ private:
 			Merge(m_info.images[found], op, pc);
 			return found;
 		}
-		if (m_info.images.size() >= ShaderInfo::MaxImages) {
+		if (m_info.images.size() >= ShaderInfo::MaxImages &&
+		    m_scalar_read_planner != ScalarReadPlanner::GpuChainDiagnostic) {
 			return UINT32_MAX;
 		}
 		ImageResource image;
@@ -4128,7 +4132,8 @@ private:
 				return i;
 			}
 		}
-		if (m_info.samplers.size() >= ShaderInfo::MaxSamplers) {
+		if (m_info.samplers.size() >= ShaderInfo::MaxSamplers &&
+		    m_scalar_read_planner != ScalarReadPlanner::GpuChainDiagnostic) {
 			return UINT32_MAX;
 		}
 		m_info.samplers.push_back({source, pc});
@@ -4157,7 +4162,8 @@ private:
 				return;
 			}
 		}
-		if (m_info.sampled_pairs.size() >= ShaderInfo::MaxSampledPairs) {
+		if (m_info.sampled_pairs.size() >= ShaderInfo::MaxSampledPairs &&
+		    m_scalar_read_planner != ScalarReadPlanner::GpuChainDiagnostic) {
 			if (m_splits_made != 0u) {
 				m_split_overflow = true; // KYTY_PERF_BINDLESS_CLASSES: Run tracks the shader again without field resources
 				return;
@@ -4475,6 +4481,7 @@ private:
 	Program&                                   m_program;
 	const Decoder::Program&                    m_decoded;
 	const CFG::Graph&                          m_native_cfg;
+	ScalarReadPlanner                          m_scalar_read_planner;
 	std::vector<Program::ScalarWrite>          m_scalar_writes;
 	std::vector<ResolvedHandle>                m_resolved_handles;
 	std::vector<const Inst*>                   m_srt_visiting;
@@ -4501,8 +4508,9 @@ private:
 
 } // namespace
 
-void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg) {
-	Tracker(program, decoded, native_cfg).Run();
+void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg,
+                    ScalarReadPlanner planner) {
+	Tracker(program, decoded, native_cfg, planner).Run();
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
