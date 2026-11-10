@@ -868,7 +868,10 @@ struct ShaderInfo {
 	// Our ResourceTracking still bounds the sampled image/sampler pairs (upstream 33208a545 removed the limit with its
 	// own tracking, not taken - SESJA-SYNC1).
 	static constexpr uint32_t MaxSampledPairs = 64;
-	static constexpr uint32_t MaxImages       = 64;
+	// 128 (was 64): a Ghost of Yotei pixel shader (0xb8eb113c4594c5b1) needs more than 64 image resources. The bindless
+	// field-split heuristic keeps its old threshold (BindlessSplitImageLimit) so no other shader's layout changes.
+	static constexpr uint32_t MaxImages       = 128;
+	static constexpr uint32_t BindlessSplitImageLimit = 32;
 	static constexpr uint32_t MaxSamplers     = 32;
 
 	std::vector<BufferResource>      buffers;

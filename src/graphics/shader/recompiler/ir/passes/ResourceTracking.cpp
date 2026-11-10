@@ -1600,7 +1600,10 @@ private:
 			}
 			const bool keep = slot == m_program.srt_reads.size();
 			if (keep) m_program.srt_reads.push_back({Value(read), slot});
+			// Only raw scalar-address reads: the emitter guards LoadAddressU32 (ScalarAddress) with the GPU flag; a
+			// hybrid ReadConstBuffer would become a real buffer resource and push compute shaders past MaxBuffers.
 			const bool hybrid = SrtGpuChainEnabled() && read_index >= descriptor_reads &&
+			                    read->GetOpcode() == ValueOpcode::LoadAddressU32 &&
 			                    (keep || m_program.srt_reads[slot].gpu_flag != UINT32_MAX);
 			memory.planning_only = !hybrid;
 			auto* block = read->Parent();
@@ -3914,7 +3917,7 @@ private:
 		// A new field resource only while the shader is far from the resource limits (the shared resources it still
 		// adds need room; MaxImages and MaxSampledPairs end the translation): past half of them the field shares.
 		if (found == UINT32_MAX && split_field.has_value() &&
-		    (m_info.images.size() >= ShaderInfo::MaxImages / 2u ||
+		    (m_info.images.size() >= ShaderInfo::BindlessSplitImageLimit ||
 		     m_info.sampled_pairs.size() >= ShaderInfo::MaxSampledPairs / 2u)) {
 			GetBindlessClassCounters().split_refused.fetch_add(1, std::memory_order_relaxed);
 			split_field.reset();
