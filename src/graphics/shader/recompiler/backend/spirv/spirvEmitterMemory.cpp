@@ -7,6 +7,7 @@
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 
+#include <optional>
 #include <cstdio>
 #include <cstdlib>
 #include <magic_enum.hpp>
@@ -2591,6 +2592,19 @@ uint32_t LoadIndirectFormattedTable(ValueEmitContext& ctx, const IndirectBufferA
 	return ConstructU32Composite(state, channels, values);
 }
 
+// Diagnostics only: CompileProgram invalidates value_storage (planning handles) after capturing the indirect
+// descriptors, so a descriptor-source dword can be an Identity with no arguments here. Value::Resolve would EXIT on it
+// (Inst::Arg index check); this stops instead and the description says "invalidated".
+static std::optional<IR::Value> ResolveForDescription(IR::Value value) {
+	for (int depth = 0; depth < 64; ++depth) {
+		if (!value.IsIdentity()) return value;
+		const auto* inst = value.TryInstruction();
+		if (inst == nullptr || inst->NumArgs() == 0u) return std::nullopt;
+		value = inst->Arg(0);
+	}
+	return std::nullopt;
+}
+
 std::string DescribeIndirectTableFormatSource(const EmitterState& state, const IR::MemoryInfo& mem) {
 	if (mem.resource >= state.program.info.buffers.size()) {
 		return "resource=" + std::to_string(mem.resource) + " source=missing kind=buffer-resource-missing";
@@ -2608,9 +2622,13 @@ std::string DescribeIndirectTableFormatSource(const EmitterState& state, const I
 			text += word == 0u ? "missing" : ",missing";
 			continue;
 		}
-		const auto value = source.dwords[word].Resolve();
-		const auto* inst = value.TryInstruction();
+		const auto resolved = ResolveForDescription(source.dwords[word]);
 		text += word == 0u ? "" : ",";
+		if (!resolved.has_value()) {
+			text += "invalidated";
+			continue;
+		}
+		const auto* inst = resolved->TryInstruction();
 		if (inst == nullptr) {
 			text += "immediate";
 			continue;
@@ -2620,12 +2638,16 @@ std::string DescribeIndirectTableFormatSource(const EmitterState& state, const I
 		text += name.empty() ? "op" + std::to_string(static_cast<uint32_t>(op)) : std::string(name);
 		if (op == IR::ValueOpcode::GetUserData) {
 			user_data = true;
-			text += "(s" + std::to_string(static_cast<uint32_t>(inst->Arg(0).Resolve().ScalarRegister())) + ")";
+			if (inst->NumArgs() > 0u) {
+				if (const auto reg = ResolveForDescription(inst->Arg(0)); reg.has_value() && reg->IsImmediate()) {
+					text += "(s" + std::to_string(static_cast<uint32_t>(reg->ScalarRegister())) + ")";
+				}
+			}
 		} else if (op == IR::ValueOpcode::ReadConst) {
 			flattened_srt = true;
-			const auto offset = inst->Arg(1).Resolve();
-			if (offset.IsImmediate() && offset.GetType() == IR::Type::U32) {
-				text += "(flat=" + std::to_string(offset.U32()) + ")";
+			const auto offset = inst->NumArgs() > 1u ? ResolveForDescription(inst->Arg(1)) : std::nullopt;
+			if (offset.has_value() && offset->IsImmediate() && offset->GetType() == IR::Type::U32) {
+				text += "(flat=" + std::to_string(offset->U32()) + ")";
 			}
 		}
 	}
