@@ -1547,6 +1547,10 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	                   PixelShaderHasDepthOrCoverageSideEffects(shader_regs));
 	std::optional<DispatchSubTimer> census_programs(std::in_place, DispatchSub::DrawPrograms); // KYTY_TRACE_DRAW_CENSUS
 	if (!std::exchange(m_state_resolved, false)) RefreshShaders(buffer, draw, color_output_mask, state);
+	if (state.programs.track_failed) {
+		state.drop_reason = "shader resource tracking failed";
+		return false;
+	}
 	census_programs.reset();
 	uint32_t mrt_mask     = 0;
 	uint32_t objprim_mask = 0;

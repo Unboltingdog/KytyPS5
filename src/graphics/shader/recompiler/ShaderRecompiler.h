@@ -33,9 +33,15 @@ struct CompileOptions {
 };
 
 struct TranslateResult {
+	struct TrackFailure {
+		uint32_t    pc = 0;
+		std::string reason;
+	};
+
 	IR::Program program;
 	std::string decoded_dump;
 	std::string cfg_dump;
+	std::optional<TrackFailure> track_failure;
 };
 
 struct CompileResult {

@@ -1257,8 +1257,7 @@ private:
 		                m_program.shader_hash, StageName(m_program.stage), pc, reason);
 		std::fprintf(stderr, "%s\n", message.c_str());
 		std::fflush(stderr);
-		EXIT("%s", message.c_str());
-		std::abort();
+		throw ResourceTrackingError(message, pc, reason);
 	}
 
 	Value NativeDescriptorSource(Value value, uint32_t reg, uint32_t use_pc) const {

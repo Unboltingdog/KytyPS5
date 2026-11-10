@@ -818,6 +818,7 @@ struct PipelineCache::ProgramCache {
 		const bool defer_translation = reuse && !first_use && !source_changed;
 		if (!reused_plan.has_value() && !defer_translation) {
 			translate();
+			if (translated.has_value() && translated->track_failure.has_value()) return {};
 		}
 		if (entry == programs.end() && source.unsupported_call_pc != UINT32_MAX) {
 			// Upstream cad6aafdc skips such a dispatch ("TEMPORARY COMPUTE DISPATCH SKIP", rendering incomplete); not taken
@@ -919,6 +920,7 @@ struct PipelineCache::ProgramCache {
 		const bool skip_translation = use_reused && !translated.has_value();
 		if (!use_reused && !translated.has_value()) {
 			translate();
+			if (translated.has_value() && translated->track_failure.has_value()) return {};
 		}
 		ShaderRecompiler::IR::NoteNullShareVariant(entry->second.resource_plan,
 		                                           entry->second.specialization); // the null share journal
@@ -1992,9 +1994,11 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	KYTY_PROFILER_BLOCK("GraphicsPrograms::Get");
 	if (pixel_active) {
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
+		result.track_failed = !result.pixel;
 	}
-	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
+	for (uint32_t i = 0; !result.track_failed && i < (tess_active ? 3u : 1u); i++) {
 		result.vertex[i] = m_program_cache->Get(vertex_params[i], vertex_info[i], push_data_cursor);
+		result.track_failed = !result.vertex[i];
 	}
 	return result;
 }

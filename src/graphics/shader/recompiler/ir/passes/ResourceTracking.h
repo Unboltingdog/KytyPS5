@@ -3,7 +3,20 @@
 
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <stdexcept>
+#include <string>
+#include <utility>
+
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+class ResourceTrackingError : public std::runtime_error {
+public:
+	ResourceTrackingError(std::string message, uint32_t pc, std::string reason):
+	    std::runtime_error(std::move(message)), pc(pc), reason(std::move(reason)) {}
+
+	uint32_t    pc;
+	std::string reason;
+};
 
 // KYTY_FIX_SRT_GPU_CHAIN=1: data-only scalar loads retain a GPU path selected per dispatch.
 bool SrtGpuChainEnabled();

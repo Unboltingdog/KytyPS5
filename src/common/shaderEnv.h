@@ -107,6 +107,8 @@ inline constexpr const char* OutputOnlyNames[] = {
     // Compute pipelines made in the background: a dispatch is skipped until its pipeline is ready.
     "KYTY_FIX_ASYNC_COMPUTE_PIPELINES",
     "KYTY_FIX_ASYNC_COMPUTE_PIPELINES_WAIT_MS",
+    // Whether a graphics draw is dropped after its shader fails resource tracking; no compiled output changes.
+    "KYTY_NO_SKIP_TRACK_FAIL",
     // The background compiles' reuse store (shaderPrecompile.cpp): the same SPIR-V, made earlier.
     "KYTY_PERF_SHADER_REUSE_MB",
     // Table-mode pipelines made in the background: the key a lookup asks for, not what a key makes.

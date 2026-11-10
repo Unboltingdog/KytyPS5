@@ -27,7 +27,9 @@
 #include <fmt/format.h>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -896,8 +898,30 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 			     MakeIrDump(cfg_dump, ir).c_str());
 		}
 	}
-	IR::TrackResources(ir, decoded, native_cfg);
 	TranslateResult result;
+	try {
+		IR::TrackResources(ir, decoded, native_cfg);
+	} catch (const IR::ResourceTrackingError& error) {
+		const char* no_skip = Common::ShaderEnv::Read("KYTY_NO_SKIP_TRACK_FAIL");
+		if (options.stage == ShaderType::Compute || (no_skip != nullptr && no_skip[0] == '1')) {
+			EXIT("%s\n", error.what());
+		}
+		result.track_failure = {.pc = error.pc, .reason = error.reason};
+		const auto line = fmt::format("TRACK_FAIL hash=0x{:016x} stage={} pc=0x{:08x} reason={}",
+		                              options.shader_hash, StageName(options.stage), error.pc, error.reason);
+		static std::mutex mutex;
+		static std::set<std::string> seen;
+		std::lock_guard lock(mutex);
+		if (seen.insert(line).second) {
+			std::fprintf(stderr, "%s\n", line.c_str());
+			std::fflush(stderr);
+		}
+		if (options.dump_ir) {
+			result.decoded_dump = std::move(decoded_dump);
+			result.cfg_dump     = std::move(cfg_dump);
+		}
+		return result;
+	}
 	result.program = std::move(ir);
 	if (options.dump_ir) {
 		result.decoded_dump = std::move(decoded_dump);

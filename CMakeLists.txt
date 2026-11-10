@@ -351,6 +351,14 @@ list(APPEND kyty_emulator_src
 )
 list(REMOVE_DUPLICATES kyty_emulator_src)
 
+if(NOT KYTY_CLANG_CL)
+	set_source_files_properties(
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ShaderRecompiler.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
+		PROPERTIES COMPILE_OPTIONS "-fexceptions"
+	)
+endif()
+
 if (KYTY_CLANG_CL)
 	set_source_files_properties(${kyty_emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
 endif()

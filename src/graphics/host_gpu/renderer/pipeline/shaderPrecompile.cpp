@@ -2316,6 +2316,7 @@ bool ShaderPrecompiler::CompileModule(const PrecompileStageRecord& record, uint6
 		return false; // programs with a scalar call read their callee from guest memory: never recorded
 	}
 	auto translated = ShaderRecompiler::TranslateProgram(source.decoded, options);
+	if (translated.track_failure.has_value()) return false;
 	// A record whose specialization does not fit the resources this build and these switches give the program (a
 	// switch that changes the resource layout, such as KYTY_PERF_BINDLESS_CLASSES, differed in the recording run)
 	// would end the emulator in ApplyResourceSpecialization: such a job makes no module.
