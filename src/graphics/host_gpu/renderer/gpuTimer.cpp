@@ -5,6 +5,8 @@
 #include "graphics/host_gpu/renderer/debugSample.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/gpuEventDiagnostics.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <algorithm>
 #include <array>
@@ -413,6 +415,8 @@ void Report(State& s) {
 		             frames, gap_ms, guest, readback, pipeline, present, std::max(0.0, gap_ms - measured), measured);
 		GpuEventDiagnostics::ReportFrameGaps();
 		ReportReadbackWaits(frames);
+		ShaderRecompiler::IR::ReportSrtReadDiagnostics();
+		BufferCache::ReportSrtReadProducerWaits();
 		s.frame_gap_ns.fill(0);
 	}
 	if (!s.costs.empty()) {

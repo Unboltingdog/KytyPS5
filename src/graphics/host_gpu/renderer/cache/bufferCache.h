@@ -164,6 +164,8 @@ public:
 	void NoteCommandEmitted(char kind = 0, uint64_t key_a = 0, uint64_t key_b = 0, uint64_t guest = 0);
 	// Newest recorded GPU writer of the bytes and its whole cached allocation. No wait, flush or buffer creation.
 	[[nodiscard]] std::optional<BufferCacheSrtDependency> QuerySrtDependency(uint64_t vaddr, uint64_t size);
+	// Called by GpuTimer at the same five-second boundary as FRAME_GAPS_READBACK.
+	static void ReportSrtReadProducerWaits();
 	// Upstream 4644c5292: zeroes the BDA page table and the fault buffer once, in the render scheduler's first command
 	// buffer (CommandScheduler::Begin), before the first buffer registration writes into the table.
 	void               ClearDeviceTablesOnce();

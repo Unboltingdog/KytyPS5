@@ -3465,39 +3465,44 @@ std::optional<BufferCache::SrtReadProducer> BufferCache::NoteSrtReadProducer(uin
 	return result;
 }
 
+namespace {
+struct SrtProducerSummaryKey {
+	uint64_t page;
+	char     kind;
+	uint64_t guest;
+	bool operator<(const SrtProducerSummaryKey& other) const {
+		if (page != other.page) return page < other.page;
+		if (kind != other.kind) return kind < other.kind;
+		return guest < other.guest;
+	}
+};
+struct SrtProducerSummaryStats {
+	uint64_t count = 0, same_cb = 0, wait_ns = 0, submits = 0;
+	uint64_t min_submits = UINT64_MAX, max_submits = 0;
+};
+std::mutex                                      g_srt_producer_summary_mutex;
+std::map<SrtProducerSummaryKey, SrtProducerSummaryStats> g_srt_producer_summary;
+} // namespace
+
 void BufferCache::NoteSrtReadProducerWait(const SrtReadProducer& producer, uint64_t wait_ns) {
-	struct Key {
-		uint64_t page;
-		char     kind;
-		uint64_t guest;
-		bool operator<(const Key& other) const {
-			if (page != other.page) return page < other.page;
-			if (kind != other.kind) return kind < other.kind;
-			return guest < other.guest;
-		}
-	};
-	struct Stats {
-		uint64_t count = 0, same_cb = 0, wait_ns = 0, submits = 0;
-		uint64_t min_submits = UINT64_MAX, max_submits = 0;
-	};
-	static std::mutex        mutex;
-	static std::map<Key, Stats> stats;
-	static auto              window_start = std::chrono::steady_clock::now();
-	std::lock_guard          lock(mutex);
-	auto&                    entry = stats[{producer.page, producer.kind, producer.guest}];
+	std::lock_guard lock(g_srt_producer_summary_mutex);
+	auto& entry = g_srt_producer_summary[{producer.page, producer.kind, producer.guest}];
 	entry.count++;
 	entry.same_cb += producer.same_cb ? 1u : 0u;
 	entry.wait_ns += wait_ns;
 	entry.submits += producer.submits_ago;
 	entry.min_submits = std::min(entry.min_submits, producer.submits_ago);
 	entry.max_submits = std::max(entry.max_submits, producer.submits_ago);
-	const auto now = std::chrono::steady_clock::now();
-	if (now - window_start < std::chrono::seconds(5)) return;
-	window_start = now;
-	std::vector<std::pair<Key, Stats>> ordered;
-	ordered.reserve(stats.size());
-	for (const auto& item: stats) ordered.push_back(item);
-	stats.clear();
+}
+
+void BufferCache::ReportSrtReadProducerWaits() {
+	std::vector<std::pair<SrtProducerSummaryKey, SrtProducerSummaryStats>> ordered;
+	{
+		std::lock_guard lock(g_srt_producer_summary_mutex);
+		ordered.assign(g_srt_producer_summary.begin(), g_srt_producer_summary.end());
+		g_srt_producer_summary.clear();
+	}
+	if (ordered.empty()) return;
 	std::ranges::sort(ordered, [](const auto& a, const auto& b) {
 		if (a.second.wait_ns != b.second.wait_ns) return a.second.wait_ns > b.second.wait_ns;
 		return a.second.count > b.second.count;

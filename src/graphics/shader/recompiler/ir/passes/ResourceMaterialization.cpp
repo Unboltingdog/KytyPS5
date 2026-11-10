@@ -129,7 +129,6 @@ struct SrtReadSummaryStats {
 };
 std::mutex                                                          g_srt_read_summary_mutex;
 std::unordered_map<SrtReadSummaryKey, SrtReadSummaryStats, SrtReadSummaryKeyHash> g_srt_read_summary;
-auto g_srt_read_window_start = std::chrono::steady_clock::now();
 
 SrtReadSummaryKey CurrentSrtReadKey(uint64_t page) {
 	return {.hash = t_srt_read_diagnostics.program != nullptr ? t_srt_read_diagnostics.program->shader_hash : 0,
@@ -179,19 +178,10 @@ void NoteSrtReadRange(uint64_t vaddr, uint64_t size) {
 	if (!enabled || t_srt_read_diagnostics.program == nullptr || t_srt_read_diagnostics.runtime == nullptr) return;
 	(void)size;
 	t_srt_read_page = vaddr & ~0xfffull;
-	const auto now = std::chrono::steady_clock::now();
-	bool report = false;
-	{
-		std::lock_guard lock(g_srt_read_summary_mutex);
-		auto& stats = g_srt_read_summary[CurrentSrtReadKey(t_srt_read_page)];
-		stats.count++;
-		AddSrtReadResource(stats);
-		if (now - g_srt_read_window_start >= std::chrono::seconds(5)) {
-			g_srt_read_window_start = now;
-			report = true;
-		}
-	}
-	if (report) ReportSrtReadDiagnostics();
+	std::lock_guard lock(g_srt_read_summary_mutex);
+	auto& stats = g_srt_read_summary[CurrentSrtReadKey(t_srt_read_page)];
+	stats.count++;
+	AddSrtReadResource(stats);
 }
 
 void NoteSrtReadWait(uint64_t wait_ns) {
