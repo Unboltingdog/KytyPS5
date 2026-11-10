@@ -4646,11 +4646,7 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 		value = LoadWideShared(ctx, inst, shared_components);
 	} else if (mem.kind == IR::ResourceKind::ScalarAddress) {
 		helper = "LoadBdaDword";
-		const auto guard = inst.Arg(inst.NumArgs() - 1).Resolve();
-		value = guard.IsImmediate() && guard.U1()
-		            ? LoadBdaDword(ctx, GuestAddress(ctx, inst, mem))
-		            : EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1),
-		                                         [&]() { return LoadBdaDword(ctx, GuestAddress(ctx, inst, mem)); });
+		value = LoadBdaDword(ctx, GuestAddress(ctx, inst, mem));
 	} else if (address_info.access == IR::AddressAccess::Read &&
 	           mem.kind != IR::ResourceKind::Scratch) {
 		helper = "LoadBda";

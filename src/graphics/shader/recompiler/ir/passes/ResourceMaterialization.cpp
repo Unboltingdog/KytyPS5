@@ -42,7 +42,6 @@ std::atomic_int g_indirect_table_slots_override {-1};
 std::atomic_int g_srt_gpu_range_override {-1};
 std::atomic_int g_srt_gpu_dependent_override {-1};
 std::atomic_int g_srt_skip_specialization_override {-1};
-std::atomic_int g_srt_gpu_chain_override {-1};
 } // namespace
 
 bool IndirectTableSlots() {
@@ -102,20 +101,6 @@ void SetSrtSkipPendingSpecializationOverride(std::optional<bool> enabled) {
 	                                         std::memory_order_relaxed);
 }
 
-bool SrtGpuChainEnabled() {
-	const int override = g_srt_gpu_chain_override.load(std::memory_order_relaxed);
-	if (override >= 0) return override != 0;
-	static const bool enabled = [] {
-		const char* value = Common::ShaderEnv::Read("KYTY_FIX_SRT_GPU_CHAIN");
-		return value != nullptr && value[0] == '1';
-	}();
-	return enabled;
-}
-
-void SetSrtGpuChainOverride(std::optional<bool> enabled) {
-	g_srt_gpu_chain_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
-}
-
 namespace {
 struct SrtReadDiagnosticsState {
 	const ResourcePlan* program = nullptr;
@@ -125,8 +110,6 @@ thread_local SrtReadDiagnosticsState t_srt_read_diagnostics;
 thread_local SrtReadKind             t_srt_read_kind = SrtReadKind::None;
 thread_local SrtResourceKind         t_srt_read_resource = SrtResourceKind::None;
 thread_local uint32_t                t_srt_read_source = UINT32_MAX;
-thread_local uint32_t                t_srt_read_slot = UINT32_MAX;
-thread_local uint32_t                t_srt_read_uses = 0;
 thread_local uint64_t                t_srt_read_page = 0;
 
 const char* SrtReadKindName(SrtReadKind kind) {
@@ -159,9 +142,7 @@ struct SrtReadSummaryStats {
 	uint64_t           count = 0;
 	uint64_t           wait_ns = 0;
 	uint32_t           resources = 0;
-	uint32_t           uses = 0;
 	std::set<uint32_t> sources;
-	std::set<uint32_t> slots;
 };
 std::mutex                                                          g_srt_read_summary_mutex;
 std::unordered_map<SrtReadSummaryKey, SrtReadSummaryStats, SrtReadSummaryKeyHash> g_srt_read_summary;
@@ -175,8 +156,6 @@ SrtReadSummaryKey CurrentSrtReadKey(uint64_t page) {
 void AddSrtReadResource(SrtReadSummaryStats& stats) {
 	stats.resources |= 1u << static_cast<uint32_t>(t_srt_read_resource);
 	stats.sources.insert(t_srt_read_source);
-	stats.slots.insert(t_srt_read_slot);
-	stats.uses |= t_srt_read_uses;
 }
 } // namespace
 
@@ -206,17 +185,6 @@ SrtReadResourceScope::SrtReadResourceScope(SrtResourceKind kind, uint32_t source
 SrtReadResourceScope::~SrtReadResourceScope() {
 	t_srt_read_resource = m_previous_kind;
 	t_srt_read_source = m_previous_source;
-}
-
-SrtReadValueScope::SrtReadValueScope(const SrtRead& read, uint32_t slot):
-    m_previous_slot(t_srt_read_slot), m_previous_uses(t_srt_read_uses) {
-	t_srt_read_slot = slot;
-	t_srt_read_uses = read.uses;
-}
-
-SrtReadValueScope::~SrtReadValueScope() {
-	t_srt_read_slot = m_previous_slot;
-	t_srt_read_uses = m_previous_uses;
 }
 
 void NoteSrtReadRange(uint64_t vaddr, uint64_t size) {
@@ -271,31 +239,12 @@ void ReportSrtReadDiagnostics() {
 			if (!sources.empty()) sources += ',';
 			sources += source == UINT32_MAX ? std::string("none") : fmt::format("{}", source);
 		}
-		std::string values;
-		static constexpr std::array<std::pair<uint32_t, const char*>, 8> use_names {{
-		    {SrtReadUseShaderValue, "shader_immediate"}, {SrtReadUseBufferDescriptor, "buffer_v#"},
-		    {SrtReadUseImageDescriptor, "image_t#"}, {SrtReadUseSamplerDescriptor, "sampler_s#"},
-		    {SrtReadUseBranch, "branch"}, {SrtReadUseUniformFill, "uniform_fill"},
-		    {SrtReadUseLoopCount, "loop_count"}, {SrtReadUseSelector, "selector"},
-		}};
-		for (const auto [use, name]: use_names) {
-			if ((stats.uses & use) == 0u) continue;
-			if (!values.empty()) values += '|';
-			values += name;
-		}
-		if (values.empty()) values = "unclassified";
-		std::string slots;
-		for (const uint32_t slot: stats.slots) {
-			if (!slots.empty()) slots += ',';
-			slots += slot == UINT32_MAX ? std::string("none") : fmt::format("{}", slot);
-		}
 		std::fprintf(stderr,
 		             "FRAME_GAPS_SRT_READ rank=%zu hash=0x%016llx page=0x%llx read_kind=%s count=%llu wait_ms=%.3f "
-		             "resource=%s sources=%s values=%s slots=%s\n",
+		             "resource=%s sources=%s\n",
 		             rank + 1u, static_cast<unsigned long long>(key.hash), static_cast<unsigned long long>(key.page),
 		             SrtReadKindName(key.kind), static_cast<unsigned long long>(stats.count),
-		             static_cast<double>(stats.wait_ns) / 1000000.0, resources.c_str(), sources.c_str(), values.c_str(),
-		             slots.c_str());
+		             static_cast<double>(stats.wait_ns) / 1000000.0, resources.c_str(), sources.c_str());
 	}
 }
 
@@ -520,63 +469,6 @@ std::optional<std::pair<uint64_t, uint64_t>> PendingSrtDependency(uint64_t addre
 	}
 	return std::pair {dependency.output_address, dependency.output_size};
 }
-
-} // namespace
-
-thread_local bool     t_srt_gpu_chain_active = false;
-thread_local bool     t_srt_gpu_chain_pending = false;
-thread_local uint64_t t_srt_gpu_chain_hash = 0;
-thread_local uint32_t t_srt_gpu_chain_slot = UINT32_MAX;
-thread_local uint32_t t_srt_gpu_chain_uses = 0;
-
-SrtGpuChainScope::SrtGpuChainScope(const ResourcePlan& program, uint32_t slot):
-    m_previous_active(t_srt_gpu_chain_active), m_previous_pending(t_srt_gpu_chain_pending),
-    m_previous_hash(t_srt_gpu_chain_hash), m_previous_slot(t_srt_gpu_chain_slot),
-    m_previous_uses(t_srt_gpu_chain_uses) {
-	t_srt_gpu_chain_active = false;
-	t_srt_gpu_chain_pending = false;
-	if (!SrtGpuChainEnabled() || slot >= program.srt_reads.size()) return;
-	const auto& read = program.srt_reads[slot];
-	if (read.gpu_flag_slot || read.gpu_flag >= program.srt_reads.size()) return;
-	t_srt_gpu_chain_active = true;
-	t_srt_gpu_chain_hash = program.shader_hash;
-	t_srt_gpu_chain_slot = slot;
-	t_srt_gpu_chain_uses = read.uses;
-}
-
-SrtGpuChainScope::~SrtGpuChainScope() {
-	t_srt_gpu_chain_active = m_previous_active;
-	t_srt_gpu_chain_pending = m_previous_pending;
-	t_srt_gpu_chain_hash = m_previous_hash;
-	t_srt_gpu_chain_slot = m_previous_slot;
-	t_srt_gpu_chain_uses = m_previous_uses;
-}
-
-bool SrtGpuChainScope::Pending() const {
-	return t_srt_gpu_chain_active && t_srt_gpu_chain_pending;
-}
-
-bool ProbeSrtGpuChain(uint64_t address, uint64_t size) {
-	if (!t_srt_gpu_chain_active || t_ahead.log != nullptr) return false;
-	SrtGpuDependency dependency {};
-	const auto hook = g_srt_gpu_dependency_hook.load(std::memory_order_relaxed);
-	if (hook == nullptr || !hook(address, size, dependency) || !dependency.pending) return false;
-	t_srt_gpu_chain_pending = true;
-	static std::mutex mutex;
-	static std::set<std::pair<uint64_t, uint32_t>> seen;
-	std::lock_guard lock(mutex);
-	if (seen.emplace(t_srt_gpu_chain_hash, t_srt_gpu_chain_slot).second) {
-		std::fprintf(stderr,
-		             "SRT_GPU_CHAIN hash=0x%016llx slot=%u uses=0x%x read=0x%llx+0x%llx "
-		             "reason=pending_producer_gpu_load\n",
-		             static_cast<unsigned long long>(t_srt_gpu_chain_hash), t_srt_gpu_chain_slot,
-		             t_srt_gpu_chain_uses, static_cast<unsigned long long>(address),
-		             static_cast<unsigned long long>(size));
-	}
-	return true;
-}
-
-namespace {
 
 bool ProbeSrtSpecializationSkip(uint64_t address, std::span<uint32_t> values) {
 	if (!SrtSkipPendingSpecializationEnabled()) return false;
@@ -2526,11 +2418,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	}
 	plan.srt_reads.reserve(program.srt_reads.size());
 	for (const auto& read: program.srt_reads) {
-		plan.srt_reads.push_back({.value = Clone(read.value),
-		                          .flat_offset = read.flat_offset,
-		                          .gpu_flag = read.gpu_flag,
-		                          .uses = read.uses,
-		                          .gpu_flag_slot = read.gpu_flag_slot});
+		plan.srt_reads.push_back({Clone(read.value), read.flat_offset});
 	}
 	// A proven uniform factor can decide a branch even when its other lanes are unknown.
 	// Keep only that Boolean structure, never the varying shader dependency graph.
@@ -2579,53 +2467,6 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	for (uint32_t i = 0; i < plan.uniform_fill.fill.words; ++i) {
 		plan.uniform_fill.values[i] = Clone(plan.uniform_fill.values[i]);
 	}
-	std::function<void(Value, uint32_t)> mark_use = [&](Value root, uint32_t use) {
-		std::vector<Value> pending {root};
-		std::unordered_set<const Inst*> visited;
-		while (!pending.empty()) {
-			const auto value = pending.back().Resolve();
-			pending.pop_back();
-			const auto* inst = value.TryInstruction();
-			if (inst == nullptr || !visited.insert(inst).second) continue;
-			if (inst->GetOpcode() == ValueOpcode::ReadConst && inst->NumArgs() == 2u) {
-				const auto slot = inst->Arg(1).Resolve();
-				if (slot.IsImmediate() && slot.GetType() == Type::U32 && slot.U32() < program.srt_reads.size()) {
-					plan.srt_reads[slot.U32()].uses |= use;
-					pending.push_back(program.srt_reads[slot.U32()].value);
-				}
-			}
-			for (size_t arg = 0; arg < inst->NumArgs(); ++arg) pending.push_back(inst->Arg(arg));
-		}
-	};
-	const std::function<void(uint32_t, uint32_t)> mark_source = [&](uint32_t source, uint32_t use) {
-		if (source >= program.descriptor_sources.size()) return;
-		const auto& descriptor = program.descriptor_sources[source];
-		for (uint32_t word = 0; word < descriptor.dword_count; ++word) mark_use(descriptor.dwords[word], use);
-		if (!descriptor.indirect_descriptor.has_value()) return;
-		for (const auto candidate: descriptor.indirect_descriptor->sources) mark_source(candidate, use);
-	};
-	for (const auto& buffer: program.info.buffers) mark_source(buffer.source, SrtReadUseBufferDescriptor);
-	for (const auto& range: program.info.indirect_ranges) mark_source(range.source, SrtReadUseBufferDescriptor);
-	for (const auto& image: program.info.images) mark_source(image.source, SrtReadUseImageDescriptor);
-	for (const auto& sampler: program.info.samplers) mark_source(sampler.source, SrtReadUseSamplerDescriptor);
-	for (const auto& source: program.descriptor_sources) {
-		if (!source.indirect_descriptor.has_value()) continue;
-		const auto& indirect = *source.indirect_descriptor;
-		mark_use(indirect.key_count, SrtReadUseLoopCount);
-		mark_use(indirect.selector_first, SrtReadUseSelector);
-		mark_use(indirect.selector_mask, SrtReadUseSelector);
-	}
-	for (const auto* block: program.blocks) {
-		mark_use(block->condition, SrtReadUseBranch);
-		mark_use(block->indirect_target, SrtReadUseBranch);
-	}
-	const auto original_fill = AnalyzeUniformFill(program);
-	for (const auto value: original_fill.values) mark_use(value, SrtReadUseUniformFill);
-	mark_use(original_fill.pattern_size, SrtReadUseUniformFill);
-	mark_use(original_fill.element_count, SrtReadUseUniformFill);
-	for (auto& read: plan.srt_reads) {
-		if (!read.gpu_flag_slot && read.uses == 0u) read.uses = SrtReadUseShaderValue;
-	}
 	plan.capture_specialization_reads |=
 	    capture_indirect_reads || capture_control_reads || !plan.source_reads.empty();
 	if (plan.capture_specialization_reads) {
@@ -2633,7 +2474,6 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 		// on the normalized graph, so discarded Phi/EXEC dependencies stay discarded.
 		std::unordered_set<const Inst*> planned_reads;
 		for (const auto& read: plan.srt_reads) {
-			if (read.gpu_flag_slot) continue;
 			auto* inst = read.value.ResolveInstruction();
 			EXIT_IF(inst == nullptr || (inst->GetOpcode() != ValueOpcode::LoadAddressU32 &&
 			                           inst->GetOpcode() != ValueOpcode::ReadConstBuffer));
@@ -2989,12 +2829,6 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 	const auto words = fill.fill.words;
 	std::array<uint32_t, 4> stored {};
 	bool uniform_fill = words != 0;
-	for (const auto& read: program.srt_reads) {
-		if ((read.uses & SrtReadUseUniformFill) != 0u && read.gpu_flag < snapshot.flattened_srt.size() &&
-		    snapshot.flattened_srt[read.gpu_flag] != 0u) {
-			uniform_fill = false;
-		}
-	}
 	for (uint32_t i = 0; i < words && uniform_fill; ++i) {
 		uniform_fill = (tape != nullptr ? tape_clean->EvaluateFill(i, stored[i])
 		                                : clean->Evaluate(fill.values[i], stored[i])) &&
@@ -3026,7 +2860,6 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 		    i < program.info.buffers.size() ? i : specialization.buffers[i].indirect_root;
 		if (base_index >= program.info.buffers.size()) return MaterializeFailAt(__LINE__);
 		const auto& base = program.info.buffers[base_index];
-		bool generic_specialization = false;
 		const SrtReadResourceScope resource_scope(SrtResourceKind::Buffer, base.source);
 		if (i < program.info.buffers.size()) {
 			const auto* source = Source(program, base.source);
@@ -3042,7 +2875,6 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 					    snapshot.buffers, specialization.buffers, ShaderInfo::MaxBuffers, NormalizeIndirectStoreBuffer);
 					if (!materialized && dependent.Outputs().empty()) return MaterializeFailAt(__LINE__);
 					if (!dependent.Outputs().empty()) {
-						generic_specialization = true;
 						snapshot.flattened_srt.resize(flat_begin);
 						snapshot.buffers.resize(resource_count);
 						specialization.buffers.resize(resource_count);
@@ -3104,16 +2936,10 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 			buffer.packed_stride   = (packed_stride & ~0x3fffu) | (1u << 31u) | 1u;
 			buffer.zero_stride_oob = false;
 		}
-		if (generic_specialization) {
-			buffer.packed_stride = (1u << 31u) | 1u;
-			buffer.descriptor_format = Prospero::BufferFormat::kInvalid;
-			buffer.descriptor_swizzle = DstSel(4, 5, 6, 7);
-			buffer.zero_stride_oob = false;
-		}
 		// The null formatted share: an all-zero V# of a formatted buffer takes the specialization of the
 		// binding's last live V#; the emitter returns zeros (the null V#'s DST_SEL 0) when the run-time stride is 0.
 		// Other zero-stride V#s keep their own specialization (their result depends on their own format and DST_SEL).
-		if (!generic_specialization && base.formatted && i < program.info.buffers.size() &&
+		if (base.formatted && i < program.info.buffers.size() &&
 		    program.null_formatted_live != nullptr && RecordsNullShare()) {
 			// The resolve thread: only what the GPU thread applies in order (ApplyNullFormattedShare).
 			auto& kinds = program.ThreadScratch().null_share_kinds;
@@ -3128,7 +2954,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 			}
 			continue;
 		}
-		if (!generic_specialization && base.formatted && i < program.info.buffers.size() &&
+		if (base.formatted && i < program.info.buffers.size() &&
 		    program.null_formatted_live != nullptr) {
 			auto&            shared = *program.null_formatted_live;
 			std::scoped_lock lock(shared.mutex);
@@ -3154,8 +2980,7 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 		// KYTY_DIAG_NULL_FORMATTED_STICKY=1: logged APPROXIMATION. A null formatted buffer keeps
 		// the format and swizzle this binding last had while live; its zero run-time stride makes
 		// every access out of bounds (ONE-swizzled components then read 1 instead of 0).
-		if (!generic_specialization && NullFormattedStickyEnabled() && base.formatted &&
-		    i < program.info.buffers.size()) {
+		if (NullFormattedStickyEnabled() && base.formatted && i < program.info.buffers.size()) {
 			auto& sticky = program.ThreadScratch().sticky_buffer_formats;
 			if (sticky.size() < program.info.buffers.size())
 				sticky.resize(program.info.buffers.size(), {0u, 0u});
@@ -3484,22 +3309,13 @@ bool ReadsUnchangedFast(const ReadLog& log, const SrtRuntime& runtime, FastAdopt
 	++counted.calls;
 	// Strict entries are compared with the backing store by the verifier: only valid when the runtime has a strict
 	// reader at all (without one a strict entry cannot read as it did).
-	const FastVerifyHook hook = SrtSkipPendingSpecializationEnabled() || SrtGpuChainEnabled()
-	                                ? nullptr
-	                                : runtime.read_specialization_memory != nullptr
-	                                      ? g_fast_verify_hook.load(std::memory_order_relaxed)
-	                                      : nullptr;
+	const FastVerifyHook hook =
+	    runtime.read_specialization_memory != nullptr ? g_fast_verify_hook.load(std::memory_order_relaxed) : nullptr;
 	// A real call makes its ordinary reads inside this bracket; the verifier shares its page cache.
 	const OrdinaryReadSession session(true);
 	const size_t              count = log.entries.size();
 	size_t                    index = 0;
 	while (index < count) {
-		const auto& entry = log.entries[index];
-		if (entry.ok && (SrtSkipPendingSpecializationEnabled() || SrtGpuChainEnabled()) &&
-		    PendingSrtDependency(entry.address, entry.size).has_value()) {
-			t_srt_changed_entry = index;
-			return false;
-		}
 		if (hook != nullptr) {
 			size_t     stop  = index;
 			const auto found = hook(log, index, stop, counted);

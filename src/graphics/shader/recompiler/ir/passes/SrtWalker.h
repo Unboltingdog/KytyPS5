@@ -143,18 +143,6 @@ private:
 	uint32_t        m_previous_source;
 };
 
-class SrtReadValueScope {
-public:
-	SrtReadValueScope(const SrtRead& read, uint32_t slot);
-	~SrtReadValueScope();
-	SrtReadValueScope(const SrtReadValueScope&)            = delete;
-	SrtReadValueScope& operator=(const SrtReadValueScope&) = delete;
-
-private:
-	uint32_t m_previous_slot;
-	uint32_t m_previous_uses;
-};
-
 void NoteSrtReadRange(uint64_t vaddr, uint64_t size);
 void NoteSrtReadWait(uint64_t wait_ns);
 void ReportSrtReadDiagnostics();
