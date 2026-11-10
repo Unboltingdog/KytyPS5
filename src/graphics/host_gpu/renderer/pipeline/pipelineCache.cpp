@@ -635,6 +635,8 @@ struct PipelineCache::ProgramCache {
 			BuildStageStaticKey(input_info, lookup_key.static_state);
 			entry = programs.find(lookup_key);
 		}
+		// A program whose translation failed resource tracking (TRACK_FAIL) is not translated again for every draw.
+		if (entry == programs.end() && !track_failed.empty() && track_failed.contains(lookup_key)) return {};
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
 		    .shader_base                = params.Base(),
@@ -818,7 +820,10 @@ struct PipelineCache::ProgramCache {
 		const bool defer_translation = reuse && !first_use && !source_changed;
 		if (!reused_plan.has_value() && !defer_translation) {
 			translate();
-			if (translated.has_value() && translated->track_failure.has_value()) return {};
+			if (translated.has_value() && translated->track_failure.has_value()) {
+				if (entry == programs.end()) track_failed.insert(lookup_key);
+				return {};
+			}
 		}
 		if (entry == programs.end() && source.unsupported_call_pc != UINT32_MAX) {
 			// Upstream cad6aafdc skips such a dispatch ("TEMPORARY COMPUTE DISPATCH SKIP", rendering incomplete); not taken
@@ -1164,6 +1169,7 @@ struct PipelineCache::ProgramCache {
 	}
 
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
+	std::unordered_set<ProgramKey, ProgramKeyHash>              track_failed; // TRACK_FAIL programs (skipped draws)
 	ProgramKey                                                  lookup_key;
 	ProgramKey                                                  ahead_key; // the resolve thread's
 	vk::Device                                                  device;
