@@ -1350,6 +1350,78 @@ void TestSrtGpuDependent() {
         "unbounded pending write did not retain the exact wait path");
 }
 
+void TestSrtGpuChain() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.shader_hash = 0x43b2c3d4e5f60718ull;
+  program.srt_plan_complete = true;
+  program.resource_tracking_complete = true;
+  auto &block = AddValueBlock(program);
+  MemoryInfo memory;
+  memory.kind = ResourceKind::ScalarAddress;
+  memory.planning_only = true;
+  program.memory_info.push_back(memory);
+  auto &handle = block.AppendNewInst(ValueOpcode::GetAddressResource,
+                                     {Value(0x1000u), Value(0u)});
+  auto &read = block.AppendNewInst(
+      ValueOpcode::LoadAddressU32,
+      {Value(&handle), Value(0u), Value(0u), Value(true)});
+  read.SetFlags(MemoryFlags{.index = 0});
+  program.srt_reads.push_back(
+      {.value = Value(&read), .flat_offset = 0, .gpu_flag = 1});
+  program.srt_reads.push_back(
+      {.value = Value(0u), .flat_offset = 1, .gpu_flag_slot = true});
+  SetSrtGpuChainOverride(true);
+  auto plan = ExtractResourcePlan(program);
+  Check(plan.srt_tape != nullptr,
+        "GPU-chain fixture did not build its tape");
+
+  static bool pending;
+  SetSrtGpuDependencyHook(+[](uint64_t address, uint64_t,
+                              SrtGpuDependency &result) {
+    if (address != 0x1000u) return false;
+    result.pending = pending;
+    return true;
+  });
+  struct Restore {
+    ~Restore() {
+      SetSrtGpuDependencyHook(nullptr);
+      SetSrtGpuChainOverride(std::nullopt);
+    }
+  } restore;
+
+  const auto exercise = [&](bool producer_pending, uint32_t expected_reads,
+                            uint32_t expected_word, uint32_t expected_flag) {
+    pending = producer_pending;
+    uint32_t ordinary_reads = 0;
+    const SrtRuntime runtime{
+        .read_memory = +[](void *data, uint64_t address,
+                           std::span<uint32_t> words) {
+          ++*static_cast<uint32_t *>(data);
+          if (address != 0x1000u || words.size() != 1) return false;
+          words[0] = 0x12345678u;
+          return true;
+        },
+        .userdata = &ordinary_reads};
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+              snapshot.flattened_srt ==
+                  std::vector<uint32_t>{expected_word, expected_flag} &&
+              ordinary_reads == expected_reads,
+          producer_pending
+              ? "pending GPU chain did not select the shader load without a host read"
+              : "completed GPU chain did not select the exact host value");
+  };
+
+  exercise(true, 0, 0, 1);
+  exercise(false, 1, 0x12345678u, 0);
+  plan.srt_tape.reset();
+  exercise(true, 0, 0, 1);
+  exercise(false, 1, 0x12345678u, 0);
+}
+
 } // namespace
 
 namespace Common {
@@ -1393,6 +1465,7 @@ int main() {
   TestRecordKeyedRanges();
   TestSrtGpuRange();
   TestSrtGpuDependent();
+  TestSrtGpuChain();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

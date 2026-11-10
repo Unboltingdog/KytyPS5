@@ -40,6 +40,7 @@ namespace {
 std::atomic_int g_indirect_table_slots_override {-1};
 std::atomic_int g_srt_gpu_range_override {-1};
 std::atomic_int g_srt_gpu_dependent_override {-1};
+std::atomic_int g_srt_gpu_chain_override {-1};
 } // namespace
 
 bool IndirectTableSlots() {
@@ -82,6 +83,20 @@ bool SrtGpuDependentEnabled() {
 
 void SetSrtGpuDependentOverride(std::optional<bool> enabled) {
 	g_srt_gpu_dependent_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
+}
+
+bool SrtGpuChainEnabled() {
+	const int override = g_srt_gpu_chain_override.load(std::memory_order_relaxed);
+	if (override >= 0) return override != 0;
+	static const bool enabled = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_FIX_SRT_GPU_CHAIN");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
+void SetSrtGpuChainOverride(std::optional<bool> enabled) {
+	g_srt_gpu_chain_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
 }
 
 namespace {
@@ -438,6 +453,57 @@ bool ProbeSrtGpuDependent(uint64_t address, std::span<uint32_t> values) {
 	std::ranges::fill(values, 0u);
 	return true;
 }
+
+} // namespace
+
+thread_local bool     t_srt_gpu_chain_active = false;
+thread_local bool     t_srt_gpu_chain_pending = false;
+thread_local uint64_t t_srt_gpu_chain_hash = 0;
+thread_local uint32_t t_srt_gpu_chain_slot = UINT32_MAX;
+
+SrtGpuChainScope::SrtGpuChainScope(const ResourcePlan& program, uint32_t slot):
+    m_previous_active(t_srt_gpu_chain_active), m_previous_pending(t_srt_gpu_chain_pending),
+    m_previous_hash(t_srt_gpu_chain_hash), m_previous_slot(t_srt_gpu_chain_slot) {
+	t_srt_gpu_chain_active = false;
+	t_srt_gpu_chain_pending = false;
+	if (!SrtGpuChainEnabled() || slot >= program.srt_reads.size()) return;
+	const auto& read = program.srt_reads[slot];
+	if (read.gpu_flag_slot || read.gpu_flag >= program.srt_reads.size()) return;
+	t_srt_gpu_chain_active = true;
+	t_srt_gpu_chain_hash = program.shader_hash;
+	t_srt_gpu_chain_slot = slot;
+}
+
+SrtGpuChainScope::~SrtGpuChainScope() {
+	t_srt_gpu_chain_active = m_previous_active;
+	t_srt_gpu_chain_pending = m_previous_pending;
+	t_srt_gpu_chain_hash = m_previous_hash;
+	t_srt_gpu_chain_slot = m_previous_slot;
+}
+
+bool SrtGpuChainScope::Pending() const {
+	return t_srt_gpu_chain_active && t_srt_gpu_chain_pending;
+}
+
+bool ProbeSrtGpuChain(uint64_t address, uint64_t size) {
+	if (!SrtGpuChainEnabled() || !t_srt_gpu_chain_active || t_ahead.log != nullptr) return false;
+	SrtGpuDependency dependency {};
+	const auto hook = g_srt_gpu_dependency_hook.load(std::memory_order_relaxed);
+	if (hook == nullptr || !hook(address, size, dependency) || !dependency.pending) return false;
+	t_srt_gpu_chain_pending = true;
+	static std::mutex mutex;
+	static std::set<std::pair<uint64_t, uint32_t>> seen;
+	std::lock_guard lock(mutex);
+	if (seen.emplace(t_srt_gpu_chain_hash, t_srt_gpu_chain_slot).second) {
+		std::fprintf(stderr,
+		             "SRT_GPU_CHAIN hash=0x%016llx slot=%u read=0x%llx+0x%llx reason=pending_producer_gpu_load\n",
+		             static_cast<unsigned long long>(t_srt_gpu_chain_hash), t_srt_gpu_chain_slot,
+		             static_cast<unsigned long long>(address), static_cast<unsigned long long>(size));
+	}
+	return true;
+}
+
+namespace {
 
 bool CaptureStrictRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
 	if (ProbeSrtGpuDependent(address, values)) return true;
@@ -2355,7 +2421,14 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	}
 	plan.srt_reads.reserve(program.srt_reads.size());
 	for (const auto& read: program.srt_reads) {
-		plan.srt_reads.push_back({Clone(read.value), read.flat_offset});
+		if (SrtGpuChainEnabled()) {
+			plan.srt_reads.push_back({.value = Clone(read.value),
+			                          .flat_offset = read.flat_offset,
+			                          .gpu_flag = read.gpu_flag,
+			                          .gpu_flag_slot = read.gpu_flag_slot});
+		} else {
+			plan.srt_reads.push_back({Clone(read.value), read.flat_offset});
+		}
 	}
 	// A proven uniform factor can decide a branch even when its other lanes are unknown.
 	// Keep only that Boolean structure, never the varying shader dependency graph.
@@ -2411,6 +2484,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 		// on the normalized graph, so discarded Phi/EXEC dependencies stay discarded.
 		std::unordered_set<const Inst*> planned_reads;
 		for (const auto& read: plan.srt_reads) {
+			if (SrtGpuChainEnabled() && read.gpu_flag_slot) continue;
 			auto* inst = read.value.ResolveInstruction();
 			EXIT_IF(inst == nullptr || (inst->GetOpcode() != ValueOpcode::LoadAddressU32 &&
 			                           inst->GetOpcode() != ValueOpcode::ReadConstBuffer));
@@ -3218,13 +3292,26 @@ bool ReadsUnchangedFast(const ReadLog& log, const SrtRuntime& runtime, FastAdopt
 	++counted.calls;
 	// Strict entries are compared with the backing store by the verifier: only valid when the runtime has a strict
 	// reader at all (without one a strict entry cannot read as it did).
-	const FastVerifyHook hook =
-	    runtime.read_specialization_memory != nullptr ? g_fast_verify_hook.load(std::memory_order_relaxed) : nullptr;
+	const FastVerifyHook hook = SrtGpuChainEnabled()
+	                                ? nullptr
+	                                : runtime.read_specialization_memory != nullptr
+	                                      ? g_fast_verify_hook.load(std::memory_order_relaxed)
+	                                      : nullptr;
 	// A real call makes its ordinary reads inside this bracket; the verifier shares its page cache.
 	const OrdinaryReadSession session(true);
 	const size_t              count = log.entries.size();
 	size_t                    index = 0;
 	while (index < count) {
+		if (SrtGpuChainEnabled()) {
+			const auto& entry = log.entries[index];
+			SrtGpuDependency dependency {};
+			const auto dependency_hook = g_srt_gpu_dependency_hook.load(std::memory_order_relaxed);
+			if (entry.ok && dependency_hook != nullptr &&
+			    dependency_hook(entry.address, entry.size, dependency) && dependency.pending) {
+				t_srt_changed_entry = index;
+				return false;
+			}
+		}
 		if (hook != nullptr) {
 			size_t     stop  = index;
 			const auto found = hook(log, index, stop, counted);

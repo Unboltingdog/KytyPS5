@@ -3004,6 +3004,150 @@ void TestSrtFlatteningAndRuntimeMemoization() {
         "flattened typed SRT reads were not collected");
 }
 
+void TestGpuScalarChain() {
+  for (const bool enabled : {false, true}) {
+    SetSrtGpuChainOverride(enabled);
+    Fixture fixture;
+    const auto base = fixture.Address(fixture.UserData(0), fixture.UserData(1), 4);
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarAddress;
+    const auto read = fixture.Emit(ValueOpcode::LoadAddressU32,
+                                   {base, Value(0u), Value(0u), Value(true)},
+                                   fixture.AddMemory(scalar, 4));
+    const auto math = fixture.Emit(ValueOpcode::IAdd32, {read, Value(1u)});
+    fixture.Emit(ValueOpcode::ReferenceU32, {math});
+    fixture.PlanAndTrack();
+    auto plan = ExtractResourcePlan(fixture.program);
+    if (enabled) {
+      Check(plan.srt_reads.size() == 2 && plan.srt_reads[0].gpu_flag == 1u &&
+                plan.srt_reads[1].gpu_flag_slot &&
+                !fixture.program.memory_info[0].planning_only,
+            "data-only scalar load lost its GPU flag or BDA path");
+      Check(std::ranges::any_of(read.ResolveInstruction()->Uses(), [](const Use &use) {
+              return use.user->GetOpcode() == ValueOpcode::SelectU32;
+            }),
+            "data-only scalar load has no CPU/GPU select");
+    } else {
+      Check(plan.srt_reads.size() == 1 &&
+                plan.srt_reads[0].gpu_flag == UINT32_MAX &&
+                !plan.srt_reads[0].gpu_flag_slot &&
+                fixture.program.memory_info[0].planning_only,
+            "disabled GPU chain changed ordinary scalar flattening");
+    }
+  }
+  SetSrtGpuChainOverride(std::nullopt);
+}
+
+void TestGpuScalarChainOnlyShaderData() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  SetSrtGpuChainOverride(true);
+  struct Restore {
+    ~Restore() { SetSrtGpuChainOverride(std::nullopt); }
+  } restore;
+  const auto emit_read = [](Fixture &fixture, Value base, uint32_t offset = 0) {
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarAddress;
+    return fixture.Emit(ValueOpcode::LoadAddressU32,
+                        {base, Value(offset), Value(0u), Value(true)},
+                        fixture.AddMemory(scalar, 4));
+  };
+  {
+    Fixture fixture;
+    const auto root = fixture.Address(fixture.UserData(0), fixture.UserData(1), 4);
+    const auto low = emit_read(fixture, root);
+    const auto high = emit_read(fixture, root, 4);
+    const auto next = fixture.Address(low, high, 8);
+    const auto leaf = emit_read(fixture, next, 0);
+    fixture.Emit(ValueOpcode::ReferenceU32,
+                 {fixture.Emit(ValueOpcode::IAdd32, {leaf, Value(1u)})});
+    fixture.PlanAndTrack();
+    const auto plan = ExtractResourcePlan(fixture.program);
+    Check(plan.srt_reads.size() == 6 && plan.info.buffers.empty() &&
+              plan.info.images.empty() && plan.info.samplers.empty(),
+          "safe pointer chain added a resource or lost its flat slots");
+    for (size_t slot = 0; slot < plan.srt_reads.size(); slot += 2) {
+      Check(plan.srt_reads[slot].gpu_flag == slot + 1 &&
+                plan.srt_reads[slot + 1].gpu_flag_slot,
+            "safe pointer-chain load did not retain its GPU path");
+    }
+  }
+  enum class CpuUse { Buffer, Image, Sampler, Branch, IndirectTarget };
+  for (const auto use : {CpuUse::Buffer, CpuUse::Image, CpuUse::Sampler,
+                         CpuUse::Branch, CpuUse::IndirectTarget}) {
+    Fixture fixture;
+    const auto base = fixture.Address(fixture.UserData(0), fixture.UserData(1), 4);
+    const auto read = emit_read(fixture, base);
+    size_t buffers = 0;
+    size_t images = 0;
+    size_t samplers = 0;
+    switch (use) {
+    case CpuUse::Buffer: {
+      const auto handle = fixture.Buffer({read, Value(0u), Value(64u), Value(0u)}, 8);
+      MemoryInfo memory;
+      memory.kind = ResourceKind::Buffer;
+      fixture.Emit(ValueOpcode::LoadBufferU32,
+                   {handle, Value(0u), Value(0u), Value(0u), Value(true)},
+                   fixture.AddMemory(memory, 8));
+      buffers = 1;
+      break;
+    }
+    case CpuUse::Image: {
+      const auto handle = fixture.Image(
+          {read, Value(0u), Value(0u), Value(0u), Value(0u), Value(0u),
+           Value(0u), Value(0u)}, 8);
+      MemoryInfo memory;
+      memory.kind = ResourceKind::Image;
+      memory.image_dimension = Decoder::ImageDimension::Dim2D;
+      fixture.Emit(ValueOpcode::ImageRead,
+                   {handle, fixture.ImageAddress(), Value(true)},
+                   fixture.AddMemory(memory, 8));
+      images = 1;
+      break;
+    }
+    case CpuUse::Sampler: {
+      const auto image = fixture.Image(
+          {Value(0u), Value(0u), Value(0u), Value(0u), Value(0u), Value(0u),
+           Value(0u), Value(0u)}, 8);
+      const auto sampler = fixture.Sampler({read, Value(0u), Value(0u), Value(0u)}, 8);
+      MemoryInfo memory;
+      memory.kind = ResourceKind::Image;
+      memory.image_dimension = Decoder::ImageDimension::Dim2D;
+      fixture.Emit(ValueOpcode::ImageSampleRaw,
+                   {image, sampler, fixture.ImageAddress(), Value(true)},
+                   fixture.AddMemory(memory, 8));
+      images = 1;
+      samplers = 1;
+      break;
+    }
+    case CpuUse::Branch: {
+      auto *target = fixture.AddBlock();
+      fixture.block->condition = read;
+      fixture.block->terminator.kind = CFG::TerminatorKind::ConditionalBranch;
+      fixture.block->terminator.true_block = target;
+      fixture.block->terminator.false_block = target;
+      break;
+    }
+    case CpuUse::IndirectTarget: {
+      auto *target = fixture.AddBlock();
+      fixture.block->indirect_target = read;
+      fixture.block->terminator.kind = CFG::TerminatorKind::IndirectBranch;
+      fixture.block->terminator.cases = {{0u, target}};
+      fixture.block->terminator.indexed = true;
+      break;
+    }
+    }
+    fixture.PlanAndTrack();
+    const auto plan = ExtractResourcePlan(fixture.program);
+    Check(plan.srt_reads.size() == 1 &&
+              plan.srt_reads[0].gpu_flag == UINT32_MAX &&
+              fixture.program.memory_info[0].planning_only &&
+              plan.info.buffers.size() == buffers &&
+              plan.info.images.size() == images &&
+              plan.info.samplers.size() == samplers,
+          "CPU-dependent scalar read became hybrid or changed resource counts");
+  }
+}
+
 void TestDynamicSrtReadRemainsExplicit() {
   Fixture fixture;
   const auto base =
@@ -4474,6 +4618,8 @@ int main() {
     Run("image descriptor fields", TestImageDescriptorFields);
     Run("draw-uniform scalar image", TestUniformScalarBufferImage);
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
+    Run("GPU scalar chain", TestGpuScalarChain);
+    Run("GPU scalar chain data uses", TestGpuScalarChainOnlyShaderData);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("writable descriptor phi", TestWritableDescriptorPhi);
     Run("conditional sampler phi", TestConditionalSamplerPhi);

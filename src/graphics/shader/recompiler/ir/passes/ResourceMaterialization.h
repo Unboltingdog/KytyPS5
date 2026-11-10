@@ -104,6 +104,25 @@ void SetSrtGpuDependencyHook(SrtGpuDependencyHook hook);
 bool SrtGpuDependentEnabled();
 void SetSrtGpuDependentOverride(std::optional<bool> enabled);
 
+// KYTY_FIX_SRT_GPU_CHAIN=1 (default off): an eligible scalar load keeps a GPU path selected per dispatch.
+bool SrtGpuChainEnabled();
+void SetSrtGpuChainOverride(std::optional<bool> enabled);
+class SrtGpuChainScope {
+public:
+	SrtGpuChainScope(const ResourcePlan& program, uint32_t slot);
+	~SrtGpuChainScope();
+	SrtGpuChainScope(const SrtGpuChainScope&) = delete;
+	SrtGpuChainScope& operator=(const SrtGpuChainScope&) = delete;
+	[[nodiscard]] bool Pending() const;
+
+private:
+	bool m_previous_active = false;
+	bool m_previous_pending = false;
+	uint64_t m_previous_hash = 0;
+	uint32_t m_previous_slot = UINT32_MAX;
+};
+bool ProbeSrtGpuChain(uint64_t address, uint64_t size);
+
 using OrdinaryReadHook = bool (*)(uint64_t vaddr, void* data, uint64_t size);
 void SetOrdinaryReadHook(OrdinaryReadHook hook);
 // An ordinary SRT-walk read of guest memory: through the hook when one is set, else a direct read.
