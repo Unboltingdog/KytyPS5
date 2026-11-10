@@ -1350,6 +1350,112 @@ void TestSrtGpuDependent() {
         "unbounded pending write did not retain the exact wait path");
 }
 
+void TestSrtSkipPendingSpecialization() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.shader_hash = 0x43a1b2c3d4e5f607ull;
+  program.srt_plan_complete = true;
+  program.resource_tracking_complete = true;
+  auto &block = AddValueBlock(program);
+  const auto user_data_value = [&](uint32_t index) {
+    return Value(&block.AppendNewInst(ValueOpcode::GetUserData,
+                                      {Value(static_cast<ScalarReg>(index))}));
+  };
+  DescriptorSource table;
+  table.dword_count = 2;
+  table.dwords[0] = user_data_value(0);
+  table.dwords[1] = user_data_value(1);
+  program.descriptor_sources.push_back(table);
+  DescriptorSource record;
+  record.dword_count = 4;
+  record.dwords.fill(Value(0u));
+  auto &indirect = record.indirect_descriptor.emplace();
+  indirect.table_source = 0;
+  indirect.table_stride = 16;
+  indirect.key_count = Value(1u);
+  program.descriptor_sources.push_back(record);
+  program.info.buffers.push_back(
+      {.source = 1, .read = true, .formatted = true});
+  auto plan = ExtractResourcePlan(program);
+
+  static SrtGpuDependency dependency;
+  static uint32_t dependency_queries;
+  SetSrtGpuDependencyHook(+[](uint64_t address, uint64_t,
+                              SrtGpuDependency &result) {
+    if (address != 0x2000u) return false;
+    ++dependency_queries;
+    result = dependency;
+    return true;
+  });
+  SetSrtSkipPendingSpecializationOverride(true);
+  struct Restore {
+    ~Restore() {
+      SetSrtGpuDependencyHook(nullptr);
+      SetSrtSkipPendingSpecializationOverride(std::nullopt);
+    }
+  } restore;
+
+  uint32_t strict_reads = 0;
+  std::array<uint32_t, 2> user_data{0x2000u, 0u};
+  const SrtRuntime runtime{
+      .user_data = user_data,
+      .userdata = &strict_reads,
+      .read_specialization_memory = +[](void *data, uint64_t address,
+                                        std::span<uint32_t> words) {
+        ++*static_cast<uint32_t *>(data);
+        if (address != 0x2000u || words.size() != 4) return false;
+        std::array<uint32_t, 4> descriptor{
+            0x50000u, 1u << 16u, 1u, (5u << 12u) | (3u << 28u)};
+        std::copy(descriptor.begin(), descriptor.end(), words.begin());
+        return true;
+      }};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  const auto exact_format = static_cast<Libs::Graphics::Prospero::BufferFormat>(5);
+
+  dependency = {.pending = true, .output_address = 0x40000u, .output_size = 0u};
+  dependency_queries = 0;
+  strict_reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            specialization.buffers[0].descriptor_format == exact_format &&
+            snapshot.indirect_ranges.empty() && dependency_queries == 1 &&
+            strict_reads == 1,
+        "an unbounded pending specialization read did not retain exact materialization");
+
+  dependency.pending = false;
+  dependency_queries = 0;
+  strict_reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            specialization.buffers[0].descriptor_format == exact_format &&
+            snapshot.indirect_ranges.empty() && dependency_queries == 1 &&
+            strict_reads == 1,
+        "a completed producer did not retain exact specialization");
+
+  dependency = {.pending = true, .output_address = 0x40000u, .output_size = 52u};
+  dependency_queries = 0;
+  strict_reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            specialization.buffers.size() == 1 &&
+            specialization.buffers[0].descriptor_format ==
+                Libs::Graphics::Prospero::BufferFormat::kInvalid &&
+            snapshot.indirect_ranges ==
+                std::vector<IndirectRange>{{0x40000u, 52u, false}} &&
+            dependency_queries == 1 && strict_reads == 0,
+        "a pending producer did not select the generic permutation without reading");
+
+  dependency.pending = false;
+  dependency_queries = 0;
+  strict_reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            specialization.buffers[0].descriptor_format ==
+                Libs::Graphics::Prospero::BufferFormat::kInvalid &&
+            snapshot.indirect_ranges ==
+                std::vector<IndirectRange>{{0x40000u, 52u, false}} &&
+            dependency_queries == 0 && strict_reads == 0,
+        "the generic specialization decision did not remain sticky");
+}
+
 } // namespace
 
 namespace Common {
@@ -1393,6 +1499,7 @@ int main() {
   TestRecordKeyedRanges();
   TestSrtGpuRange();
   TestSrtGpuDependent();
+  TestSrtSkipPendingSpecialization();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }
