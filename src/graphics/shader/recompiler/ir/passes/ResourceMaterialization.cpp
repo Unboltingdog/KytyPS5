@@ -24,7 +24,6 @@
 #include <fmt/format.h>
 #include <functional>
 #include <limits>
-#include <map>
 #include <numeric>
 #include <tuple>
 #include <optional>
@@ -41,7 +40,6 @@ namespace {
 std::atomic_int g_indirect_table_slots_override {-1};
 std::atomic_int g_srt_gpu_range_override {-1};
 std::atomic_int g_srt_gpu_dependent_override {-1};
-std::atomic_int g_srt_skip_specialization_override {-1};
 } // namespace
 
 bool IndirectTableSlots() {
@@ -84,21 +82,6 @@ bool SrtGpuDependentEnabled() {
 
 void SetSrtGpuDependentOverride(std::optional<bool> enabled) {
 	g_srt_gpu_dependent_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
-}
-
-bool SrtSkipPendingSpecializationEnabled() {
-	const int override = g_srt_skip_specialization_override.load(std::memory_order_relaxed);
-	if (override >= 0) return override != 0;
-	static const bool enabled = [] {
-		const char* value = Common::ShaderEnv::Read("KYTY_FIX_SRT_SKIP_PENDING_SPECIALIZATION");
-		return value != nullptr && value[0] == '1';
-	}();
-	return enabled;
-}
-
-void SetSrtSkipPendingSpecializationOverride(std::optional<bool> enabled) {
-	g_srt_skip_specialization_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1,
-	                                         std::memory_order_relaxed);
 }
 
 namespace {
@@ -420,27 +403,17 @@ struct ReadCapture {
 
 struct SrtGpuDependentState {
 	bool     active = false;
-	bool     specialization = false;
-	uint64_t hash = 0;
 	uint32_t source = UINT32_MAX;
 	bool     written = false;
 	std::vector<std::pair<uint64_t, uint64_t>> outputs;
 };
 thread_local SrtGpuDependentState t_srt_gpu_dependent;
 std::atomic<SrtGpuDependencyHook> g_srt_gpu_dependency_hook {nullptr};
-std::mutex g_srt_specialization_mutex;
-std::map<std::pair<uint64_t, uint32_t>, std::vector<std::pair<uint64_t, uint64_t>>>
-    g_srt_specialization_decisions;
 
 class SrtGpuDependentScope {
 public:
-	SrtGpuDependentScope(const ResourcePlan& program, uint32_t source, bool written, bool specialization = false):
-	    m_previous(std::move(t_srt_gpu_dependent)) {
-		t_srt_gpu_dependent = {.active = true,
-		                       .specialization = specialization,
-		                       .hash = program.shader_hash,
-		                       .source = source,
-		                       .written = written};
+	SrtGpuDependentScope(uint32_t source, bool written): m_previous(std::move(t_srt_gpu_dependent)) {
+		t_srt_gpu_dependent = {.active = true, .source = source, .written = written};
 	}
 	~SrtGpuDependentScope() { t_srt_gpu_dependent = std::move(m_previous); }
 	const std::vector<std::pair<uint64_t, uint64_t>>& Outputs() const { return t_srt_gpu_dependent.outputs; }
@@ -449,56 +422,19 @@ private:
 	SrtGpuDependentState m_previous;
 };
 
-void AppendSrtDependencyOutputs(std::span<const std::pair<uint64_t, uint64_t>> outputs) {
-	for (const auto output: outputs) {
-		if (std::ranges::find(t_srt_gpu_dependent.outputs, output) == t_srt_gpu_dependent.outputs.end()) {
-			t_srt_gpu_dependent.outputs.push_back(output);
-		}
-	}
-}
-
-std::optional<std::pair<uint64_t, uint64_t>> PendingSrtDependency(uint64_t address, uint64_t size) {
+bool ProbeSrtGpuDependent(uint64_t address, std::span<uint32_t> values) {
+	if (!t_srt_gpu_dependent.active || !SrtGpuDependentEnabled() || t_ahead.log != nullptr) return false;
 	SrtGpuDependency dependency {};
 	const auto hook = g_srt_gpu_dependency_hook.load(std::memory_order_relaxed);
-	if (hook == nullptr || !hook(address, size, dependency)) return std::nullopt;
+	if (hook == nullptr || !hook(address, values.size_bytes(), dependency)) return false;
 	const bool bounded = dependency.output_address >= 0x10000u && dependency.output_size != 0u &&
 	                     dependency.output_address <= AddressMask &&
 	                     dependency.output_size - 1u <= AddressMask - dependency.output_address;
-	if (DecideSrtGpuDependent(dependency.pending, true, bounded) != SrtGpuDependentDecision::GenericBuffer) {
-		return std::nullopt;
+	if (DecideSrtGpuDependent(dependency.pending, true, bounded) != SrtGpuDependentDecision::GenericBuffer) return false;
+	const auto output = std::pair {dependency.output_address, dependency.output_size};
+	if (std::ranges::find(t_srt_gpu_dependent.outputs, output) == t_srt_gpu_dependent.outputs.end()) {
+		t_srt_gpu_dependent.outputs.push_back(output);
 	}
-	return std::pair {dependency.output_address, dependency.output_size};
-}
-
-bool ProbeSrtSpecializationSkip(uint64_t address, std::span<uint32_t> values) {
-	if (!SrtSkipPendingSpecializationEnabled()) return false;
-	const auto key = std::pair {t_srt_gpu_dependent.hash, t_srt_gpu_dependent.source};
-	std::optional<std::vector<std::pair<uint64_t, uint64_t>>> outputs;
-	{
-		std::lock_guard lock(g_srt_specialization_mutex);
-		if (const auto found = g_srt_specialization_decisions.find(key);
-		    found != g_srt_specialization_decisions.end()) {
-			outputs = found->second;
-		}
-	}
-	if (!outputs.has_value()) {
-		const auto output = PendingSrtDependency(address, values.size_bytes());
-		if (!output.has_value()) return false;
-		std::lock_guard lock(g_srt_specialization_mutex);
-		outputs = g_srt_specialization_decisions.try_emplace(key, std::vector {*output}).first->second;
-	}
-	AppendSrtDependencyOutputs(*outputs);
-	std::ranges::fill(values, 0u);
-	return true;
-}
-
-bool ProbeSrtGpuDependent(uint64_t address, std::span<uint32_t> values) {
-	if (!t_srt_gpu_dependent.active || t_ahead.log != nullptr) return false;
-	if (t_srt_gpu_dependent.specialization) return ProbeSrtSpecializationSkip(address, values);
-	if (!SrtGpuDependentEnabled()) return false;
-	const auto output = PendingSrtDependency(address, values.size_bytes());
-	if (!output.has_value()) return false;
-	AppendSrtDependencyOutputs(std::span {&*output, 1u});
 	std::ranges::fill(values, 0u);
 	return true;
 }
@@ -1318,6 +1254,7 @@ const char* IndirectRecordRange(const IndirectRangeResource& range, const Descri
 bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& runtime, IndirectEvaluator& clean,
                                std::span<const uint8_t> active, ResourceSnapshot& snapshot) {
 	auto& ranges = snapshot.indirect_ranges;
+	ranges.clear();
 	snapshot.indirect_ranges_complete = false;
 	snapshot.indirect_writes_complete = false;
 	bool incomplete = false; // a widened source left a candidate unlisted
@@ -1332,7 +1269,7 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 		const size_t range_begin = ranges.size();
 		const bool was_incomplete = incomplete;
 		const bool was_incomplete_written = incomplete_written;
-		SrtGpuDependentScope dependent(program, range.source, range.written);
+		SrtGpuDependentScope dependent(range.source, range.written);
 		const bool listed = [&]() -> bool {
 		const auto& indirect = *source->indirect_descriptor;
 		if (!indirect.sources.empty()) {
@@ -2852,7 +2789,6 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 		value.dword_count = program.descriptor_sources[source].dword_count;
 		return true;
 	};
-	snapshot.indirect_ranges.clear();
 	snapshot.buffers.resize(program.info.buffers.size());
 	specialization.buffers.assign(program.info.buffers.size(), {});
 	for (uint32_t i = 0; i < snapshot.buffers.size(); ++i) {
@@ -2867,38 +2803,11 @@ static bool MaterializeResourcesImpl(const ResourcePlan& program, const SrtRunti
 			if (source->indirect_descriptor.has_value()) {
 				snapshot.buffers[i] = {.dword_count = 4u};
 				if (active.empty() || active[base.source]) {
-					const size_t flat_begin = snapshot.flattened_srt.size();
-					const size_t resource_count = snapshot.buffers.size();
-					SrtGpuDependentScope dependent(program, base.source, base.written, true);
-					const bool materialized = MaterializeIndirectDescriptor(
-					    program, *source->indirect_descriptor, base.source, i, 4u, observed, clean_indirect, snapshot,
-					    snapshot.buffers, specialization.buffers, ShaderInfo::MaxBuffers, NormalizeIndirectStoreBuffer);
-					if (!materialized && dependent.Outputs().empty()) return MaterializeFailAt(__LINE__);
-					if (!dependent.Outputs().empty()) {
-						snapshot.flattened_srt.resize(flat_begin);
-						snapshot.buffers.resize(resource_count);
-						specialization.buffers.resize(resource_count);
-						snapshot.buffers[i] = {.dword_count = 4u};
-						specialization.buffers[i] = {};
-						for (const auto [address, size]: dependent.Outputs()) {
-							snapshot.indirect_ranges.push_back({.address = address, .size = size, .written = base.written});
-						}
-						if (t_ahead.log == nullptr) {
-							static std::mutex mutex;
-							static std::set<std::pair<uint64_t, uint32_t>> seen;
-							std::lock_guard lock(mutex);
-							if (seen.emplace(program.shader_hash, base.source).second) {
-								const auto [address, size] = dependent.Outputs().front();
-								std::fprintf(stderr,
-								             "SRT_SKIP_SPECIALIZATION hash=0x%016llx source=%u range=0x%llx-0x%llx "
-								             "outputs=%zu written=%d reason=pending_producer_generic_permutation\n",
-								             static_cast<unsigned long long>(program.shader_hash), base.source,
-								             static_cast<unsigned long long>(address),
-								             static_cast<unsigned long long>(address + size), dependent.Outputs().size(),
-								             base.written ? 1 : 0);
-							}
-						}
-					}
+					if (!MaterializeIndirectDescriptor(
+					        program, *source->indirect_descriptor, base.source, i, 4u, observed, clean_indirect, snapshot,
+					        snapshot.buffers, specialization.buffers, ShaderInfo::MaxBuffers,
+					        NormalizeIndirectStoreBuffer))
+						return MaterializeFailAt(__LINE__);
 				}
 			} else if (!evaluate(base.source, snapshot.buffers[i], base.written)) {
 				return MaterializeFailAt(__LINE__);

@@ -104,12 +104,6 @@ void SetSrtGpuDependencyHook(SrtGpuDependencyHook hook);
 bool SrtGpuDependentEnabled();
 void SetSrtGpuDependentOverride(std::optional<bool> enabled);
 
-// KYTY_FIX_SRT_SKIP_PENDING_SPECIALIZATION=1 (default off): an already-indirect buffer whose specialization
-// reads have a pending producer keeps its runtime V# decode and binds the producer allocation conservatively.
-// The generic decision is sticky per shader/source, so completed later producers do not flip the permutation.
-bool SrtSkipPendingSpecializationEnabled();
-void SetSrtSkipPendingSpecializationOverride(std::optional<bool> enabled);
-
 using OrdinaryReadHook = bool (*)(uint64_t vaddr, void* data, uint64_t size);
 void SetOrdinaryReadHook(OrdinaryReadHook hook);
 // An ordinary SRT-walk read of guest memory: through the hook when one is set, else a direct read.
