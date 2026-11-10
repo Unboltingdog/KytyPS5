@@ -548,10 +548,6 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		}
 	}
 	uint32_t word = 0;
-	if (ProbeSrtGpuChain(address, sizeof(word))) {
-		result = 0u;
-		return true;
-	}
 	const SrtReadKindScope read_kind(SrtReadKind::EvaluateRawRead, false);
 	const auto reader = vector ? m_runtime.read_specialization_memory : m_runtime.read_memory;
 	if (reader != nullptr) {
@@ -947,27 +943,15 @@ bool SrtWalker::EvaluateDescriptor(uint32_t source, DescriptorValue& result) {
 
 bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	if (!m_program.srt_plan_complete) return false;
-	uint32_t gpu_pending_uses = 0;
 	const auto refresh = [&](uint32_t slot) {
 		if (slot >= m_program.srt_reads.size()) return false;
 		const auto& read = m_program.srt_reads[slot];
-		const SrtReadValueScope value_scope(read, slot);
-		if (read.gpu_flag_slot) return read.flat_offset < flat.size();
-		const SrtGpuChainScope gpu_chain(m_program, slot);
 		const auto* inst = read.value.ResolveInstruction();
 		const bool clean = inst != nullptr && inst->Flags<SrtReadFlags>().clean != 0u;
 		if (clean && (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr))
 			return false;
 		auto& evaluator = clean ? *m_clean_evaluator : *this;
 		const bool ok = read.flat_offset < flat.size() && evaluator.Evaluate(read.value, flat[read.flat_offset]);
-		if (gpu_chain.Pending()) {
-			if (read.gpu_flag >= flat.size()) return false;
-			gpu_pending_uses |= read.uses;
-			flat[read.flat_offset] = 0u;
-			flat[read.gpu_flag] = 1u;
-			return true;
-		}
-		if (ok && read.gpu_flag < flat.size()) flat[read.gpu_flag] = 0u;
 		if (!ok) {
 			const auto* inst = read.value.Resolve().TryInstruction();
 			std::fprintf(stderr, "SRT refresh failed slot=%u clean=%u pc=0x%x op=%s\n", slot, clean ? 1u : 0u,
@@ -1008,7 +992,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		}
 		uint32_t condition = 0;
 		auto& predicate = m_clean_evaluator != nullptr ? *m_clean_evaluator : *this;
-		if ((gpu_pending_uses & SrtReadUseBranch) == 0u && !block.condition.IsEmpty() &&
+		if (!block.condition.IsEmpty() &&
 		    (m_runtime.read_specialization_memory != nullptr || !m_program.capture_specialization_reads) &&
 		    predicate.Evaluate(block.condition, condition)) {
 			pending.push_back(block.successors[condition != 0u ? 0u : 1u]);

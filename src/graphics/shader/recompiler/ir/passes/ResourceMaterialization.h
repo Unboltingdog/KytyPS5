@@ -110,27 +110,6 @@ void SetSrtGpuDependentOverride(std::optional<bool> enabled);
 bool SrtSkipPendingSpecializationEnabled();
 void SetSrtSkipPendingSpecializationOverride(std::optional<bool> enabled);
 
-// KYTY_FIX_SRT_GPU_CHAIN=1 (default off): a data-only scalar load whose producer is pending stays in the
-// shader through BDA. The flat flag chooses it only for that dispatch; completed producers use the host value.
-bool SrtGpuChainEnabled();
-void SetSrtGpuChainOverride(std::optional<bool> enabled);
-class SrtGpuChainScope {
-public:
-	SrtGpuChainScope(const ResourcePlan& program, uint32_t slot);
-	~SrtGpuChainScope();
-	SrtGpuChainScope(const SrtGpuChainScope&) = delete;
-	SrtGpuChainScope& operator=(const SrtGpuChainScope&) = delete;
-	[[nodiscard]] bool Pending() const;
-
-private:
-	bool m_previous_active = false;
-	bool m_previous_pending = false;
-	uint64_t m_previous_hash = 0;
-	uint32_t m_previous_slot = UINT32_MAX;
-	uint32_t m_previous_uses = 0;
-};
-bool ProbeSrtGpuChain(uint64_t address, uint64_t size);
-
 using OrdinaryReadHook = bool (*)(uint64_t vaddr, void* data, uint64_t size);
 void SetOrdinaryReadHook(OrdinaryReadHook hook);
 // An ordinary SRT-walk read of guest memory: through the hook when one is set, else a direct read.
@@ -239,9 +218,7 @@ bool MaterializeResourcesAhead(const ResourcePlan& program, const SrtRuntime& ru
 //
 // ReadsUnchangedFast makes every logged read again through the GPU thread's readers (ReadOrdinaryMemory with its hook, and
 // runtime.read_specialization_memory), so GPU-dirty handling and downloads happen as in a real call, and reports whether
-// each read succeeds as it did and returns the same bytes. With either pending-GPU fix enabled, a per-entry dependency
-// check first rejects a pending producer without waiting; the real materialization then selects the generic path.
-// Must run on the GPU thread, outside MaterializeResourcesAhead.
+// each read succeeds as it did and returns the same bytes. Must run on the GPU thread, outside MaterializeResourcesAhead.
 //
 // The same question with the same answer, asked more cheaply for the common case. The kernel installs a verifier
 // (SetFastVerifyHook) that walks the log and, for every run of logged reads it can PROVE has no GPU state to honour

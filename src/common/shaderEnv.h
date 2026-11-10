@@ -52,7 +52,6 @@ inline constexpr const char* Names[] = {
     "KYTY_FIX_CLAMP_NAN_HASHES",
     // guest_gpu/gpu_format.cpp: format 30 as UFLOAT or as packed UNorm bits converted in the shader.
     "KYTY_FIX_RT_11_11_10_FLOAT",
-    "KYTY_FIX_SRT_GPU_CHAIN",
     "KYTY_FIX_SRT_GPU_DEPENDENT",
     "KYTY_FIX_SRT_GPU_RANGE",
     "KYTY_FIX_SRT_SKIP_PENDING_SPECIALIZATION",

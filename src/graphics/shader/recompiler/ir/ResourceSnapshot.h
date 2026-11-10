@@ -46,8 +46,8 @@ struct BindlessHeapUse {
 	uint64_t table_bytes    = 0;
 };
 
-// Indirect buffer V#s: guest bytes the shader can touch through BDA in this draw or dispatch,
-// from record-time candidates or the conservative allocation bound of a pending generic source.
+// Record-keyed V#s: guest bytes the shader can touch through BDA via a record-keyed V#
+// (ShaderInfo::indirect_ranges) in this draw or dispatch, from the candidate V#s read at record time.
 struct IndirectRange {
 	uint64_t address = 0;
 	uint64_t size    = 0;
