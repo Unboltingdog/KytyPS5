@@ -3004,6 +3004,39 @@ void TestSrtFlatteningAndRuntimeMemoization() {
         "flattened typed SRT reads were not collected");
 }
 
+void TestGpuScalarChain() {
+  for (const bool enabled : {false, true}) {
+    SetSrtGpuChainOverride(enabled);
+    Fixture fixture;
+    const auto base = fixture.Address(fixture.UserData(0), fixture.UserData(1), 4);
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarAddress;
+    const auto read = fixture.Emit(ValueOpcode::LoadAddressU32,
+                                   {base, Value(0u), Value(0u), Value(true)},
+                                   fixture.AddMemory(scalar, 4));
+    const auto math = fixture.Emit(ValueOpcode::IAdd32, {read, Value(1u)});
+    fixture.Emit(ValueOpcode::ReferenceU32, {math});
+    fixture.PlanAndTrack();
+    auto plan = ExtractResourcePlan(fixture.program);
+    if (enabled) {
+      Check(plan.srt_reads.size() == 2 && plan.srt_reads[0].gpu_flag == 1u &&
+                plan.srt_reads[0].uses == SrtReadUseShaderValue &&
+                plan.srt_reads[1].gpu_flag_slot &&
+                !fixture.program.memory_info[0].planning_only,
+            "data-only scalar load lost its GPU flag or BDA path");
+      Check(std::ranges::any_of(read.ResolveInstruction()->Uses(), [](const Use &use) {
+              return use.user->GetOpcode() == ValueOpcode::SelectU32;
+            }),
+            "data-only scalar load has no CPU/GPU select");
+    } else {
+      Check(plan.srt_reads.size() == 1 &&
+                fixture.program.memory_info[0].planning_only,
+            "disabled GPU chain changed ordinary scalar flattening");
+    }
+  }
+  SetSrtGpuChainOverride(std::nullopt);
+}
+
 void TestDynamicSrtReadRemainsExplicit() {
   Fixture fixture;
   const auto base =
@@ -4450,6 +4483,7 @@ int main() {
     Run("image descriptor fields", TestImageDescriptorFields);
     Run("draw-uniform scalar image", TestUniformScalarBufferImage);
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
+    Run("GPU scalar chain", TestGpuScalarChain);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("writable descriptor phi", TestWritableDescriptorPhi);
     Run("conditional sampler phi", TestConditionalSamplerPhi);

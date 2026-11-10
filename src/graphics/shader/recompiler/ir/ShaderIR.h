@@ -1010,9 +1010,24 @@ struct DescriptorSource {
 	bool operator==(const DescriptorSource& other) const = default;
 };
 
+enum SrtReadUse : uint32_t {
+	SrtReadUseShaderValue       = 1u << 0u,
+	SrtReadUseBufferDescriptor  = 1u << 1u,
+	SrtReadUseImageDescriptor   = 1u << 2u,
+	SrtReadUseSamplerDescriptor = 1u << 3u,
+	SrtReadUseBranch            = 1u << 4u,
+	SrtReadUseUniformFill       = 1u << 5u,
+	SrtReadUseLoopCount         = 1u << 6u,
+	SrtReadUseSelector          = 1u << 7u,
+};
+
 struct SrtRead {
 	Value    value;
 	uint32_t flat_offset = 0;
+	// A data-only scalar load's extra flat slot: 0 uses the host value, 1 the GPU load.
+	uint32_t gpu_flag = UINT32_MAX;
+	uint32_t uses = 0;
+	bool     gpu_flag_slot = false;
 
 	bool operator==(const SrtRead& other) const = default;
 };
