@@ -1604,7 +1604,8 @@ private:
 			// hybrid ReadConstBuffer would become a real buffer resource and push compute shaders past MaxBuffers.
 			const bool hybrid = SrtGpuChainEnabled() && read_index >= descriptor_reads &&
 			                    read->GetOpcode() == ValueOpcode::LoadAddressU32 &&
-			                    (keep || m_program.srt_reads[slot].gpu_flag != UINT32_MAX);
+			                    (keep || m_program.srt_reads[slot].gpu_flag != UINT32_MAX) &&
+			                    FeedsOnlyShaderData(*read);
 			memory.planning_only = !hybrid;
 			auto* block = read->Parent();
 			auto& list = block->Instructions();
@@ -1818,6 +1819,33 @@ private:
 				    op == ValueOpcode::GetBufferResource || op == ValueOpcode::GetAddressResource) continue;
 				if (op != ValueOpcode::Phi) return false;
 				if (std::ranges::find(values, use.user) == values.end()) values.push_back(use.user);
+			}
+		}
+		return true;
+	}
+
+	// KYTY_FIX_SRT_GPU_CHAIN: a scalar read may stay a GPU load only when nothing the CPU must know depends on it: no
+	// resource handle, block condition or indirect branch target is reached through its uses (also through other loads
+	// whose address it feeds). Otherwise the CPU would build descriptors or pick branches from the 0 a pending read gets.
+	bool FeedsOnlyShaderData(const Inst& read) const {
+		std::vector<const Inst*> values {&read};
+		std::unordered_set<const Inst*> seen {&read};
+		for (size_t index = 0; index < values.size(); ++index) {
+			for (const auto& use: values[index]->Uses()) {
+				const auto op = use.user->GetOpcode();
+				// Address handles pass through: a pointer chain (this read is the address of the next load) stays eligible
+				// unless the chain itself ends in a descriptor or a branch.
+				if (op == ValueOpcode::GetImageResource || op == ValueOpcode::GetSamplerResource ||
+				    op == ValueOpcode::GetBufferResource)
+					return false;
+				if (seen.insert(use.user).second) values.push_back(use.user);
+			}
+		}
+		for (const auto* block: m_program.blocks) {
+			for (const auto value: {block->condition, block->indirect_target}) {
+				if (value.IsEmpty()) continue;
+				const auto* inst = value.Resolve().TryInstruction();
+				if (inst != nullptr && seen.contains(inst)) return false;
 			}
 		}
 		return true;
