@@ -14,10 +14,25 @@
 #include <bit>
 #include <map>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <utility>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
+
+void CacheIndirectDescriptor(std::unordered_set<const IR::Inst*>& cache, IR::Value arg, const char* kind) {
+	arg = arg.Resolve();
+	const auto* handle = arg.TryInstruction();
+	if (handle == nullptr || handle->GetOpcode() == IR::ValueOpcode::Void) {
+		const auto opcode = handle == nullptr ? std::string_view {"non-instruction"}
+		                                      : IR::ValueOpcodeName(handle->GetOpcode());
+		std::fprintf(stderr, "SPIRV_WARN guest=0x%016llx cache=%s arg_opcode=%s\n",
+		             static_cast<unsigned long long>(CurrentShaderGuestAddress()), kind, opcode.data());
+		return;
+	}
+	cache.insert(handle);
+}
 
 uint32_t AndCondition(EmitterState& state, uint32_t lhs, uint32_t rhs) {
 	return Binary(state, spv::OpLogicalAnd, TypeBool(state), lhs, rhs);
@@ -2992,6 +3007,26 @@ uint32_t CallIndirectFormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, 
 // the call; a descriptor not seen in the capture still takes the generic function.
 void DefineIndirectFormattedLoads(ValueEmitContext& ctx) {
 	auto& state = ctx.state;
+	if (SpirvFormatDecodeFlatEnabled()) {
+		if (state.program.indirect_descriptors_captured) {
+			state.indirect_formatted_descriptors = state.program.indirect_formatted_descriptors;
+		} else {
+			for (const auto* block: state.program.blocks) {
+				for (const auto& inst: *block) {
+					const auto op = inst.GetOpcode();
+					if (op != IR::ValueOpcode::LoadBufferU32 && op != IR::ValueOpcode::LoadBufferU32x2 &&
+					    op != IR::ValueOpcode::LoadBufferU32x3 && op != IR::ValueOpcode::LoadBufferU32x4)
+						continue;
+					const auto index = inst.Flags<IR::MemoryFlags>().index;
+					if (index >= state.program.memory_info.size()) continue;
+					const auto& mem = state.program.memory_info[index];
+					if (mem.kind == IR::ResourceKind::IndirectBuffer && mem.formatted) {
+						CacheIndirectDescriptor(state.indirect_formatted_descriptors, inst.Arg(0), "formatted");
+					}
+				}
+			}
+		}
+	}
 	size_t loads = 0, specialized = 0, mixed = 0, unknown = 0;
 	std::vector<uint32_t> formats;
 	for (const auto* block: state.program.blocks) {
@@ -3010,9 +3045,6 @@ void DefineIndirectFormattedLoads(ValueEmitContext& ctx) {
 			if (channels < 1u || channels > 4u) continue;
 			const auto key = IndirectFormattedLoadKey(channels, components, d16);
 			state.indirect_formatted_load_functions.emplace(key, 0u);
-			if (SpirvFormatDecodeFlatEnabled()) {
-				state.indirect_formatted_descriptors.insert(inst.Arg(0).ResolveInstruction());
-			}
 			loads++;
 			const auto analysis = AnalyzeIndirectTableFormat(state, mem);
 			for (const auto format: analysis.formats) {
@@ -3440,15 +3472,19 @@ void DefineIndirectFormattedLoadFunctions(ValueEmitContext& ctx) {
 void DefineIndirectRawDwordHoisted(ValueEmitContext& ctx) {
 	auto& state = ctx.state;
 	if (state.bda_pointer_function == 0u) return;
-	for (const auto* block: state.program.blocks) {
-		for (const auto& inst: *block) {
-			const auto components = IR::BufferComponentCount(inst.GetOpcode());
-			if (components < 1u || components > 4u || IR::BufferAccessOf(inst.GetOpcode()) != IR::BufferAccess::Read) continue;
-			const auto index = inst.Flags<IR::MemoryFlags>().index;
-			if (index >= state.program.memory_info.size()) continue;
-			const auto& mem = state.program.memory_info[index];
-			if (mem.kind == IR::ResourceKind::IndirectBuffer && !mem.formatted) {
-				state.indirect_raw_descriptors.insert(inst.Arg(0).ResolveInstruction());
+	if (state.program.indirect_descriptors_captured) {
+		state.indirect_raw_descriptors = state.program.indirect_raw_descriptors;
+	} else {
+		for (const auto* block: state.program.blocks) {
+			for (const auto& inst: *block) {
+				const auto components = IR::BufferComponentCount(inst.GetOpcode());
+				if (components < 1u || components > 4u || IR::BufferAccessOf(inst.GetOpcode()) != IR::BufferAccess::Read) continue;
+				const auto index = inst.Flags<IR::MemoryFlags>().index;
+				if (index >= state.program.memory_info.size()) continue;
+				const auto& mem = state.program.memory_info[index];
+				if (mem.kind == IR::ResourceKind::IndirectBuffer && !mem.formatted) {
+					CacheIndirectDescriptor(state.indirect_raw_descriptors, inst.Arg(0), "raw");
+				}
 			}
 		}
 	}

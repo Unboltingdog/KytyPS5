@@ -30,6 +30,7 @@
 #include <utility>
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Xbyak {
@@ -1164,6 +1165,9 @@ struct Program: ResourcePlan {
 
 	std::vector<std::unique_ptr<Block>> block_storage;
 	BlockList                           blocks;
+	bool                                indirect_descriptors_captured = false;
+	std::unordered_set<const Inst*>     indirect_formatted_descriptors;
+	std::unordered_set<const Inst*>     indirect_raw_descriptors;
 	uint32_t                      wave_size      = 64;
 	uint32_t                      scratch_dwords = 0;
 	bool                          dispatcher_fallback = false;

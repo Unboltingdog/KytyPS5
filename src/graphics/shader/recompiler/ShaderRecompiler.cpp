@@ -918,6 +918,22 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	};
 	auto& ir = translated.program;
 	IR::ApplyResourceSpecialization(ir, specialization);
+	for (const auto* block: ir.blocks) {
+		for (const auto& inst: *block) {
+			const auto components = IR::BufferComponentCount(inst.GetOpcode());
+			if (components < 1u || components > 4u || IR::BufferAccessOf(inst.GetOpcode()) != IR::BufferAccess::Read) {
+				continue;
+			}
+			const auto index = inst.Flags<IR::MemoryFlags>().index;
+			if (index >= ir.memory_info.size()) continue;
+			const auto& memory = ir.memory_info[index];
+			if (memory.kind != IR::ResourceKind::IndirectBuffer) continue;
+			if (const auto* handle = inst.Arg(0).Resolve().TryInstruction(); handle != nullptr) {
+				(memory.formatted ? ir.indirect_formatted_descriptors : ir.indirect_raw_descriptors).insert(handle);
+			}
+		}
+	}
+	ir.indirect_descriptors_captured = true;
 	mark(0);
 	mark(1);
 	// The resource plan owns host descriptor evaluation now. Keep only dependencies consumed
