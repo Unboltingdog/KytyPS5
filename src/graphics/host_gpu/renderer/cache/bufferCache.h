@@ -50,6 +50,12 @@ struct BufferSyncStats {
 	uint64_t bytes   = 0;  // bytes copied
 };
 
+struct BufferCacheSrtDependency {
+	bool     pending = false;
+	uint64_t output_address = 0;
+	uint64_t output_size = 0;
+};
+
 class BufferCache {
 public:
 	static constexpr uint32_t CACHING_PAGEBITS  = 14;
@@ -156,6 +162,8 @@ public:
 	// BAR reads: a draw or dispatch was recorded into the current command buffer; the
 	// writable buffers obtained for it get that command buffer's tick as their write tick.
 	void NoteCommandEmitted(char kind = 0, uint64_t key_a = 0, uint64_t key_b = 0, uint64_t guest = 0);
+	// Newest recorded GPU writer of the bytes and its whole cached allocation. No wait, flush or buffer creation.
+	[[nodiscard]] std::optional<BufferCacheSrtDependency> QuerySrtDependency(uint64_t vaddr, uint64_t size);
 	// Upstream 4644c5292: zeroes the BDA page table and the fault buffer once, in the render scheduler's first command
 	// buffer (CommandScheduler::Begin), before the first buffer registration writes into the table.
 	void               ClearDeviceTablesOnce();

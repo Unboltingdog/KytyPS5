@@ -88,6 +88,22 @@ void SetIndirectTableSlotsOverride(std::optional<bool> enabled);
 bool SrtGpuRangeEnabled();
 void SetSrtGpuRangeOverride(std::optional<bool> enabled);
 
+// KYTY_FIX_SRT_GPU_DEPENDENT=1 (default off): a pending GPU write of a record-keyed buffer's selector or descriptor
+// bytes leaves the V# decode in the shader (PrepareIndirectBuffer) and binds the whole cached producer allocation.
+// Completed producers retain exact enumeration; an unbounded write waits. Image and sampler reads are unchanged: their
+// equivalent fallback needs a bindless descriptor table indexed by the shader rather than a CPU-interned candidate list.
+struct SrtGpuDependency {
+	bool     pending = false;
+	uint64_t output_address = 0;
+	uint64_t output_size = 0;
+};
+enum class SrtGpuDependentDecision : uint8_t { Exact, GenericBuffer, Wait };
+SrtGpuDependentDecision DecideSrtGpuDependent(bool producer_pending, bool buffer_resource, bool bounded_range);
+using SrtGpuDependencyHook = bool (*)(uint64_t vaddr, uint64_t size, SrtGpuDependency& dependency);
+void SetSrtGpuDependencyHook(SrtGpuDependencyHook hook);
+bool SrtGpuDependentEnabled();
+void SetSrtGpuDependentOverride(std::optional<bool> enabled);
+
 using OrdinaryReadHook = bool (*)(uint64_t vaddr, void* data, uint64_t size);
 void SetOrdinaryReadHook(OrdinaryReadHook hook);
 // An ordinary SRT-walk read of guest memory: through the hook when one is set, else a direct read.

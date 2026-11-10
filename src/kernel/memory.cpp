@@ -1315,6 +1315,17 @@ static void SrtReadSession(bool begin) {
 // TryReadBufferBacking reached from OrdinaryReadBufferBacking (counted there).
 static thread_local bool t_srt_classes_nested = false;
 
+static bool QuerySrtGpuDependency(uint64_t vaddr, uint64_t size,
+                                  Graphics::ShaderRecompiler::IR::SrtGpuDependency& dependency) {
+	if (g_gpu_resources == nullptr || !Graphics::GuestGpu::IsGpuThread()) return false;
+	const auto found = GetGpuResources().GetBufferCache().QuerySrtDependency(vaddr, size);
+	if (!found) return false;
+	dependency.pending = found->pending;
+	dependency.output_address = found->output_address;
+	dependency.output_size = found->output_size;
+	return true;
+}
+
 // The walker's ordinary-read hook: pages the GPU never modified are read by the walker's direct
 // copy (no fault, nothing to synchronize; returns false); the byte-precise path of
 // TryReadBufferBacking cost ~6% of the GPU thread when taken for every walker read. Inside a
@@ -1690,6 +1701,7 @@ void InstallGpuResources(Graphics::RenderContext* resources) noexcept {
 	// Only used by materialization ahead of the GPU thread; no effect otherwise.
 	Graphics::ShaderRecompiler::IR::SetAheadReadHook(resources != nullptr ? &AheadReadBacking : nullptr);
 	Graphics::ShaderRecompiler::IR::SetPlainReadHook(resources != nullptr ? &ReadGuestPlain : nullptr);
+	Graphics::ShaderRecompiler::IR::SetSrtGpuDependencyHook(resources != nullptr ? &QuerySrtGpuDependency : nullptr);
 	// Only used by ReadsUnchangedFast; no effect otherwise.
 	Graphics::ShaderRecompiler::IR::SetFastVerifyHook(resources != nullptr ? &FastVerifyLoggedReads : nullptr);
 	// After Senaxx/KytyPS5 94e3298: the resource walker's ordinary reads take bytes the GPU has not written from the

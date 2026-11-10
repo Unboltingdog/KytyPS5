@@ -1225,6 +1225,131 @@ void TestSrtGpuRange() {
   SetSrtGpuRangeOverride(std::nullopt);
 }
 
+void TestSrtGpuDependent() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  Check(DecideSrtGpuDependent(false, true, true) ==
+            SrtGpuDependentDecision::Exact,
+        "completed producer did not select exact enumeration");
+  Check(DecideSrtGpuDependent(true, true, true) ==
+            SrtGpuDependentDecision::GenericBuffer,
+        "bounded pending producer did not select the generic buffer path");
+  Check(DecideSrtGpuDependent(true, true, false) ==
+            SrtGpuDependentDecision::Wait,
+        "unbounded pending write did not select the wait");
+  Check(DecideSrtGpuDependent(true, false, true) ==
+            SrtGpuDependentDecision::Wait,
+        "pending image or sampler did not retain the wait");
+
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = true;
+  program.resource_tracking_complete = true;
+  auto &block = AddValueBlock(program);
+  MemoryInfo memory_info;
+  memory_info.kind = ResourceKind::ScalarAddress;
+  memory_info.planning_only = true;
+  program.memory_info.push_back(memory_info);
+  auto &handle = block.AppendNewInst(ValueOpcode::GetAddressResource,
+                                     {Value(0x1000u), Value(0u)});
+  auto &count = block.AppendNewInst(
+      ValueOpcode::LoadAddressU32,
+      {Value(&handle), Value(0u), Value(0u), Value(true)});
+  count.SetFlags(MemoryFlags{.index = 0, .pc = 0x40});
+  const auto user_data_value = [&](uint32_t index) {
+    return Value(&block.AppendNewInst(ValueOpcode::GetUserData,
+                                      {Value(static_cast<ScalarReg>(index))}));
+  };
+  DescriptorSource table;
+  table.dword_count = 2;
+  table.dwords[0] = user_data_value(0);
+  table.dwords[1] = user_data_value(1);
+  program.descriptor_sources.push_back(table);
+  DescriptorSource record;
+  record.dword_count = 4;
+  record.dwords.fill(Value(0u));
+  auto &indirect = record.indirect_descriptor.emplace();
+  indirect.table_source = 0;
+  indirect.table_stride = 16;
+  indirect.key_count = Value(&count);
+  indirect.record_keyed = true;
+  program.descriptor_sources.push_back(record);
+  program.info.indirect_ranges.push_back(
+      {.source = 1, .access_begin = 0, .access_end = 4, .written = true});
+  auto plan = ExtractResourcePlan(program);
+
+  static std::optional<SrtGpuDependency> dependency;
+  static uint32_t dependency_queries;
+  SetSrtGpuDependencyHook(+[](uint64_t address, uint64_t,
+                              SrtGpuDependency &result) {
+    if (address != 0x1000u) return false;
+    ++dependency_queries;
+    result = *dependency;
+    return true;
+  });
+  SetSrtGpuDependentOverride(true);
+  struct Restore {
+    ~Restore() {
+      SetSrtGpuDependencyHook(nullptr);
+      SetSrtGpuDependentOverride(std::nullopt);
+    }
+  } restore;
+
+  uint32_t strict_reads = 0;
+  std::array<uint32_t, 2> user_data{0x2000u, 0u};
+  const SrtRuntime runtime{
+      .user_data = user_data,
+      .userdata = &strict_reads,
+      .read_specialization_memory = +[](void *data, uint64_t address,
+                                        std::span<uint32_t> words) {
+        ++*static_cast<uint32_t *>(data);
+        if (address == 0x1000u && words.size() == 1) {
+          words[0] = 1;
+          return true;
+        }
+        constexpr uint32_t Format = 5u << 12u;
+        if (address == 0x2000u && words.size() == 4) {
+          std::array<uint32_t, 4> descriptor{0x50000u, 1u << 16u, 1u,
+                                             Format};
+          std::copy(descriptor.begin(), descriptor.end(), words.begin());
+          return true;
+        }
+        return false;
+      }};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  using Ranges = std::vector<IndirectRange>;
+  const Ranges exact{{0x50000u, 4u, true}};
+
+  dependency = SrtGpuDependency{.pending = true,
+                                .output_address = 0x40000u,
+                                .output_size = 52u};
+  dependency_queries = 0;
+  strict_reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.indirect_ranges_complete &&
+            snapshot.indirect_writes_complete &&
+            snapshot.indirect_ranges == Ranges{{0x40000u, 52u, true}} &&
+            dependency_queries == 1 && strict_reads == 0,
+        "pending producer did not bypass unread count and candidate bytes");
+
+  dependency->pending = false;
+  dependency_queries = 0;
+  strict_reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.indirect_ranges == exact && dependency_queries == 1 &&
+            strict_reads == 2,
+        "completed producer did not retain exact enumeration");
+
+  dependency->pending = true;
+  dependency->output_size = 0;
+  dependency_queries = 0;
+  strict_reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.indirect_ranges == exact && dependency_queries == 1 &&
+            strict_reads == 2,
+        "unbounded pending write did not retain the exact wait path");
+}
+
 } // namespace
 
 namespace Common {
@@ -1267,6 +1392,7 @@ int main() {
   TestMixedSamplerVariantsShareRuntimeDescriptor();
   TestRecordKeyedRanges();
   TestSrtGpuRange();
+  TestSrtGpuDependent();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

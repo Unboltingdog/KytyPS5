@@ -39,6 +39,7 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 namespace {
 std::atomic_int g_indirect_table_slots_override {-1};
 std::atomic_int g_srt_gpu_range_override {-1};
+std::atomic_int g_srt_gpu_dependent_override {-1};
 } // namespace
 
 bool IndirectTableSlots() {
@@ -61,6 +62,26 @@ bool SrtGpuRangeEnabled() {
 
 void SetSrtGpuRangeOverride(std::optional<bool> enabled) {
 	g_srt_gpu_range_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
+}
+
+SrtGpuDependentDecision DecideSrtGpuDependent(bool producer_pending, bool buffer_resource, bool bounded_range) {
+	if (!producer_pending) return SrtGpuDependentDecision::Exact;
+	if (buffer_resource && bounded_range) return SrtGpuDependentDecision::GenericBuffer;
+	return SrtGpuDependentDecision::Wait;
+}
+
+bool SrtGpuDependentEnabled() {
+	const int override = g_srt_gpu_dependent_override.load(std::memory_order_relaxed);
+	if (override >= 0) return override != 0;
+	static const bool enabled = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_FIX_SRT_GPU_DEPENDENT");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
+void SetSrtGpuDependentOverride(std::optional<bool> enabled) {
+	g_srt_gpu_dependent_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
 }
 
 namespace {
@@ -390,7 +411,46 @@ struct ReadCapture {
 	bool                                        merge = false;
 };
 
+struct SrtGpuDependentState {
+	bool     active = false;
+	uint32_t source = UINT32_MAX;
+	bool     written = false;
+	std::vector<std::pair<uint64_t, uint64_t>> outputs;
+};
+thread_local SrtGpuDependentState t_srt_gpu_dependent;
+std::atomic<SrtGpuDependencyHook> g_srt_gpu_dependency_hook {nullptr};
+
+class SrtGpuDependentScope {
+public:
+	SrtGpuDependentScope(uint32_t source, bool written): m_previous(std::move(t_srt_gpu_dependent)) {
+		t_srt_gpu_dependent = {.active = true, .source = source, .written = written};
+	}
+	~SrtGpuDependentScope() { t_srt_gpu_dependent = std::move(m_previous); }
+	const std::vector<std::pair<uint64_t, uint64_t>>& Outputs() const { return t_srt_gpu_dependent.outputs; }
+
+private:
+	SrtGpuDependentState m_previous;
+};
+
+bool ProbeSrtGpuDependent(uint64_t address, std::span<uint32_t> values) {
+	if (!t_srt_gpu_dependent.active || !SrtGpuDependentEnabled() || t_ahead.log != nullptr) return false;
+	SrtGpuDependency dependency {};
+	const auto hook = g_srt_gpu_dependency_hook.load(std::memory_order_relaxed);
+	if (hook == nullptr || !hook(address, values.size_bytes(), dependency)) return false;
+	const bool bounded = dependency.output_address >= 0x10000u && dependency.output_size != 0u &&
+	                     dependency.output_address <= AddressMask &&
+	                     dependency.output_size - 1u <= AddressMask - dependency.output_address;
+	if (DecideSrtGpuDependent(dependency.pending, true, bounded) != SrtGpuDependentDecision::GenericBuffer) return false;
+	const auto output = std::pair {dependency.output_address, dependency.output_size};
+	if (std::ranges::find(t_srt_gpu_dependent.outputs, output) == t_srt_gpu_dependent.outputs.end()) {
+		t_srt_gpu_dependent.outputs.push_back(output);
+	}
+	std::ranges::fill(values, 0u);
+	return true;
+}
+
 bool CaptureStrictRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	if (ProbeSrtGpuDependent(address, values)) return true;
 	auto& capture = *static_cast<ReadCapture*>(userdata);
 	if (!capture.source.read_specialization_memory(capture.source.userdata, address, values)) {
 		return false;
@@ -1216,7 +1276,12 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 		if (source == nullptr || !source->indirect_descriptor.has_value() || !source->indirect_descriptor->record_keyed)
 			return IndirectFailAt(__LINE__);
 		if (!active.empty() && !active[range.source]) continue;
-		const auto&          indirect = *source->indirect_descriptor;
+		const size_t range_begin = ranges.size();
+		const bool was_incomplete = incomplete;
+		const bool was_incomplete_written = incomplete_written;
+		SrtGpuDependentScope dependent(range.source, range.written);
+		const bool listed = [&]() -> bool {
+		const auto& indirect = *source->indirect_descriptor;
 		if (!indirect.sources.empty()) {
 			// Path proofs: direct candidate V#s (the reads a path proof leaves).
 			for (const auto candidate_source: indirect.sources) {
@@ -1247,7 +1312,7 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 				if (size != 0u)
 					ranges.push_back({.address = address, .size = size, .written = range.written});
 			}
-			continue;
+			return true;
 		}
 		DescriptorValue      table_value;
 		ShaderBufferResource table;
@@ -1289,7 +1354,7 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 							             static_cast<unsigned long long>(address + size), range.written ? 1 : 0);
 						}
 					}
-					continue;
+					return true;
 				}
 			}
 			// count = mem32[mem64[table + count_pointer] + count_field] (strict reads, like the records).
@@ -1312,7 +1377,7 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 				if (t_ahead.log == nullptr) Common::WorkaroundHits::Note(Common::WorkaroundHits::Hit::GameCountBad);
 				incomplete = true;
 				incomplete_written = incomplete_written || range.written; // D6 step K2
-				continue;
+				return true;
 			}
 			count = filled;
 			// D6 step K3 (KYTY_TRACE_PERF: PERF workaround_hits game_count, first field).
@@ -1340,7 +1405,7 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 			if (indirect.widened) { // a superset too large to list: this call's address writes stay unknown
 				incomplete = true;
 				incomplete_written = incomplete_written || range.written; // D6 step K2
-				continue;
+				return true;
 			}
 			return SpecializationFail(fmt::format("shader 0x{:016x}: record-keyed V# source {} has {} records (limit {})",
 			                                      program.shader_hash, range.source, count, MaxIndirectRangeRecords));
@@ -1394,6 +1459,32 @@ bool MaterializeIndirectRanges(const ResourcePlan& program, const SrtRuntime& ru
 			}
 			if (size != 0u) ranges.push_back({.address = address, .size = size, .written = range.written});
 		}
+		return true;
+		}();
+		if (!dependent.Outputs().empty()) {
+			ranges.resize(range_begin);
+			incomplete = was_incomplete;
+			incomplete_written = was_incomplete_written;
+			for (const auto [address, size]: dependent.Outputs()) {
+				ranges.push_back({.address = address, .size = size, .written = range.written});
+			}
+			if (t_ahead.log == nullptr) {
+				static std::mutex mutex;
+				static std::set<std::pair<uint64_t, uint32_t>> seen;
+				std::lock_guard lock(mutex);
+				if (seen.emplace(program.shader_hash, range.source).second) {
+					const auto [address, size] = dependent.Outputs().front();
+					std::fprintf(stderr,
+					             "SRT_GPU_DEPENDENT hash=0x%016llx source=%u range=0x%llx-0x%llx outputs=%zu "
+					             "written=%d reason=pending_producer_generic_buffer\n",
+					             static_cast<unsigned long long>(program.shader_hash), range.source,
+					             static_cast<unsigned long long>(address), static_cast<unsigned long long>(address + size),
+					             dependent.Outputs().size(), range.written ? 1 : 0);
+				}
+			}
+			continue;
+		}
+		if (!listed) return false;
 	}
 	// Overlapping and adjacent ranges are one: the renderer obtains and tests each once.
 	std::ranges::sort(ranges, [](const IndirectRange& a, const IndirectRange& b) {
@@ -2378,6 +2469,10 @@ static bool MaterializeFailAt(int line) {
 
 void SetPlainReadHook(PlainReadHook hook) {
 	g_plain_read_hook.store(hook, std::memory_order_relaxed);
+}
+
+void SetSrtGpuDependencyHook(SrtGpuDependencyHook hook) {
+	g_srt_gpu_dependency_hook.store(hook, std::memory_order_relaxed);
 }
 
 void ReadPlainMemory(void* data, uint64_t vaddr, uint64_t size) {

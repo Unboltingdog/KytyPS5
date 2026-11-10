@@ -3405,6 +3405,28 @@ uint64_t BufferCache::QueryWriteTick(uint64_t start, uint64_t end) const {
 	return QueryTicks(m_write_ticks, start, end);
 }
 
+std::optional<BufferCacheSrtDependency> BufferCache::QuerySrtDependency(uint64_t vaddr, uint64_t size) {
+	if (size == 0u) return std::nullopt;
+	const auto end = vaddr + size;
+	auto it = m_write_ticks.upper_bound(vaddr);
+	if (it != m_write_ticks.begin() && std::prev(it)->second.end > vaddr) --it;
+	uint64_t tick = 0;
+	for (; it != m_write_ticks.end() && it->first < end; ++it) {
+		if (it->second.end > vaddr) tick = std::max(tick, it->second.tick);
+	}
+	if (tick == 0u) return std::nullopt;
+	const auto current = m_scheduler.CurrentTick();
+	BufferCacheSrtDependency result {
+	    .pending = tick >= current || !m_scheduler.IsFree(tick) || !m_scheduler.PriorityOperationsDone(tick),
+	};
+	if (const auto [buffer, offset] = CachedBufferFor(vaddr, size); buffer != nullptr) {
+		(void)offset;
+		result.output_address = buffer->CpuAddress();
+		result.output_size = buffer->Size();
+	}
+	return result;
+}
+
 std::optional<BufferCache::SrtReadProducer> BufferCache::NoteSrtReadProducer(uint64_t vaddr, uint64_t size) const {
 	if (!GpuTimer::FrameGapsEnabled()) return std::nullopt;
 	const auto end = vaddr + size;
@@ -3526,12 +3548,16 @@ std::optional<uint64_t> BufferCache::GranuleWriteTick(uint64_t key) const {
 }
 
 void BufferCache::NoteCommandEmitted(char kind, uint64_t key_a, uint64_t key_b, uint64_t guest) {
+	static const bool gpu_dependent = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_FIX_SRT_GPU_DEPENDENT");
+		return value != nullptr && value[0] == '1';
+	}();
 	// A buffer obtained for writing can be recorded into a later command buffer than the one open
 	// when it was obtained (a flush in between); the recording command buffer's tick is final.
 	for (const auto& [vaddr, size]: m_bar_pending_writes) {
 		NoteGpuWriteTick(vaddr, size);
-		// KYTY_TRACE_SYNC_TIMELINE: the final tick for its per-range write ticks too.
-		if (SyncTimeline::Enabled() || GpuTimer::FrameGapsEnabled()) {
+		// KYTY_TRACE_SYNC_TIMELINE / KYTY_FIX_SRT_GPU_DEPENDENT: the final tick for its per-range write ticks too.
+		if (gpu_dependent || SyncTimeline::Enabled() || GpuTimer::FrameGapsEnabled()) {
 			NoteWriteTick(vaddr, vaddr + size, m_scheduler.CurrentTick(), kind, key_a, key_b, guest);
 		}
 	}
