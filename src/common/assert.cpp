@@ -59,12 +59,16 @@ int DbgNotImplementedHandler(const char* expr, const char* file, int line) {
 
 int DbgExitHandler(const char* file, int line, std::string_view text) {
 	PrintFatalFrames();
+	std::fprintf(stderr, "%.*s\n", static_cast<int>(text.size()), text.data());
+	std::fflush(stderr);
 	Log::WriteFatal(BuildFatalReport("--- Error ---", text, file, line));
 	return 1;
 }
 
 int DbgExitHandler(const char* file, int line, fmt::text_style style, std::string_view text) {
 	PrintFatalFrames();
+	std::fprintf(stderr, "%.*s\n", static_cast<int>(text.size()), text.data());
+	std::fflush(stderr);
 	Log::WriteFatal(style, BuildFatalReport("--- Error ---", text, file, line));
 	return 1;
 }

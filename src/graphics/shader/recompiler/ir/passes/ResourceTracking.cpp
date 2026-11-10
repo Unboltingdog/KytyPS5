@@ -1255,6 +1255,8 @@ private:
 		const auto message =
 		    fmt::format("shader resource tracking: hash=0x{:016x} stage={} pc=0x{:08x} {}",
 		                m_program.shader_hash, StageName(m_program.stage), pc, reason);
+		std::fprintf(stderr, "%s\n", message.c_str());
+		std::fflush(stderr);
 		EXIT("%s", message.c_str());
 		std::abort();
 	}
