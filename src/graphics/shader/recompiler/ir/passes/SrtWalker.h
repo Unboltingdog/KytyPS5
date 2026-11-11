@@ -143,6 +143,18 @@ private:
 	uint32_t        m_previous_source;
 };
 
+// The flat SRT slot whose refresh is running on this thread (FRAME_GAPS_SRT_READ slots=), UINT32_MAX outside one.
+class SrtReadSlotScope {
+public:
+	explicit SrtReadSlotScope(uint32_t slot);
+	~SrtReadSlotScope();
+	SrtReadSlotScope(const SrtReadSlotScope&)            = delete;
+	SrtReadSlotScope& operator=(const SrtReadSlotScope&) = delete;
+
+private:
+	uint32_t m_previous;
+};
+
 void NoteSrtReadRange(uint64_t vaddr, uint64_t size);
 void NoteSrtReadWait(uint64_t wait_ns);
 void ReportSrtReadDiagnostics();

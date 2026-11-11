@@ -24,6 +24,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <span>
+#include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -1614,6 +1616,14 @@ private:
 			                    (keep || m_program.srt_reads[slot].gpu_flag != UINT32_MAX) &&
 			                    !descriptor_memory_indices.contains(flags.index) && FeedsOnlyShaderData(*read);
 			if (allow_hybrids) memory.planning_only = !hybrid;
+			if (allow_hybrids) {
+				const char* reason = nullptr;
+				if (hybrid) reason = "hybrid";
+				else if (read->GetOpcode() != ValueOpcode::LoadAddressU32) reason = "not_load_address";
+				else if (!keep && m_program.srt_reads[slot].gpu_flag == UINT32_MAX) reason = "dedup_flat_slot";
+				else if (descriptor_memory_indices.contains(flags.index)) reason = "descriptor_memory_shared";
+				LogChainDecision(*read, slot, reason);
+			}
 			auto* block = read->Parent();
 			auto& list = block->Instructions();
 			const auto where = std::ranges::find_if(list, [&](const Inst& inst) {
@@ -1712,6 +1722,82 @@ private:
 			}
 		}
 		return true;
+	}
+
+	// KYTY_FIX_SRT_GPU_CHAIN diagnostics: what a planned scalar read feeds that keeps it off the GPU path.
+	// reason names the first blocking consumer; via is the opcode chain to it and word the handle operand.
+	struct ChainFeed {
+		const char* reason = nullptr;
+		std::string via;
+		uint32_t    word = UINT32_MAX;
+	};
+
+	ChainFeed BlockingConsumer(const Inst& read) const {
+		std::vector<const Inst*> values {&read};
+		std::unordered_map<const Inst*, const Inst*> parent {{&read, nullptr}};
+		const auto path = [&](const Inst* last) {
+			std::vector<std::string_view> names;
+			for (const Inst* at = last; at != nullptr; at = parent.at(at)) names.push_back(ValueOpcodeName(at->GetOpcode()));
+			std::string text;
+			for (auto it = names.rbegin(); it != names.rend(); ++it) {
+				if (!text.empty()) text += '>';
+				text += *it;
+			}
+			return text;
+		};
+		for (size_t index = 0; index < values.size(); ++index) {
+			for (const auto& use: values[index]->Uses()) {
+				const auto op = use.user->GetOpcode();
+				const char* reason = op == ValueOpcode::GetImageResource     ? "feeds_image"
+				                   : op == ValueOpcode::GetSamplerResource   ? "feeds_sampler"
+				                   : op == ValueOpcode::GetBufferResource    ? "feeds_buffer"
+				                                                             : nullptr;
+				if (reason != nullptr) {
+					auto via = path(values[index]);
+					via += '>';
+					via += ValueOpcodeName(op);
+					return {reason, std::move(via), static_cast<uint32_t>(use.operand)};
+				}
+				if (parent.emplace(use.user, values[index]).second) values.push_back(use.user);
+			}
+		}
+		for (const auto* block: m_program.blocks) {
+			for (const bool target: {false, true}) {
+				const auto value = target ? block->indirect_target : block->condition;
+				if (value.IsEmpty()) continue;
+				const auto* inst = value.Resolve().TryInstruction();
+				if (inst != nullptr && parent.contains(inst))
+					return {target ? "feeds_indirect_target" : "feeds_branch", path(inst), UINT32_MAX};
+			}
+		}
+		return {nullptr, path(&read), UINT32_MAX};
+	}
+
+	void LogChainDecision(const Inst& read, uint32_t slot, const char* reason) const {
+		static std::mutex mutex;
+		static std::set<std::pair<uint64_t, uint32_t>> seen;
+		{
+			std::lock_guard lock(mutex);
+			if (!seen.emplace(m_program.shader_hash, slot).second) return;
+		}
+		const auto feed = BlockingConsumer(read);
+		if (reason == nullptr) reason = feed.reason != nullptr ? feed.reason : "other";
+		const auto pc = read.Flags<MemoryFlags>().pc;
+		if (std::string_view(reason) == "hybrid") {
+			std::fprintf(stderr, "SRT_GPU_CHAIN_PLAN hash=0x%016llx slot=%u pc=0x%08x hybrid=1\n",
+			             static_cast<unsigned long long>(m_program.shader_hash), slot, pc);
+			return;
+		}
+		const auto offset = read.NumArgs() > 1 ? read.Arg(1).Resolve() : Value();
+		const bool immediate = !offset.IsEmpty() && offset.IsImmediate() && offset.GetType() == Type::U32;
+		std::fprintf(stderr,
+		             "SRT_GPU_CHAIN_SKIP hash=0x%016llx slot=%u pc=0x%08x op=%s offset=%s reason=%s feeds=%s word=%s "
+		             "via=%s\n",
+		             static_cast<unsigned long long>(m_program.shader_hash), slot, pc,
+		             ValueOpcodeName(read.GetOpcode()).data(),
+		             immediate ? fmt::format("0x{:x}", offset.U32()).c_str() : "-", reason,
+		             feed.reason != nullptr ? feed.reason : "shader_data",
+		             feed.word == UINT32_MAX ? "-" : fmt::format("{}", feed.word).c_str(), feed.via.c_str());
 	}
 
 	// A pending hybrid read is zero on the CPU, so no resource or control-flow decision may depend on it.

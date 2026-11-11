@@ -109,6 +109,7 @@ thread_local SrtReadKind             t_srt_read_kind = SrtReadKind::None;
 thread_local SrtResourceKind         t_srt_read_resource = SrtResourceKind::None;
 thread_local uint32_t                t_srt_read_source = UINT32_MAX;
 thread_local uint64_t                t_srt_read_page = 0;
+thread_local uint32_t                t_srt_read_slot = UINT32_MAX;
 
 const char* SrtReadKindName(SrtReadKind kind) {
 	switch (kind) {
@@ -141,6 +142,7 @@ struct SrtReadSummaryStats {
 	uint64_t           wait_ns = 0;
 	uint32_t           resources = 0;
 	std::set<uint32_t> sources;
+	std::set<uint32_t> slots;
 };
 std::mutex                                                          g_srt_read_summary_mutex;
 std::unordered_map<SrtReadSummaryKey, SrtReadSummaryStats, SrtReadSummaryKeyHash> g_srt_read_summary;
@@ -154,6 +156,7 @@ SrtReadSummaryKey CurrentSrtReadKey(uint64_t page) {
 void AddSrtReadResource(SrtReadSummaryStats& stats) {
 	stats.resources |= 1u << static_cast<uint32_t>(t_srt_read_resource);
 	stats.sources.insert(t_srt_read_source);
+	stats.slots.insert(t_srt_read_slot);
 }
 } // namespace
 
@@ -172,6 +175,14 @@ SrtReadKindScope::SrtReadKindScope(SrtReadKind kind, bool replace): m_previous(t
 
 SrtReadKindScope::~SrtReadKindScope() {
 	t_srt_read_kind = m_previous;
+}
+
+SrtReadSlotScope::SrtReadSlotScope(uint32_t slot): m_previous(t_srt_read_slot) {
+	t_srt_read_slot = slot;
+}
+
+SrtReadSlotScope::~SrtReadSlotScope() {
+	t_srt_read_slot = m_previous;
 }
 
 SrtReadResourceScope::SrtReadResourceScope(SrtResourceKind kind, uint32_t source)
@@ -237,12 +248,18 @@ void ReportSrtReadDiagnostics() {
 			if (!sources.empty()) sources += ',';
 			sources += source == UINT32_MAX ? std::string("none") : fmt::format("{}", source);
 		}
+		std::string slots;
+		for (const uint32_t slot: stats.slots) {
+			if (!slots.empty()) slots += ',';
+			slots += slot == UINT32_MAX ? std::string("none") : fmt::format("{}", slot);
+		}
 		std::fprintf(stderr,
 		             "FRAME_GAPS_SRT_READ rank=%zu hash=0x%016llx page=0x%llx read_kind=%s count=%llu wait_ms=%.3f "
-		             "resource=%s sources=%s\n",
+		             "resource=%s sources=%s slots=%s\n",
 		             rank + 1u, static_cast<unsigned long long>(key.hash), static_cast<unsigned long long>(key.page),
 		             SrtReadKindName(key.kind), static_cast<unsigned long long>(stats.count),
-		             static_cast<double>(stats.wait_ns) / 1000000.0, resources.c_str(), sources.c_str());
+		             static_cast<double>(stats.wait_ns) / 1000000.0, resources.c_str(), sources.c_str(),
+		             slots.c_str());
 	}
 }
 

@@ -1167,6 +1167,7 @@ bool SrtTapeWalker::RefreshFlatBuffer(const ResourcePlan& program, std::vector<u
 	if (!program.srt_plan_complete) return false;
 	const auto refresh = [&](uint32_t slot) {
 		if (slot >= m_tape.slots.size()) return false;
+		const SrtReadSlotScope slot_scope(slot);
 		const auto& read = m_tape.slots[slot];
 		if (!SrtGpuChainEnabled()) {
 			const bool clean = read.flat_clean;

@@ -949,6 +949,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	if (!m_program.srt_plan_complete) return false;
 	const auto refresh = [&](uint32_t slot) {
 		if (slot >= m_program.srt_reads.size()) return false;
+		const SrtReadSlotScope slot_scope(slot);
 		const auto& read = m_program.srt_reads[slot];
 		if (!SrtGpuChainEnabled()) {
 			const auto* inst = read.value.ResolveInstruction();
