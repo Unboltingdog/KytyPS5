@@ -1614,7 +1614,8 @@ private:
 			if (keep) m_program.srt_reads.push_back({Value(read), slot});
 			const bool hybrid = allow_hybrids && read->GetOpcode() == ValueOpcode::LoadAddressU32 &&
 			                    (keep || m_program.srt_reads[slot].gpu_flag != UINT32_MAX) &&
-			                    !descriptor_memory_indices.contains(flags.index) && FeedsOnlyShaderData(*read);
+			                    !descriptor_memory_indices.contains(flags.index) &&
+			                    FeedsOnlyShaderData(*read, SrtGpuChainBranchesEnabled());
 			if (allow_hybrids) memory.planning_only = !hybrid;
 			if (allow_hybrids) {
 				const char* reason = nullptr;
@@ -1801,7 +1802,9 @@ private:
 	}
 
 	// A pending hybrid read is zero on the CPU, so no resource or control-flow decision may depend on it.
-	bool FeedsOnlyShaderData(const Inst& read) const {
+	// allow_branches (KYTY_FIX_SRT_GPU_CHAIN_BRANCHES): a block condition may depend on it too; the walker follows
+	// both successors while the producer is pending.
+	bool FeedsOnlyShaderData(const Inst& read, bool allow_branches = false) const {
 		std::vector<const Inst*> values {&read};
 		std::unordered_set<const Inst*> seen {&read};
 		for (size_t index = 0; index < values.size(); ++index) {
@@ -1814,7 +1817,9 @@ private:
 			}
 		}
 		for (const auto* block: m_program.blocks) {
-			for (const auto value: {block->condition, block->indirect_target}) {
+			for (const bool target: {false, true}) {
+				if (!target && allow_branches) continue;
+				const auto value = target ? block->indirect_target : block->condition;
 				if (value.IsEmpty()) continue;
 				const auto* inst = value.Resolve().TryInstruction();
 				if (inst != nullptr && seen.contains(inst)) return false;

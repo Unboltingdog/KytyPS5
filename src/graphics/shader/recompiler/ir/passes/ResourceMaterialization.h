@@ -121,6 +121,12 @@ private:
 	uint64_t m_previous_hash = 0;
 	uint32_t m_previous_slot = UINT32_MAX;
 };
+// KYTY_FIX_SRT_GPU_CHAIN_BRANCHES=1 (default off, needs KYTY_FIX_SRT_GPU_CHAIN=1): a scalar load that feeds only
+// shader data and branch conditions may keep its GPU path. While its producer is pending (its flat GPU flag is set,
+// ResourceBlock::gpu_flags) the walker follows both successors, the existing unknown-condition rule, instead of
+// waiting for the value.
+bool SrtGpuChainBranchesEnabled();
+void SetSrtGpuChainBranchesOverride(std::optional<bool> enabled);
 bool ProbeSrtGpuChain(uint64_t address, uint64_t size);
 
 using OrdinaryReadHook = bool (*)(uint64_t vaddr, void* data, uint64_t size);

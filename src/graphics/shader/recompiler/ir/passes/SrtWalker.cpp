@@ -1023,7 +1023,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		auto& predicate = m_clean_evaluator != nullptr ? *m_clean_evaluator : *this;
 		if (!block.condition.IsEmpty() &&
 		    (m_runtime.read_specialization_memory != nullptr || !m_program.capture_specialization_reads) &&
-		    predicate.Evaluate(block.condition, condition)) {
+		    predicate.Evaluate(block.condition, condition) && !GpuFlagPending(block, flat)) {
 			pending.push_back(block.successors[condition != 0u ? 0u : 1u]);
 		} else {
 			pending.insert(pending.end(), block.successors.begin(), block.successors.end());

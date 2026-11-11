@@ -3148,6 +3148,119 @@ void TestGpuScalarChainOnlyShaderData() {
   }
 }
 
+// KYTY_FIX_SRT_GPU_CHAIN_BRANCHES: a scalar read that feeds only a block condition keeps its GPU path (resource
+// counts unchanged); while its producer is pending the walker follows both successors instead of reading it.
+// Off, or for an indirect target, it stays flat.
+void TestGpuScalarChainBranches() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  SetSrtGpuChainOverride(true);
+  struct Restore {
+    ~Restore() {
+      SetSrtGpuChainOverride(std::nullopt);
+      SetSrtGpuChainBranchesOverride(std::nullopt);
+      SetSrtGpuDependencyHook(nullptr);
+    }
+  } restore;
+  static bool pending = false;
+  SetSrtGpuDependencyHook(+[](uint64_t address, uint64_t, SrtGpuDependency &result) {
+    if (address != 0x1000u) return false;
+    result.pending = pending;
+    return true;
+  });
+  for (const bool branches : {false, true}) {
+    SetSrtGpuChainBranchesOverride(branches);
+    Fixture fixture;
+    const auto base = fixture.Address(fixture.UserData(0), fixture.UserData(1), 4);
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarAddress;
+    const auto read = fixture.Emit(ValueOpcode::LoadAddressU32,
+                                   {base, Value(0u), Value(0u), Value(true)},
+                                   fixture.AddMemory(scalar, 4));
+    auto *taken = fixture.AddBlock();
+    auto *skipped = fixture.AddBlock();
+    fixture.block->condition = fixture.Emit(ValueOpcode::INotEqual32, {read, Value(0u)});
+    fixture.block->terminator.kind = CFG::TerminatorKind::ConditionalBranch;
+    fixture.block->terminator.true_block = taken;
+    fixture.block->terminator.false_block = skipped;
+    for (auto *target : {taken, skipped}) {
+      const uint32_t user = target == taken ? 2u : 6u;
+      const auto handle = fixture.Emit(
+          ValueOpcode::GetBufferResource,
+          {fixture.Emit(ValueOpcode::GetUserData, {Value(static_cast<ScalarReg>(user))}, 0, target),
+           Value(0u), Value(64u), Value(0u)},
+          MemoryFlags{0, 0x20u}, target);
+      MemoryInfo memory;
+      memory.kind = ResourceKind::Buffer;
+      fixture.Emit(ValueOpcode::LoadBufferU32,
+                   {handle, Value(0u), Value(0u), Value(0u), Value(true)},
+                   fixture.AddMemory(memory, 0x20u), target);
+    }
+    fixture.PlanAndTrack();
+    auto plan = ExtractResourcePlan(fixture.program);
+    Check(plan.info.buffers.size() == 2, "branch-fed chain read changed the buffer count");
+    if (!branches) {
+      Check(plan.srt_reads.size() == 1 && plan.srt_reads[0].gpu_flag == UINT32_MAX,
+            "branch-fed scalar read became hybrid without KYTY_FIX_SRT_GPU_CHAIN_BRANCHES");
+      continue;
+    }
+    Check(plan.srt_reads.size() == 2 && plan.srt_reads[0].gpu_flag == 1u &&
+              plan.srt_reads[1].gpu_flag_slot,
+          "branch-fed scalar read did not keep its GPU path");
+    Check(plan.srt_tape != nullptr || !SrtTapeEnabled(), "branch-fed GPU chain plan did not build its tape");
+    std::array<uint32_t, 10> user_data{0x1000u, 0u, 0x2000u, 0u, 0u, 0u, 0x3000u, 0u, 0u, 0u};
+    for (const bool producer_pending : {false, true}) {
+      pending = producer_pending;
+      TestMemory memory;
+      memory.words[0] = 0u; // condition false: only the skipped successor when the read is exact
+      const SrtRuntime runtime{.user_data = user_data,
+                               .read_memory = ReadTestMemory,
+                               .userdata = &memory,
+                               .read_specialization_memory = ReadTestMemory};
+      std::vector<uint32_t> flat;
+      if (plan.srt_tape != nullptr) {
+        // The tape (the game's walker) and the reference walker agree.
+        SrtTapeWalker tape(*plan.srt_tape, runtime, 0);
+        Check(tape.RefreshFlatBuffer(plan, flat), "branch-fed GPU chain tape refresh failed");
+        const auto tape_visited = plan.ThreadScratch().visited_blocks;
+        Check(tape_visited == (producer_pending ? std::vector<uint8_t>{1, 1, 1}
+                                                : std::vector<uint8_t>{1, 0, 1}),
+              "tape walker did not follow the branch-fed GPU flag");
+        memory.reads = 0;
+      }
+      SrtWalker walker(plan, runtime);
+      Check(walker.RefreshFlatBuffer(flat), "branch-fed GPU chain refresh failed");
+      const auto &visited = plan.ThreadScratch().visited_blocks;
+      if (producer_pending) {
+        Check(memory.reads == 0 && flat == std::vector<uint32_t>{0u, 1u} &&
+                  visited == std::vector<uint8_t>{1, 1, 1},
+              "pending branch-fed read was read on the host or did not follow both successors");
+      } else {
+        Check(flat[1] == 0u && visited == std::vector<uint8_t>{1, 0, 1},
+              "completed branch-fed read did not decide its branch exactly");
+      }
+    }
+  }
+  {
+    SetSrtGpuChainBranchesOverride(true);
+    Fixture fixture;
+    const auto base = fixture.Address(fixture.UserData(0), fixture.UserData(1), 4);
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarAddress;
+    const auto read = fixture.Emit(ValueOpcode::LoadAddressU32,
+                                   {base, Value(0u), Value(0u), Value(true)},
+                                   fixture.AddMemory(scalar, 4));
+    auto *target = fixture.AddBlock();
+    fixture.block->indirect_target = read;
+    fixture.block->terminator.kind = CFG::TerminatorKind::IndirectBranch;
+    fixture.block->terminator.cases = {{0u, target}};
+    fixture.block->terminator.indexed = true;
+    fixture.PlanAndTrack();
+    const auto plan = ExtractResourcePlan(fixture.program);
+    Check(plan.srt_reads.size() == 1 && plan.srt_reads[0].gpu_flag == UINT32_MAX,
+          "indirect-target scalar read became hybrid with KYTY_FIX_SRT_GPU_CHAIN_BRANCHES");
+  }
+}
+
 void TestGpuScalarChainSharedDescriptorMemory() {
   SetSrtGpuChainOverride(true);
   struct Restore {
@@ -4699,6 +4812,7 @@ int main() {
     Run("GPU scalar chain", TestGpuScalarChain);
     Run("GPU scalar chain data uses", TestGpuScalarChainOnlyShaderData);
     Run("GPU scalar chain shared descriptor memory", TestGpuScalarChainSharedDescriptorMemory);
+    Run("GPU scalar chain branch conditions", TestGpuScalarChainBranches);
     Run("GPU scalar chain descriptor phi/select", TestGpuScalarChainDescriptorPhiSelect);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("writable descriptor phi", TestWritableDescriptorPhi);

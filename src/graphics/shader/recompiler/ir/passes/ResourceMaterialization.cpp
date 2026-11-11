@@ -41,6 +41,7 @@ std::atomic_int g_indirect_table_slots_override {-1};
 std::atomic_int g_srt_gpu_range_override {-1};
 std::atomic_int g_srt_gpu_dependent_override {-1};
 std::atomic_int g_srt_gpu_chain_override {-1};
+std::atomic_int g_srt_gpu_chain_branches_override {-1};
 } // namespace
 
 bool IndirectTableSlots() {
@@ -97,6 +98,22 @@ bool SrtGpuChainEnabled() {
 
 void SetSrtGpuChainOverride(std::optional<bool> enabled) {
 	g_srt_gpu_chain_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1, std::memory_order_relaxed);
+}
+
+bool SrtGpuChainBranchesEnabled() {
+	if (!SrtGpuChainEnabled()) return false;
+	const int override = g_srt_gpu_chain_branches_override.load(std::memory_order_relaxed);
+	if (override >= 0) return override != 0;
+	static const bool enabled = [] {
+		const char* value = Common::ShaderEnv::Read("KYTY_FIX_SRT_GPU_CHAIN_BRANCHES");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
+void SetSrtGpuChainBranchesOverride(std::optional<bool> enabled) {
+	g_srt_gpu_chain_branches_override.store(enabled.has_value() ? (*enabled ? 1 : 0) : -1,
+	                                        std::memory_order_relaxed);
 }
 
 namespace {
@@ -2170,6 +2187,34 @@ static std::vector<ResourceBlock> ResourceControlFlow(const Program& program, co
 		if (a == b || (inert_a && blocks[a].successors[0] == b) || (inert_b && blocks[b].successors[0] == a) ||
 		    (inert_a && inert_b && blocks[a].successors[0] == blocks[b].successors[0])) {
 			block.condition = Value {};
+		}
+	}
+	if (SrtGpuChainBranchesEnabled()) {
+		// KYTY_FIX_SRT_GPU_CHAIN_BRANCHES: the GPU flags a block condition depends on (before the predicate clone,
+		// which folds the flag away). A hybrid read reaches a condition as SelectU32(flag != 0, load, flat); its
+		// ReadConst of a gpu_flag_slot names the flag.
+		for (auto& block: blocks) {
+			if (block.condition.IsEmpty()) continue;
+			std::vector<const Inst*> values;
+			std::unordered_set<const Inst*> seen;
+			const auto push = [&](Value value) {
+				const auto* inst = value.Resolve().TryInstruction();
+				if (inst != nullptr && seen.insert(inst).second) values.push_back(inst);
+			};
+			push(block.condition);
+			for (size_t index = 0; index < values.size(); ++index) {
+				const auto* inst = values[index];
+				if (inst->GetOpcode() == ValueOpcode::ReadConst && inst->NumArgs() >= 2) {
+					const auto slot = inst->Arg(1).Resolve();
+					if (slot.IsImmediate() && slot.GetType() == Type::U32 && slot.U32() < program.srt_reads.size() &&
+					    program.srt_reads[slot.U32()].gpu_flag_slot) {
+						const auto flag = program.srt_reads[slot.U32()].flat_offset;
+						if (std::ranges::find(block.gpu_flags, flag) == block.gpu_flags.end())
+							block.gpu_flags.push_back(flag);
+					}
+				}
+				for (size_t arg = 0; arg < inst->NumArgs(); ++arg) push(inst->Arg(arg));
+			}
 		}
 	}
 	for (auto& block: blocks) block.condition = predicate(block.condition);

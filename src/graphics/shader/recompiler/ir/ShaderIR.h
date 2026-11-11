@@ -1026,6 +1026,9 @@ struct ResourceBlock {
 	std::vector<uint32_t> successors;
 	std::vector<uint32_t> sources;
 	std::vector<uint32_t> srt_reads;
+	// KYTY_FIX_SRT_GPU_CHAIN_BRANCHES: flat offsets of the GPU flags the condition depends on. While one is set
+	// the read is pending on the GPU and the walker follows every successor.
+	std::vector<uint32_t> gpu_flags;
 };
 
 // Stable shader metadata consumed by the renderer after native IR has been discarded.

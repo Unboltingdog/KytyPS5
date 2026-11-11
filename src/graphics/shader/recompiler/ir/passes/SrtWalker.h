@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
@@ -154,6 +155,14 @@ public:
 private:
 	uint32_t m_previous;
 };
+
+// KYTY_FIX_SRT_GPU_CHAIN_BRANCHES: a block condition that depends on a read still pending on the GPU is unknown.
+inline bool GpuFlagPending(const ResourceBlock& block, const std::vector<uint32_t>& flat) {
+	for (const auto flag: block.gpu_flags) {
+		if (flag < flat.size() && flat[flag] != 0u) return true;
+	}
+	return false;
+}
 
 void NoteSrtReadRange(uint64_t vaddr, uint64_t size);
 void NoteSrtReadWait(uint64_t wait_ns);
